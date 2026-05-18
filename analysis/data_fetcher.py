@@ -26,8 +26,22 @@ def _check_eastmoney():
     if _SOURCE_STATUS["eastmoney"] is not None:
         return _SOURCE_STATUS["eastmoney"]
     try:
-        df = ak.stock_zh_a_spot_em()
-        _SOURCE_STATUS["eastmoney"] = len(df) > 100
+        import requests as _req
+        s = _req.Session()
+        s.trust_env = False
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://quote.eastmoney.com/",
+        })
+        r = s.get(
+            "https://push2delay.eastmoney.com/api/qt/clist/get",
+            params={"pn": "1", "pz": "10", "po": "1", "np": "1", "fltt": "2", "invt": "2",
+                    "fid": "f3", "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                    "fields": "f12,f14"},
+            timeout=15
+        )
+        data = r.json()
+        _SOURCE_STATUS["eastmoney"] = data.get("data", {}).get("total", 0) > 100
     except Exception:
         _SOURCE_STATUS["eastmoney"] = False
     logger.info(f"EastMoney source: {'OK' if _SOURCE_STATUS['eastmoney'] else 'DOWN'}")
@@ -38,8 +52,12 @@ def _check_sina():
     if _SOURCE_STATUS["sina"] is not None:
         return _SOURCE_STATUS["sina"]
     try:
-        df = ak.stock_zh_a_spot()
-        _SOURCE_STATUS["sina"] = len(df) > 100
+        import requests as _req
+        s = _req.Session()
+        s.trust_env = False
+        s.headers.update({"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+        r = s.get("https://hq.sinajs.cn/list=sh600000", timeout=10)
+        _SOURCE_STATUS["sina"] = "var hq_str" in r.text
     except Exception:
         _SOURCE_STATUS["sina"] = False
     return _SOURCE_STATUS["sina"]
@@ -81,36 +99,82 @@ def fetch_stock_spot():
 
 
 def _fetch_stock_spot_em():
-    """东方财富通道：字段最全"""
-    df = ak.stock_zh_a_spot_em()
+    """东方财富通道：使用 push2delay 端点分页获取，字段最全"""
+    import requests as _req
 
-    rename_map = {
-        "代码": "code",
-        "名称": "name",
-        "最新价": "close",
-        "涨跌幅": "pct_chg",
-        "成交量": "volume",
-        "成交额": "amount",
-        "振幅": "amplitude",
-        "最高": "high",
-        "最低": "low",
-        "今开": "open",
-        "昨收": "pre_close",
-        "量比": "volume_ratio",
-        "换手率": "turnover",
-        "市盈率-动态": "pe",
-        "市净率": "pb",
-        "总市值": "total_mv",
-        "流通市值": "float_mv",
+    s = _req.Session()
+    s.trust_env = False
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+    })
+
+    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
+    base_params = {
+        "pz": "100",
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+        "fields": "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f23",
     }
 
-    df = df.rename(columns=rename_map)
-    numeric_cols = [
-        "close", "pct_chg", "volume", "amount", "amplitude",
-        "high", "low", "open", "pre_close", "volume_ratio",
-        "turnover", "pe", "pb", "total_mv", "float_mv"
-    ]
-    df = safe_numeric(df, numeric_cols)
+    all_rows = []
+    page = 1
+    total = None
+
+    while True:
+        params = {**base_params, "pn": str(page)}
+        resp = s.get(url, params=params, timeout=30)
+        data = resp.json()
+
+        if data.get("data") is None:
+            raise RuntimeError(f"EastMoney 接口返回异常：{resp.text[:200]}")
+
+        if total is None:
+            total = data["data"].get("total", 0)
+
+        diff = data["data"].get("diff") or []
+        all_rows.extend(diff)
+
+        if len(all_rows) >= total:
+            break
+        page += 1
+
+    df = pd.DataFrame(all_rows)
+    if df.empty:
+        raise RuntimeError("EastMoney 返回空数据")
+
+    col_map = {
+        "f12": "code",
+        "f14": "name",
+        "f2": "close",
+        "f3": "pct_chg",
+        "f5": "volume",
+        "f6": "amount",
+        "f7": "amplitude",
+        "f8": "turnover",
+        "f9": "pe",
+        "f10": "volume_ratio",
+        "f15": "high",
+        "f16": "low",
+        "f17": "open",
+        "f18": "pre_close",
+        "f20": "total_mv",
+        "f21": "float_mv",
+        "f23": "pb",
+    }
+    df = df.rename(columns=col_map)
+
+    df["code"] = df["code"].astype(str)
+    for col in ["close", "pct_chg", "volume", "amount", "amplitude",
+                "high", "low", "open", "pre_close", "volume_ratio",
+                "turnover", "pe", "pb", "total_mv", "float_mv"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df = df.dropna(subset=["code", "name", "close", "pct_chg"])
     df["data_source"] = "eastmoney"
     return df
@@ -222,32 +286,68 @@ def fetch_concept_boards():
     return _fetch_boards_ths("概念", ak.stock_board_concept_name_ths)
 
 
-def _fetch_boards_em(board_type_label, fetch_fn):
-    df = fetch_fn()
+def _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500):
+    """通用 EastMoney push2delay 数据获取"""
+    import requests as _req
 
-    rename_map = {
-        "板块名称": "board_name",
-        "最新价": "price",
-        "涨跌幅": "pct_chg",
-        "总市值": "total_mv",
-        "换手率": "turnover",
-        "上涨家数": "up_count",
-        "下跌家数": "down_count",
-        "领涨股票": "leader",
-        "领涨股票-涨跌幅": "leader_pct_chg",
+    s = _req.Session()
+    s.trust_env = False
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://quote.eastmoney.com/",
+    })
+
+    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
+    params = {
+        "pn": "1",
+        "pz": str(pz),
+        "po": "1",
+        "np": "1",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": fs_filter,
+        "fields": fields,
     }
+
+    resp = s.get(url, params=params, timeout=30)
+    data = resp.json()
+    rows = data.get("data", {}).get("diff") or []
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
     df = df.rename(columns=rename_map)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
+def _fetch_boards_em(board_type_label, fetch_fn):
+    """行业/概念板块数据，使用 push2delay 端点"""
+    fs_filter = "m:90+t:2" if board_type_label == "行业" else "m:90+t:3"
+    fields = "f2,f3,f4,f6,f8,f12,f14,f20,f104,f105,f128,f136"
+    rename_map = {
+        "f12": "board_code",
+        "f14": "board_name",
+        "f2": "price",
+        "f3": "pct_chg",
+        "f6": "amount",
+        "f8": "turnover",
+        "f20": "total_mv",
+        "f104": "up_count",
+        "f105": "down_count",
+        "f128": "leader",
+        "f136": "leader_pct_chg",
+    }
+    numeric_cols = ["price", "pct_chg", "amount", "total_mv", "turnover",
+                    "up_count", "down_count", "leader_pct_chg"]
+    df = _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500)
     df["board_type"] = board_type_label
-
-    numeric_cols = [
-        "price", "pct_chg", "total_mv", "turnover",
-        "up_count", "down_count", "leader_pct_chg"
-    ]
-    df = safe_numeric(df, numeric_cols)
-
     if "amount" not in df.columns:
         df["amount"] = np.nan
-
     df["data_source"] = "eastmoney"
     return df
 
