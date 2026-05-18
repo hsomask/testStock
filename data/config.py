@@ -25,5 +25,6 @@ REPORT_DIR = BASE_DIR / "reports"
 DATABASE_DSN = os.getenv("DATABASE_DSN", "")
 
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
+FEISHU_SECRET = os.getenv("FEISHU_SECRET", "")
 MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
 MINIMAX_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
