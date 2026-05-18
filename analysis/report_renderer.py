@@ -116,6 +116,11 @@ def render_board_table(df, max_rows=10):
 def render_ratio_change_table(ratio_df, max_rows=10):
     if ratio_df is None or ratio_df.empty:
         return "暂无历史数据，需积累3-5个交易日\n"
+
+    # 检查成交额数据是否可用
+    if "ratio_today" in ratio_df.columns and ratio_df["ratio_today"].notna().sum() == 0:
+        return "板块成交额暂缺，无法展示成交占比变化\n"
+
     lines = []
     for _, row in ratio_df.head(max_rows).iterrows():
         name = row.get("board_name", "-")
@@ -251,7 +256,7 @@ def render_stock_pool_pro(df):
         buy_high = row.get("buy_high", row.get("observe_high", "-"))
         target = row.get("target", row.get("pressure_price", "-"))
         stop_loss = row.get("stop_loss", row.get("invalid_price", "-"))
-        lines.append(f"区间：{buy_low}~{buy_high} | 目标：{target} | 止损：{stop_loss}")
+        lines.append(f"区间：{buy_low}~{buy_high} | 参考压力位：{target} | 风险失效位：{stop_loss}")
         lines.append(f"持仓周期：{row['hold_days']} | 仓位：{row.get('position', '-')}")
         lines.append(f"入选原因：{row.get('entry_reason', row.get('reason', ''))}")
         risk_reasons = row.get("risk_reasons", "")
@@ -396,6 +401,9 @@ def render_beginner_report(
     # 6. 今日观察池
     lines.append("## 今日观察池")
     lines.append("")
+    if not quality.get("has_volume_ratio", True):
+        lines.append("> **注意**：当前数据源缺少量比字段，量比相关筛选已自动降级，本观察池可信度下降。")
+        lines.append("")
     lines.append("> 以下标的为基于数据规则筛选的观察对象，风险等级和操作信号仅供参考。")
     lines.append("")
 
@@ -563,12 +571,15 @@ def render_pro_report(
     lines.append("")
 
     # 观察池（5个）
+    if not quality.get("has_volume_ratio", True):
+        lines.append("> **注意**：当前数据源缺少量比字段，量比相关筛选已自动降级，本观察池可信度下降。")
+        lines.append("")
     pool_sections = [
-        ("一次起爆", "选股池 · 一次起爆"),
-        ("N字异动", "选股池 · N字异动"),
-        ("二次起爆", "选股池 · 二次起爆"),
-        ("板块联动", "选股池 · 板块联动"),
-        ("短线强势", "选股池 · 短线强势"),
+        ("一次起爆", "观察池 · 一次起爆"),
+        ("N字异动", "观察池 · N字异动"),
+        ("二次起爆", "观察池 · 二次起爆"),
+        ("板块联动", "观察池 · 板块联动"),
+        ("短线强势", "观察池 · 短线强势"),
     ]
     for pool_key, header in pool_sections:
         lines.append(f"## {header} | {date_display}")

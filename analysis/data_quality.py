@@ -194,6 +194,7 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
         items.append({"item": "均线数据", "status": "不可用", "detail": "无均线数据字段"})
 
     # 10. 数据源检测
+    has_volume_ratio = True
     if stock_df is not None and not stock_df.empty and "data_source" in stock_df.columns:
         sources = stock_df["data_source"].unique().tolist()
         source_str = ",".join(sources)
@@ -203,6 +204,19 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
             items.append({"item": "数据源", "status": "降级", "detail": f"当前使用：{source_str}（部分字段缺失）"})
     else:
         items.append({"item": "数据源", "status": "未知", "detail": "无法确定数据源"})
+
+    # 11. 量比字段检测
+    if stock_df is not None and not stock_df.empty:
+        if "volume_ratio" not in stock_df.columns or stock_df["volume_ratio"].notna().sum() < 100:
+            has_volume_ratio = False
+            score -= 10
+            items.append({"item": "量比字段", "status": "降级", "detail": "当前数据源缺少量比字段，量能筛选已降级"})
+            issues.append("当前数据源缺少量比字段，量比相关筛选已自动降级，观察池可信度下降。")
+        else:
+            items.append({"item": "量比字段", "status": "正常", "detail": "量比数据可用"})
+    else:
+        has_volume_ratio = False
+        items.append({"item": "量比字段", "status": "不可用", "detail": "无个股数据"})
 
     # 确保分数在 0-100
     confidence_score = max(0, min(100, score))
@@ -217,4 +231,5 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
         "has_stock_board_map": has_stock_board_map,
         "stock_board_map_days_old": stock_board_map_days_old,
         "ma_missing_ratio": ma_missing_ratio,
+        "has_volume_ratio": has_volume_ratio,
     }

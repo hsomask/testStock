@@ -5,16 +5,22 @@
 import pandas as pd
 import numpy as np
 import psycopg2
+import logging
 from datetime import datetime
 
 import akshare as ak
 from data.config import DATABASE_DSN
 
+logger = logging.getLogger(__name__)
 
-def fetch_total_market_amount():
-    stock_df = ak.stock_zh_a_spot_em()
-    stock_df["成交额"] = pd.to_numeric(stock_df["成交额"], errors="coerce")
-    return stock_df["成交额"].sum()
+
+def fetch_total_market_amount(stock_df):
+    """从个股行情汇总全市场成交额"""
+    if stock_df is None or stock_df.empty:
+        return 0
+    if "amount" not in stock_df.columns:
+        return 0
+    return stock_df["amount"].sum()
 
 
 def fetch_industry_board_today():
@@ -29,7 +35,13 @@ def fetch_concept_board_today():
     return df
 
 
-def normalize_board_df(df, total_amount):
+def normalize_board_df(board_df, stock_df, total_amount, db_conn):
+    """
+    基于成分股聚合计算板块成交额。
+
+    优先使用 stock_board_map 表获取成分股，按 code 匹配 stock_df 的 amount 汇总。
+    如果 stock_board_map 不可用，则 report_renderer 显示"板块成交额暂缺"。
+    """
     rename_map = {
         "板块名称": "board_name",
         "板块代码": "board_code",
@@ -42,16 +54,63 @@ def normalize_board_df(df, total_amount):
         "领涨股票-涨跌幅": "leader_pct_chg",
     }
 
-    df = df.rename(columns=rename_map)
+    board_df = board_df.rename(columns=rename_map)
 
-    for col in ["pct_chg", "amount", "turnover", "up_count", "down_count", "leader_pct_chg"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["pct_chg", "turnover", "up_count", "down_count", "leader_pct_chg"]:
+        if col in board_df.columns:
+            board_df[col] = pd.to_numeric(board_df[col], errors="coerce")
 
-    if "amount" not in df.columns:
-        df["amount"] = None
+    # 尝试从 stock_board_map 计算板块成交额
+    map_df = pd.DataFrame()
+    try:
+        cur = db_conn.cursor()
+        cur.execute("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='stock_board_map')")
+        if cur.fetchone()[0]:
+            map_df = pd.read_sql("SELECT code, board_type, board_name FROM stock_board_map", db_conn)
+        cur.close()
+    except Exception as e:
+        logger.exception(f"读取 stock_board_map 失败：{e}")
 
-    df["amount_ratio"] = df["amount"] / total_amount
+    if map_df.empty:
+        logger.warning("stock_board_map 为空，无法计算板块成交占比")
+        board_df["amount"] = None
+        board_df["amount_ratio"] = None
+    else:
+        # 合并成分股与个股行情
+        merged = map_df.merge(
+            stock_df[["code", "amount", "pct_chg"]].copy(),
+            on="code",
+            how="left"
+        )
+
+        board_amount = (
+            merged
+            .groupby(["board_type", "board_name"], as_index=False)
+            .agg(
+                amount=("amount", "sum"),
+                member_count=("code", "count"),
+                valid_amount_count=("amount", "count")
+            )
+        )
+
+        # 计算板块涨幅（成分股涨幅均值）
+        board_pct = (
+            merged
+            .groupby(["board_type", "board_name"], as_index=False)
+            .agg(calc_pct_chg=("pct_chg", "mean"))
+        )
+
+        # 合并成交额和涨幅
+        board_df = board_df.merge(
+            board_amount[["board_type", "board_name", "amount", "member_count", "valid_amount_count"]],
+            on=["board_type", "board_name"],
+            how="left"
+        )
+
+        if total_amount > 0:
+            board_df["amount_ratio"] = board_df["amount"] / total_amount
+        else:
+            board_df["amount_ratio"] = None
 
     keep_cols = [
         "board_type", "board_code", "board_name", "pct_chg",
@@ -61,13 +120,16 @@ def normalize_board_df(df, total_amount):
     ]
 
     for col in keep_cols:
-        if col not in df.columns:
-            df[col] = None
+        if col not in board_df.columns:
+            board_df[col] = None
 
-    return df[keep_cols]
+    return board_df[keep_cols]
 
 
 def save_board_amount_ratio(df, trade_date):
+    if not DATABASE_DSN:
+        logger.warning("DATABASE_DSN 未设置，跳过数据库写入")
+        return
     conn = psycopg2.connect(DATABASE_DSN)
     cur = conn.cursor()
 
@@ -115,23 +177,39 @@ def save_board_amount_ratio(df, trade_date):
 def update_board_history():
     trade_date = datetime.now().strftime("%Y-%m-%d")
 
-    total_amount = fetch_total_market_amount()
+    if not DATABASE_DSN:
+        logger.warning("DATABASE_DSN 未设置，数据库功能跳过")
+        return
+
+    conn = psycopg2.connect(DATABASE_DSN)
+
+    from analysis.data_fetcher import fetch_stock_spot
+    stock_df = fetch_stock_spot()
+    total_amount = fetch_total_market_amount(stock_df)
 
     industry_df = fetch_industry_board_today()
     concept_df = fetch_concept_board_today()
 
-    industry_df = normalize_board_df(industry_df, total_amount)
-    concept_df = normalize_board_df(concept_df, total_amount)
+    industry_df = normalize_board_df(industry_df, stock_df, total_amount, conn)
+    concept_df = normalize_board_df(concept_df, stock_df, total_amount, conn)
 
     all_df = pd.concat([industry_df, concept_df], ignore_index=True)
 
+    conn.close()
+
     save_board_amount_ratio(all_df, trade_date)
 
-    print(f"板块成交占比已更新：{trade_date}，共 {len(all_df)} 条")
+    valid_count = all_df["amount"].notna().sum()
+    if valid_count == 0:
+        print("[警告] 板块映射数据暂缺，成交占比变化暂不可用")
+    print(f"板块成交占比已更新：{trade_date}，共 {len(all_df)} 条（{valid_count} 条有成交额数据）")
 
 
 def calc_board_ratio_change(board_type="行业", window=3):
     """计算板块成交占比 N日变化，返回当日数据附带 ratio_today, ratio_before, ratio_change"""
+    if not DATABASE_DSN:
+        logger.warning("DATABASE_DSN 未设置")
+        return pd.DataFrame()
     conn = psycopg2.connect(DATABASE_DSN)
 
     sql = """
@@ -150,7 +228,6 @@ def calc_board_ratio_change(board_type="行业", window=3):
     df["trade_date"] = pd.to_datetime(df["trade_date"])
     df["amount_ratio"] = pd.to_numeric(df["amount_ratio"], errors="coerce")
 
-    # 获取最近 N 个交易日
     all_dates = sorted(df["trade_date"].unique())
     if len(all_dates) < window:
         return pd.DataFrame()

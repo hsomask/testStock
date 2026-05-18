@@ -157,6 +157,10 @@ def add_common_fields(df, strategy_name, style="short", market_score=None):
             "action_signal": risk_info.get("action_signal", "数据不足") if risk_info else "数据不足",
             "risk_score_val": risk_info.get("risk_score", 8) if risk_info else 8,
             "risk_reasons": "\n".join(f"{i+1}. {r}" for i, r in enumerate(risk_info.get("risk_reasons", []))) if risk_info else "",
+            "industry_tags": row.get("industry_tags", []),
+            "concept_tags": row.get("concept_tags", []),
+            "hot_board_hits": row.get("hot_board_hits", []),
+            "hot_board_hit_count": row.get("hot_board_hit_count", 0),
         }
         rows.append(row_dict)
 
@@ -412,24 +416,28 @@ def main():
     parser.add_argument("--indicator", type=str, default="n_latent")
     args = parser.parse_args()
 
-    from analysis.data_fetcher import fetch_stock_spot, enrich_stock_indicators
+    from analysis.data_fetcher import fetch_stock_spot, enrich_stock_indicators, fetch_index_spot
+    from analysis.market import analyze_market
 
     stock_df = enrich_stock_indicators(fetch_stock_spot())
+    index_df = fetch_index_spot()
+    market_result = analyze_market(stock_df, index_df)
+    market_score = market_result["score"]
 
     indicators = args.indicator.split(",")
 
     result_map = {}
 
     if "n_latent" in indicators:
-        result_map["N字异动"] = select_n_latent(stock_df)
+        result_map["N字异动"] = select_n_latent(stock_df, market_score=market_score)
     if "n_breakout" in indicators:
-        result_map["二次起爆"] = select_n_breakout(stock_df)
+        result_map["二次起爆"] = select_n_breakout(stock_df, market_score=market_score)
     if "short_strong" in indicators:
-        result_map["短线强势"] = select_short_strong(stock_df)
+        result_map["短线强势"] = select_short_strong(stock_df, market_score=market_score)
     if "first_breakout" in indicators:
-        result_map["一次起爆"] = select_first_breakout(stock_df)
+        result_map["一次起爆"] = select_first_breakout(stock_df, market_score=market_score)
     if "board_linkage" in indicators:
-        result_map["板块联动"] = select_board_linkage(stock_df)
+        result_map["板块联动"] = select_board_linkage(stock_df, market_score=market_score)
 
     for name, df in result_map.items():
         print(f"\n{name}")

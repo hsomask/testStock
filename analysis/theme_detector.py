@@ -49,6 +49,16 @@ def detect_main_themes(
         if "hot_board_hits" in s and isinstance(s["hot_board_hits"], list):
             pool_board_names.update(s["hot_board_hits"])
 
+    # 计算每个候选板块的观察池命中数
+    for board in candidates:
+        name = board.get("board_name", "")
+        hit_count = 0
+        for s in pool_stocks:
+            if "hot_board_hits" in s and isinstance(s["hot_board_hits"], list):
+                if name in s["hot_board_hits"]:
+                    hit_count += 1
+        board["pool_hit_count"] = hit_count
+
     # 为每个候选板块计算主线强度
     for board in candidates:
         score = 0
@@ -167,15 +177,16 @@ def _collect_candidates(industry_result, concept_result, board_ratio_changes):
                 }
                 candidates.append(board)
 
-    # 从成交占比变化数据中补充
+    # 从成交占比变化数据中补充（只处理 _up 结尾的递增数据）
     if board_ratio_changes:
         for key, ratio_df in board_ratio_changes.items():
             if ratio_df is None or ratio_df.empty:
                 continue
+            if not key.endswith("_up"):
+                continue
             window = 3 if "3d" in key else 5
             for _, row in ratio_df.iterrows():
                 name = row.get("board_name", "")
-                # 查找是否已在 candidates 中
                 for c in candidates:
                     if c["board_name"] == name:
                         if window == 3:
