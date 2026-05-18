@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  stock-report:
+    build: .
+    image: stock-ai-system:latest
+    env_file:
+      - .env
+    volumes:
+      - ./reports:/app/reports
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    network_mode: host
+    restart: "no"
