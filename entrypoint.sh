@@ -13,7 +13,14 @@ python -m analysis.daily_report --mode beginner --force
 echo "=== 生成专业版报告 ==="
 python -m analysis.daily_report --mode pro --force
 
-echo "=== 推送飞书消息 ==="
-python -m analysis.feishu_sender
+echo "=== 推送消息 ==="
+
+if [ "$PUSH_CHANNEL" = "email" ]; then
+    python -m analysis.email_sender || echo "[警告] 邮件推送失败，但报告已生成"
+elif [ "$PUSH_CHANNEL" = "feishu" ]; then
+    python -m analysis.feishu_sender || echo "[警告] 飞书推送失败，但报告已生成"
+else
+    echo "PUSH_CHANNEL=$PUSH_CHANNEL，跳过推送"
+fi
 
 echo "=== 完成 ==="

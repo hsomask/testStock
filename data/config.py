@@ -24,7 +24,16 @@ REPORT_DIR = BASE_DIR / "reports"
 
 DATABASE_DSN = os.getenv("DATABASE_DSN", "")
 
+PUSH_CHANNEL = os.getenv("PUSH_CHANNEL", "email")
+
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
 FEISHU_SECRET = os.getenv("FEISHU_SECRET", "")
+
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "465"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+EMAIL_TO = os.getenv("EMAIL_TO", "")
+
 MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
 MINIMAX_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
