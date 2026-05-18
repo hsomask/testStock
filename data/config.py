@@ -22,9 +22,7 @@ _requests.utils.getproxies = _getproxies_no_proxy
 
 REPORT_DIR = BASE_DIR / "reports"
 
-DATABASE_DSN = os.getenv("DATABASE_DSN")
-if not DATABASE_DSN:
-    raise RuntimeError("DATABASE_DSN 环境变量未设置")
+DATABASE_DSN = os.getenv("DATABASE_DSN", "")
 
 FEISHU_WEBHOOK = os.getenv("FEISHU_WEBHOOK", "")
 MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")

@@ -1,13 +1,16 @@
 """
 A 股每日分析报告主入口
 运行：
-  python -m analysis.daily_report                    # 默认 beginner 模式
-  python -m analysis.daily_report --mode pro         # 专业版
-  python -m analysis.daily_report --mode beginner    # 小白友好版
-  python -m analysis.daily_report --force            # 强制执行（非交易日也运行）
+  python -m analysis.daily_report
+  python -m analysis.daily_report --mode beginner
+  python -m analysis.daily_report --mode pro
+  python -m analysis.daily_report --force
 """
-import sys
+import argparse
+import logging
 import psycopg2
+
+logger = logging.getLogger(__name__)
 
 from analysis.data_fetcher import (
     get_trade_date,
@@ -37,19 +40,21 @@ def get_board_ratio_changes():
             for v in changes.values()
         )
         return changes if has_data else None
-    except Exception:
+    except Exception as e:
+        logger.exception(f"板块历史读取失败：{e}")
         return None
 
 
 def main():
-    force = "--force" in sys.argv
-    mode = "beginner"
-    for arg in sys.argv:
-        if arg.startswith("--mode="):
-            mode = arg.split("=", 1)[1]
-            if mode not in ("beginner", "pro"):
-                print(f"无效模式：{mode}，应为 beginner 或 pro")
-                return
+    parser = argparse.ArgumentParser(description="A 股每日分析报告")
+    parser.add_argument("--mode", choices=["beginner", "pro"], default="beginner",
+                        help="报告模式：beginner（小白友好版）或 pro（专业版）")
+    parser.add_argument("--force", action="store_true",
+                        help="强制执行（非交易日也运行）")
+    args = parser.parse_args()
+
+    force = args.force
+    mode = args.mode
 
     trade_date = get_trade_date()
 
@@ -88,8 +93,8 @@ def main():
     db_conn = None
     try:
         db_conn = psycopg2.connect(DATABASE_DSN)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception(f"数据库连接失败：{e}")
 
     quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn)
 
@@ -116,8 +121,8 @@ def main():
     if db_conn:
         try:
             db_conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"关闭数据库连接失败：{e}")
 
     # 生成报告
     report = render_daily_report(
@@ -154,9 +159,13 @@ def main():
             db_conn2.commit()
             cur.close()
             db_conn2.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"日报写入失败：{e}")
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
     main()
