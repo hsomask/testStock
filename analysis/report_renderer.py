@@ -128,7 +128,8 @@ def render_ratio_change_table(ratio_df, max_rows=10):
         ratio_today = row.get("ratio_today", np.nan)
         change = row.get("ratio_change_3d", row.get("ratio_change_5d", np.nan))
         ratio_str = f"{ratio_today * 100:.2f}%" if pd.notna(ratio_today) else "-"
-        lines.append(f"| {name} | {pct} | {ratio_str} | {fmt_pct(change, 2)} |")
+        change_str = f"{change * 100:+.2f}个百分点" if pd.notna(change) else "-"
+        lines.append(f"| {name} | {pct} | {ratio_str} | {change_str} |")
     return "\n".join(lines) + "\n"
 
 

@@ -73,6 +73,7 @@ def normalize_board_df(board_df, stock_df, total_amount, db_conn):
 
     if map_df.empty:
         logger.warning("stock_board_map 为空，无法计算板块成交占比")
+        logger.warning("本次 board_amount_ratio 将写入基础板块信息，但 amount 和 amount_ratio 为空")
         board_df["amount"] = None
         board_df["amount_ratio"] = None
     else:
@@ -99,6 +100,10 @@ def normalize_board_df(board_df, stock_df, total_amount, db_conn):
             .groupby(["board_type", "board_name"], as_index=False)
             .agg(calc_pct_chg=("pct_chg", "mean"))
         )
+
+        # 删除板块接口原始 amount 列，避免 merge 后出现 amount_x / amount_y
+        if "amount" in board_df.columns:
+            board_df = board_df.drop(columns=["amount"])
 
         # 合并成交额和涨幅
         board_df = board_df.merge(
@@ -201,8 +206,9 @@ def update_board_history():
 
     valid_count = all_df["amount"].notna().sum()
     if valid_count == 0:
-        print("[警告] 板块映射数据暂缺，成交占比变化暂不可用")
-    print(f"板块成交占比已更新：{trade_date}，共 {len(all_df)} 条（{valid_count} 条有成交额数据）")
+        print("[警告] 板块映射数据暂缺，本次未能计算成交额和成交占比。请先运行：python -m analysis.stock_board_mapper")
+    else:
+        print(f"板块成交占比已更新：{trade_date}，共 {len(all_df)} 条（{valid_count} 条有成交额数据）")
 
 
 def calc_board_ratio_change(board_type="行业", window=3):
@@ -283,4 +289,8 @@ def get_all_ratio_changes():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
     update_board_history()
