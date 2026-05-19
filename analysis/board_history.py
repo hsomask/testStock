@@ -24,13 +24,35 @@ def fetch_total_market_amount(stock_df):
 
 
 def fetch_industry_board_today():
-    df = ak.stock_board_industry_name_em()
+    from analysis.data_fetcher import _fetch_em_delay
+    fs_filter = "m:90+t:2"
+    fields = "f2,f3,f4,f6,f8,f12,f14,f20,f104,f105,f128,f136"
+    rename_map = {
+        "f12": "board_code", "f14": "board_name", "f2": "price",
+        "f3": "pct_chg", "f6": "amount", "f8": "turnover",
+        "f20": "total_mv", "f104": "up_count", "f105": "down_count",
+        "f128": "leader_name", "f136": "leader_pct_chg",
+    }
+    numeric_cols = ["price", "pct_chg", "amount", "total_mv", "turnover",
+                    "up_count", "down_count", "leader_pct_chg"]
+    df = _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500)
     df["board_type"] = "行业"
     return df
 
 
 def fetch_concept_board_today():
-    df = ak.stock_board_concept_name_em()
+    from analysis.data_fetcher import _fetch_em_delay
+    fs_filter = "m:90+t:3"
+    fields = "f2,f3,f4,f6,f8,f12,f14,f20,f104,f105,f128,f136"
+    rename_map = {
+        "f12": "board_code", "f14": "board_name", "f2": "price",
+        "f3": "pct_chg", "f6": "amount", "f8": "turnover",
+        "f20": "total_mv", "f104": "up_count", "f105": "down_count",
+        "f128": "leader_name", "f136": "leader_pct_chg",
+    }
+    numeric_cols = ["price", "pct_chg", "amount", "total_mv", "turnover",
+                    "up_count", "down_count", "leader_pct_chg"]
+    df = _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500)
     df["board_type"] = "概念"
     return df
 
