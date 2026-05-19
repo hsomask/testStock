@@ -4,10 +4,16 @@ A 股每日分析报告主入口
   python -m analysis.daily_report
   python -m analysis.daily_report --mode beginner
   python -m analysis.daily_report --mode pro
+  python -m analysis.daily_report --mode both
   python -m analysis.daily_report --force
 """
 import argparse
+import json
 import logging
+import time
+from datetime import datetime
+from pathlib import Path
+
 import psycopg2
 
 logger = logging.getLogger(__name__)
@@ -30,6 +36,8 @@ from analysis.data_quality import check_data_quality
 from analysis.theme_detector import detect_main_themes
 from data.config import DATABASE_DSN
 
+REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
+
 
 def get_board_ratio_changes():
     try:
@@ -45,86 +53,211 @@ def get_board_ratio_changes():
         return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="A 股每日分析报告")
-    parser.add_argument("--mode", choices=["beginner", "pro"], default="beginner",
-                        help="报告模式：beginner（小白友好版）或 pro（专业版）")
-    parser.add_argument("--force", action="store_true",
-                        help="强制执行（非交易日也运行）")
-    args = parser.parse_args()
+def build_summary_json(trade_date, market_result, sentiment_result, themes,
+                        quality, selector_result):
+    """构建结构化摘要 JSON"""
+    watchlists = {}
+    for pool_name, pool_df in selector_result.items():
+        if pool_df is None or pool_df.empty:
+            watchlists[pool_name] = []
+            continue
+        stocks = []
+        for _, row in pool_df.head(3).iterrows():
+            stocks.append({
+                "code": str(row.get("code", "")),
+                "name": str(row.get("name", "")),
+                "close": float(row.get("close", 0)) if row.get("close") is not None else None,
+                "pct_chg": float(row.get("pct_chg", 0)) if row.get("pct_chg") is not None else None,
+                "risk_level": str(row.get("risk_level", "")),
+                "action_signal": str(row.get("action_signal", "")),
+            })
+        watchlists[pool_name] = stocks
 
-    force = args.force
-    mode = args.mode
+    risk_directions = []
+    if market_result.get("limit_down", 0) > 0:
+        risk_directions.append(f"跌停{market_result['limit_down']}只")
 
-    trade_date = get_trade_date()
-
-    if not force and not is_trade_day(trade_date):
-        print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")
-        return
-
-    if force and not is_trade_day(trade_date):
-        print(f"{trade_date} 非交易日，强制执行分析...")
-
-    print(f"开始获取数据：{trade_date}（模式：{mode}）")
-
-    # 数据获取
-    stock_df = fetch_stock_spot()
-    index_df = fetch_index_spot()
-    industry_df = fetch_industry_boards()
-    concept_df = fetch_concept_boards()
-    stock_df = enrich_stock_indicators(stock_df)
-
-    data_status = {
+    summary = {
         "trade_date": trade_date,
-        "stock_count": len(stock_df),
-        "industry_count": len(industry_df),
-        "concept_count": len(concept_df),
+        "generated_at": datetime.now().isoformat(),
+        "market": {
+            "score": market_result.get("score"),
+            "status": market_result.get("status"),
+            "total_amount": market_result.get("total_amount"),
+            "up_count": market_result.get("up_count"),
+            "down_count": market_result.get("down_count"),
+            "limit_up": market_result.get("limit_up"),
+            "limit_down": market_result.get("limit_down"),
+            "summary": market_result.get("summary", ""),
+        },
+        "sentiment": {
+            "score": sentiment_result.get("score"),
+            "stage": sentiment_result.get("stage"),
+        },
+        "themes": [{
+            "name": t.get("name"),
+            "level": t.get("level"),
+            "score": t.get("score"),
+            "reasons": t.get("reasons", []),
+            "beginner_explain": t.get("beginner_explain", ""),
+            "sustainability_risk": t.get("sustainability_risk", ""),
+        } for t in (themes or [])],
+        "quality": {
+            "confidence_score": quality.get("confidence_score"),
+            "issues": quality.get("issues", []),
+        },
+        "watchlists": watchlists,
+        "risk_directions": risk_directions,
     }
+    return summary
 
-    # 数据分析
-    market_result = analyze_market(stock_df, index_df)
-    industry_result = analyze_boards(industry_df, board_type="行业")
-    concept_result = analyze_boards(concept_df, board_type="概念")
-    sentiment_result = analyze_sentiment(stock_df, industry_df, concept_df)
 
-    market_score = market_result["score"]
+def save_summary_json(summary, trade_date):
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = REPORTS_DIR / f"daily_summary_{trade_date}.json"
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"摘要已保存：{path}")
 
-    # 数据质量检查
-    db_conn = None
+
+def _get_db_conn():
+    """获取独立数据库连接"""
+    if not DATABASE_DSN:
+        return None
     try:
-        db_conn = psycopg2.connect(DATABASE_DSN)
+        return psycopg2.connect(DATABASE_DSN)
     except Exception as e:
         logger.exception(f"数据库连接失败：{e}")
+        return None
 
-    quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn)
 
-    # 选股
-    selector_result = run_all_selectors(
-        stock_df=stock_df,
-        industry_df=industry_df,
-        concept_df=concept_df,
-        market_score=market_score,
+def save_stock_signals(selector_result, trade_date, db_conn=None):
+    """写入观察池股票信号到 stock_signal 表"""
+    conn = db_conn if db_conn and not db_conn.closed else _get_db_conn()
+    if conn is None:
+        return
+    cur = conn.cursor()
+    written = 0
+    for pool_name, pool_df in selector_result.items():
+        if pool_df is None or pool_df.empty:
+            continue
+        for _, row in pool_df.iterrows():
+            try:
+                cur.execute("""
+                    INSERT INTO stock_signal (
+                        trade_date, code, name, strategy, signal_type,
+                        hot_board_hits,
+                        close_price, pct_chg, volume_ratio, turnover,
+                        ma5, ma10, ma20, pct_5d, pct_20d,
+                        observe_low, observe_high, pressure_price, invalid_price,
+                        risk_level, action_signal, entry_reasons, risk_reasons
+                    ) VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    ON CONFLICT (trade_date, code, strategy)
+                    DO UPDATE SET
+                        name = EXCLUDED.name,
+                        signal_type = EXCLUDED.signal_type,
+                        hot_board_hits = EXCLUDED.hot_board_hits,
+                        close_price = EXCLUDED.close_price,
+                        pct_chg = EXCLUDED.pct_chg,
+                        volume_ratio = EXCLUDED.volume_ratio,
+                        turnover = EXCLUDED.turnover,
+                        ma5 = EXCLUDED.ma5,
+                        ma10 = EXCLUDED.ma10,
+                        ma20 = EXCLUDED.ma20,
+                        pct_5d = EXCLUDED.pct_5d,
+                        pct_20d = EXCLUDED.pct_20d,
+                        observe_low = EXCLUDED.observe_low,
+                        observe_high = EXCLUDED.observe_high,
+                        pressure_price = EXCLUDED.pressure_price,
+                        invalid_price = EXCLUDED.invalid_price,
+                        risk_level = EXCLUDED.risk_level,
+                        action_signal = EXCLUDED.action_signal,
+                        entry_reasons = EXCLUDED.entry_reasons,
+                        risk_reasons = EXCLUDED.risk_reasons
+                """, (
+                    trade_date,
+                    str(row.get("code", "")),
+                    str(row.get("name", "")),
+                    str(pool_name),
+                    str(row.get("action_signal", "")),
+                    json.dumps(row.get("hot_board_hits", []), ensure_ascii=False) if row.get("hot_board_hits") else None,
+                    float(row["close"]) if row.get("close") is not None else None,
+                    float(row["pct_chg"]) if row.get("pct_chg") is not None else None,
+                    float(row["volume_ratio"]) if row.get("volume_ratio") is not None else None,
+                    float(row["turnover"]) if row.get("turnover") is not None else None,
+                    float(row["ma5"]) if row.get("ma5") is not None else None,
+                    float(row["ma10"]) if row.get("ma10") is not None else None,
+                    float(row["ma20"]) if row.get("ma20") is not None else None,
+                    float(row["pct_5d"]) if row.get("pct_5d") is not None else None,
+                    float(row["pct_20d"]) if row.get("pct_20d") is not None else None,
+                    float(row["observe_low"]) if row.get("observe_low") is not None else None,
+                    float(row["observe_high"]) if row.get("observe_high") is not None else None,
+                    float(row["pressure_price"]) if row.get("pressure_price") is not None else None,
+                    float(row["invalid_price"]) if row.get("invalid_price") is not None else None,
+                    str(row.get("risk_level", "")),
+                    str(row.get("action_signal", "")),
+                    str(row.get("entry_reason", "")),
+                    str(row.get("risk_reasons", "")),
+                ))
+                written += 1
+            except Exception as e:
+                logger.exception(f"写入 stock_signal 失败：{row.get('code')} {row.get('name')}")
+
+    conn.commit()
+    cur.close()
+    if conn is not db_conn:
+        conn.close()
+    print(f"stock_signal 写入完成：{written} 条")
+
+
+def log_job_start(job_name, trade_date):
+    """记录任务开始，返回记录 ID"""
+    conn = _get_db_conn()
+    if conn is None:
+        return None
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO job_run_log (job_name, trade_date, status) VALUES (%s, %s, 'running') RETURNING id",
+        (job_name, trade_date)
     )
+    job_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return job_id
 
-    # 板块成交占比变化
-    board_ratio_changes = get_board_ratio_changes()
 
-    # 主线判断
-    themes = detect_main_themes(
-        industry_result=industry_result,
-        concept_result=concept_result,
-        board_ratio_changes=board_ratio_changes,
-        stock_pools=selector_result,
+def log_job_end(job_id, status="success", error_message=None):
+    """记录任务结束"""
+    if job_id is None:
+        return
+    conn = _get_db_conn()
+    if conn is None:
+        return
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE job_run_log
+           SET status = %s, finished_at = CURRENT_TIMESTAMP,
+               duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at)),
+               error_message = %s
+           WHERE id = %s""",
+        (status, error_message, job_id)
     )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    # 关闭数据库连接
-    if db_conn:
-        try:
-            db_conn.close()
-        except Exception as e:
-            logger.exception(f"关闭数据库连接失败：{e}")
 
-    # 生成报告
+def generate_report_mode(trade_date, mode, data_status, market_result,
+                         industry_result, concept_result, sentiment_result,
+                         selector_result, board_ratio_changes, quality, themes):
+    """生成单个模式的报告并保存，返回报告文本"""
     report = render_daily_report(
         trade_date=trade_date,
         data_status=data_status,
@@ -138,7 +271,6 @@ def main():
         quality=quality,
         themes=themes,
     )
-
     path = save_report(report, trade_date, mode)
     try:
         print(report)
@@ -146,21 +278,128 @@ def main():
         print(report.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
     print(f"报告已保存：{path}")
 
-    # 存入数据库
-    if db_conn:
+    # 写入数据库
+    conn = _get_db_conn()
+    if conn:
         try:
-            db_conn2 = psycopg2.connect(DATABASE_DSN)
-            cur = db_conn2.cursor()
+            cur = conn.cursor()
             cur.execute(
                 """INSERT INTO daily_report (trade_date, report_mode, report_type, content, confidence_score)
                    VALUES (%s, %s, %s, %s, %s)""",
                 (trade_date, mode, "daily", report, quality["confidence_score"])
             )
-            db_conn2.commit()
+            conn.commit()
             cur.close()
-            db_conn2.close()
         except Exception as e:
             logger.exception(f"日报写入失败：{e}")
+        finally:
+            conn.close()
+
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description="A 股每日分析报告")
+    parser.add_argument("--mode", choices=["beginner", "pro", "both"], default="beginner",
+                        help="报告模式：beginner / pro / both")
+    parser.add_argument("--force", action="store_true",
+                        help="强制执行（非交易日也运行）")
+    args = parser.parse_args()
+
+    force = args.force
+    mode = args.mode
+    modes = ["beginner", "pro"] if mode == "both" else [mode]
+
+    trade_date = get_trade_date()
+
+    if not force and not is_trade_day(trade_date):
+        print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")
+        return
+
+    if force and not is_trade_day(trade_date):
+        print(f"{trade_date} 非交易日，强制执行分析...")
+
+    print(f"开始获取数据：{trade_date}（模式：{mode}）")
+
+    # DB 连接
+    db_conn = None
+    try:
+        db_conn = psycopg2.connect(DATABASE_DSN)
+    except Exception as e:
+        logger.exception(f"数据库连接失败：{e}")
+
+    job_id = log_job_start("daily_report", trade_date)
+
+    try:
+        # 数据获取（只执行一次）
+        stock_df = fetch_stock_spot()
+        index_df = fetch_index_spot()
+        industry_df = fetch_industry_boards()
+        concept_df = fetch_concept_boards()
+        stock_df = enrich_stock_indicators(stock_df)
+
+        data_status = {
+            "trade_date": trade_date,
+            "stock_count": len(stock_df),
+            "industry_count": len(industry_df),
+            "concept_count": len(concept_df),
+        }
+
+        # 数据分析（只执行一次）
+        market_result = analyze_market(stock_df, index_df)
+        industry_result = analyze_boards(industry_df, board_type="行业")
+        concept_result = analyze_boards(concept_df, board_type="概念")
+        sentiment_result = analyze_sentiment(stock_df, industry_df, concept_df)
+
+        market_score = market_result["score"]
+
+        quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn)
+
+        selector_result = run_all_selectors(
+            stock_df=stock_df,
+            industry_df=industry_df,
+            concept_df=concept_df,
+            market_score=market_score,
+        )
+
+        board_ratio_changes = get_board_ratio_changes()
+
+        themes = detect_main_themes(
+            industry_result=industry_result,
+            concept_result=concept_result,
+            board_ratio_changes=board_ratio_changes,
+            stock_pools=selector_result,
+        )
+
+        # 生成结构化摘要 JSON
+        summary = build_summary_json(trade_date, market_result, sentiment_result,
+                                     themes, quality, selector_result)
+        save_summary_json(summary, trade_date)
+
+        # 写入 stock_signal
+        save_stock_signals(selector_result, trade_date, db_conn)
+
+        # 生成报告（每个 mode 一份）
+        for m in modes:
+            generate_report_mode(
+                trade_date, m, data_status,
+                market_result, industry_result, concept_result,
+                sentiment_result, selector_result, board_ratio_changes,
+                quality, themes,
+            )
+
+        log_job_end(job_id, "success")
+
+    except Exception as e:
+        logger.exception(f"日报生成失败：{e}")
+        log_job_end(job_id, "failed", str(e))
+
+    finally:
+        if db_conn:
+            try:
+                db_conn.close()
+            except Exception as e:
+                logger.exception(f"关闭数据库连接失败：{e}")
 
 
 if __name__ == "__main__":

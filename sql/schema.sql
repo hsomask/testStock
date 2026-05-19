@@ -100,5 +100,20 @@ CREATE TABLE IF NOT EXISTS stock_signal (
     action_signal VARCHAR(20),
     entry_reasons TEXT,
     risk_reasons TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (trade_date, code, strategy)
+);
+
+
+-- 任务运行日志表
+-- 记录每次 job 的运行状态、耗时、错误信息
+CREATE TABLE IF NOT EXISTS job_run_log (
+    id SERIAL PRIMARY KEY,
+    job_name VARCHAR(100) NOT NULL,
+    trade_date DATE,
+    status VARCHAR(20) NOT NULL DEFAULT 'running',
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP,
+    duration_seconds NUMERIC,
+    error_message TEXT
 );

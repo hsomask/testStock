@@ -18,6 +18,7 @@ TABLES = [
     "daily_report",
     "data_quality_log",
     "stock_signal",
+    "job_run_log",
 ]
 
 
