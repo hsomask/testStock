@@ -200,10 +200,10 @@ def render_stock_pool_beginner(df, pool_label):
         lines.append("")
 
         # 基本信息
-        lines.append(f"- 收盘：{row['close']} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{row['volume_ratio']}")
+        lines.append(f"- 收盘：{fmt_num(row['close'])} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{fmt_num(row.get('volume_ratio', np.nan))}")
         turnover_val = row.get("turnover", np.nan)
         lines.append(f"- 换手率：{fmt_num(turnover_val, 2)}% | 5日涨幅：{fmt_pct(row.get('pct_5d', np.nan), 1)} | 20日涨幅：{fmt_pct(row.get('pct_20d', np.nan), 1)}")
-        lines.append(f"- MA5：{row.get('ma5', '-')} | MA10：{row.get('ma10', '-')} | MA20：{row.get('ma20', '-')}")
+        lines.append(f"- MA5：{fmt_num(row.get('ma5', np.nan))} | MA10：{fmt_num(row.get('ma10', np.nan))} | MA20：{fmt_num(row.get('ma20', np.nan))}")
 
         # 观察区间（使用新字段，兼容旧字段）
         o_low = row.get("observe_low", row.get("buy_low", "-"))
@@ -250,7 +250,7 @@ def render_stock_pool_pro(df):
         lines.append(f"{idx + 1}. {row['name']}({row['code']}) — {row['strategy']}{extra}")
         lines.append(f"收盘：{row['close']} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{row['volume_ratio']}")
         lines.append(
-            f"MA5：{row['ma5']} | MA10：{row['ma10']} | MA20：{row['ma20']} | "
+            f"MA5：{fmt_num(row.get('ma5', np.nan))} | MA10：{fmt_num(row.get('ma10', np.nan))} | MA20：{fmt_num(row.get('ma20', np.nan))} | "
             f"5日涨幅：{fmt_pct(row.get('pct_5d', np.nan), 1)} | 20日涨幅：{fmt_pct(row.get('pct_20d', np.nan), 1)}"
         )
         buy_low = row.get("buy_low", row.get("observe_low", "-"))

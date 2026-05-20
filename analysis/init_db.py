@@ -19,6 +19,7 @@ TABLES = [
     "data_quality_log",
     "stock_signal",
     "job_run_log",
+    "stock_hist_kline",
 ]
 
 

@@ -372,118 +372,318 @@ def _fetch_boards_ths(board_type_label, fetch_fn):
 
 # ── 个股历史K线 ──
 
-def get_stock_history(code: str, days: int = 80):
-    """
-    获取个股历史K线，用于计算 MA/涨幅
-    优先 Sina，不可用时降级 Tencent
-    """
-    df = _get_stock_history_sina(code, days)
-    if not df.empty:
-        return df
-    return _get_stock_history_tx(code, days)
+def _history_session():
+    import requests as _req
+    s = _req.Session()
+    s.trust_env = False
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.sina.com.cn/",
+    })
+    return s
 
 
 def _get_stock_history_sina(code: str, days: int = 80):
-    """新浪通道"""
+    """新浪通道：直连 money.finance.sina.com.cn"""
     try:
-        df = ak.stock_zh_a_hist(
-            symbol=code,
-            period="daily",
-            adjust="qfq"
-        )
-        df = df.tail(days).copy()
+        s = _history_session()
+        url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
+        r = s.get(url, params={"symbol": code, "scale": "240", "ma": "no", "datalen": str(days)}, timeout=15)
+        records = r.json()
+        if not records or not isinstance(records, list):
+            return pd.DataFrame()
 
+        df = pd.DataFrame(records)
         rename_map = {
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
-            "成交额": "amount",
-            "涨跌幅": "pct_chg",
-            "换手率": "turnover",
-        }
-        df = df.rename(columns=rename_map)
-        df = safe_numeric(df, ["open", "close", "high", "low", "volume", "amount", "pct_chg", "turnover"])
-        return df
-    except Exception:
-        return pd.DataFrame()
-
-
-def _get_stock_history_tx(code: str, days: int = 80):
-    """腾讯通道"""
-    try:
-        df = ak.stock_zh_a_hist_tx(
-            symbol=code,
-            period="daily",
-            adjust="qfq"
-        )
-        df = df.tail(days).copy()
-
-        rename_map = {
-            "日期": "date",
-            "开盘": "open",
-            "收盘": "close",
-            "最高": "high",
-            "最低": "low",
-            "成交量": "volume",
+            "day": "date", "open": "open", "close": "close",
+            "high": "high", "low": "low", "volume": "volume",
         }
         df = df.rename(columns=rename_map)
         df = safe_numeric(df, ["open", "close", "high", "low", "volume"])
-
         if "amount" not in df.columns:
             df["amount"] = np.nan
         if "pct_chg" not in df.columns:
             df["pct_chg"] = np.nan
         if "turnover" not in df.columns:
             df["turnover"] = np.nan
-
         return df
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Sina 历史行情获取失败：{code}, {e}")
         return pd.DataFrame()
+
+
+def _get_stock_history_tx(code: str, days: int = 80):
+    """腾讯通道：直连 web.ifzq.gtimg.cn"""
+    try:
+        s = _history_session()
+        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        r = s.get(url, params={"param": f"{code},day,,,{days},qfq"}, timeout=15)
+        data = r.json()
+        if data.get("code") != 0:
+            return pd.DataFrame()
+
+        # 从嵌套结构中提取数据
+        stock_data = data.get("data", {}).get(code, {})
+        klines = stock_data.get("qfqday") or stock_data.get("day") or []
+        if not klines:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(klines, columns=["date", "open", "close", "high", "low", "volume"])
+        df = safe_numeric(df, ["open", "close", "high", "low", "volume"])
+        df["amount"] = np.nan
+        df["pct_chg"] = np.nan
+        df["turnover"] = np.nan
+        return df
+    except Exception as e:
+        logger.debug(f"Tencent 历史行情获取失败：{code}, {e}")
+        return pd.DataFrame()
+
+
+def _get_hist_from_db(code, days=80):
+    """从 stock_hist_kline 表读取历史K线"""
+    import psycopg2 as _pg
+    from data.config import DATABASE_DSN as _dsn
+    if not _dsn:
+        return pd.DataFrame()
+    try:
+        conn = _pg.connect(_dsn)
+        df = pd.read_sql(
+            "SELECT trade_date as date, open, close, high, low, volume "
+            "FROM stock_hist_kline WHERE code=%s "
+            "ORDER BY trade_date DESC LIMIT %s",
+            conn, params=(code, days)
+        )
+        conn.close()
+        if df.empty:
+            return df
+        df = df.sort_values("date")
+        df["amount"] = np.nan
+        df["pct_chg"] = np.nan
+        df["turnover"] = np.nan
+        return df
+    except Exception as e:
+        logger.debug(f"读取历史K线缓存失败：{code}, {e}")
+        return pd.DataFrame()
+
+
+def _save_hist_to_db(code, df):
+    """保存历史K线到 stock_hist_kline"""
+    import psycopg2 as _pg
+    from data.config import DATABASE_DSN as _dsn
+    if not _dsn or df.empty or "date" not in df.columns:
+        return
+    try:
+        conn = _pg.connect(_dsn)
+        cur = conn.cursor()
+        for _, row in df.iterrows():
+            if pd.isna(row.get("date")):
+                continue
+            cur.execute("""
+                INSERT INTO stock_hist_kline (code, trade_date, open, close, high, low, volume)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (code, trade_date) DO UPDATE SET
+                    open = EXCLUDED.open,
+                    close = EXCLUDED.close,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    volume = EXCLUDED.volume
+            """, (
+                code,
+                str(row["date"])[:10],
+                _num_or_none(row.get("open")),
+                _num_or_none(row.get("close")),
+                _num_or_none(row.get("high")),
+                _num_or_none(row.get("low")),
+                _num_or_none(row.get("volume")),
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.debug(f"保存历史K线失败：{code}, {e}")
+
+
+def _num_or_none(x):
+    try:
+        if pd.isna(x):
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def get_stock_history(code: str, days: int = 80):
+    """
+    获取个股历史K线。优先从 DB 缓存读取，缺失时从 API 获取并自动入库。
+    """
+    code = str(code).strip()
+
+    # 1. 先查 DB 缓存
+    db_df = _get_hist_from_db(code, days)
+    db_dates = set()
+    if not db_df.empty and "date" in db_df.columns:
+        db_dates = set(db_df["date"].astype(str).str[:10].tolist())
+
+    # 2. 如果 DB 已有足够数据（>= days 条），直接返回
+    if len(db_dates) >= max(days - 3, 1):  # 容差 3 天
+        return db_df.tail(days)
+
+    # 3. 从 API 获取
+    symbol_candidates = [code]
+    if code.startswith(("6", "9")):
+        symbol_candidates.append(f"sh{code}")
+    elif code.startswith(("0", "3")):
+        symbol_candidates.append(f"sz{code}")
+    elif code.startswith(("8", "4")):
+        symbol_candidates.append(f"bj{code}")
+
+    api_df = pd.DataFrame()
+    for symbol in symbol_candidates:
+        api_df = _get_stock_history_sina(symbol, days)
+        if not api_df.empty:
+            break
+
+    if api_df.empty:
+        for symbol in symbol_candidates:
+            api_df = _get_stock_history_tx(symbol, days)
+            if not api_df.empty:
+                break
+
+    if api_df.empty:
+        logger.debug(f"历史行情全部通道失败：{code}, tried={symbol_candidates}")
+        return db_df if not db_df.empty else pd.DataFrame()
+
+    # 4. 只保存 DB 中没有的新日期
+    new_rows = []
+    for _, row in api_df.iterrows():
+        d = str(row["date"])[:10]
+        if d not in db_dates:
+            new_rows.append(row)
+    if new_rows:
+        new_df = pd.DataFrame(new_rows)
+        _save_hist_to_db(code, new_df)
+
+    # 5. 合并 DB + 新增，返回
+    if not db_df.empty:
+        combined = pd.concat([db_df, api_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["date"]).sort_values("date")
+        return combined.tail(days)
+    return api_df.tail(days)
 
 
 # ── 技术指标补充 ──
 
-def enrich_stock_indicators(stock_df):
+def calc_history_indicators(hist):
+    """从历史K线计算 MA5/MA10/MA20/5日涨幅/20日涨幅"""
+    if hist is None or hist.empty or "close" not in hist.columns:
+        return None
+
+    close = pd.to_numeric(hist["close"], errors="coerce").dropna()
+    if len(close) < 5:
+        return None
+
+    return {
+        "ma5": close.tail(5).mean() if len(close) >= 5 else np.nan,
+        "ma10": close.tail(10).mean() if len(close) >= 10 else np.nan,
+        "ma20": close.tail(20).mean() if len(close) >= 20 else np.nan,
+        "pct_5d": (close.iloc[-1] / close.iloc[-6] - 1) * 100 if len(close) >= 6 else np.nan,
+        "pct_20d": (close.iloc[-1] / close.iloc[-21] - 1) * 100 if len(close) >= 21 else np.nan,
+    }
+
+
+def enrich_stock_indicators(stock_df, max_stocks: int = 1200):
     """给个股实时数据补充 MA5/MA10/MA20/5日涨幅/20日涨幅"""
     df = stock_df.copy()
 
-    df["ma5"] = np.nan
-    df["ma10"] = np.nan
-    df["ma20"] = np.nan
-    df["pct_5d"] = np.nan
-    df["pct_20d"] = np.nan
+    for col in ["ma5", "ma10", "ma20", "pct_5d", "pct_20d"]:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    candidates = df[
-        (df["amount"] > 100000000)
-        & (df["close"] > 2)
-        & (df["pct_chg"] > -8)
+    # 基础过滤
+    base = df[
+        (pd.to_numeric(df["close"], errors="coerce") > 2)
+        & (pd.to_numeric(df["pct_chg"], errors="coerce") > -8)
     ].copy()
 
-    candidates = candidates.sort_values("amount", ascending=False).head(500)
+    selected_indices = set()
 
-    for idx, row in candidates.iterrows():
-        hist = get_stock_history(row["code"], days=80)
-        if hist.empty or len(hist) < 20:
+    # 1. 成交额靠前
+    if "amount" in base.columns:
+        selected_indices.update(
+            base.sort_values("amount", ascending=False).head(1000).index.tolist()
+        )
+
+    # 2. 涨幅靠前
+    selected_indices.update(
+        base.sort_values("pct_chg", ascending=False).head(300).index.tolist()
+    )
+
+    # 3. 量比靠前
+    if "volume_ratio" in base.columns:
+        selected_indices.update(
+            base.sort_values("volume_ratio", ascending=False).head(300).index.tolist()
+        )
+
+    # 4. 换手率靠前
+    if "turnover" in base.columns:
+        selected_indices.update(
+            base.sort_values("turnover", ascending=False).head(300).index.tolist()
+        )
+
+    selected_indices = list(selected_indices)[:max_stocks]
+
+    success = 0
+    fail = 0
+
+    for idx in selected_indices:
+        code = str(df.at[idx, "code"])
+        hist = get_stock_history(code, days=80)
+        indicators = calc_history_indicators(hist)
+
+        if not indicators:
+            fail += 1
             continue
 
-        close = hist["close"]
-        ma5 = close.tail(5).mean()
-        ma10 = close.tail(10).mean()
-        ma20 = close.tail(20).mean()
+        for k, v in indicators.items():
+            df.loc[idx, k] = v
 
-        pct_5d = close.iloc[-1] / close.iloc[-6] - 1 if len(close) >= 6 else np.nan
-        pct_20d = close.iloc[-1] / close.iloc[-21] - 1 if len(close) >= 21 else np.nan
+        success += 1
 
-        df.loc[idx, "ma5"] = ma5
-        df.loc[idx, "ma10"] = ma10
-        df.loc[idx, "ma20"] = ma20
-        df.loc[idx, "pct_5d"] = pct_5d * 100
-        df.loc[idx, "pct_20d"] = pct_20d * 100
-
+    logger.info(f"技术指标补充完成：成功 {success} 只，失败 {fail} 只，候选 {len(selected_indices)} 只")
     return df
+
+
+def enrich_selected_stocks_indicators(selector_result):
+    """对最终观察池股票二次补齐 MA/涨幅"""
+    for pool_name, pool_df in selector_result.items():
+        if pool_df is None or pool_df.empty:
+            continue
+
+        for idx, row in pool_df.iterrows():
+            need_fill = (
+                pd.isna(row.get("ma5"))
+                or pd.isna(row.get("ma10"))
+                or pd.isna(row.get("ma20"))
+                or pd.isna(row.get("pct_5d"))
+                or pd.isna(row.get("pct_20d"))
+            )
+
+            if not need_fill:
+                continue
+
+            code = str(row.get("code", ""))
+            hist = get_stock_history(code, days=80)
+            indicators = calc_history_indicators(hist)
+
+            if not indicators:
+                continue
+
+            for k, v in indicators.items():
+                pool_df.at[idx, k] = v
+
+        selector_result[pool_name] = pool_df
+
+    return selector_result
 
 
 # ── 数据源状态查询 ──

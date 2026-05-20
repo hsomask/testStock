@@ -117,3 +117,33 @@ CREATE TABLE IF NOT EXISTS job_run_log (
     duration_seconds NUMERIC,
     error_message TEXT
 );
+
+
+-- 确保 stock_signal 唯一约束存在（幂等）
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_signal_trade_code_strategy'
+    ) THEN
+        ALTER TABLE stock_signal
+        ADD CONSTRAINT uq_stock_signal_trade_code_strategy
+        UNIQUE (trade_date, code, strategy);
+    END IF;
+END $$;
+
+
+-- 个股历史K线缓存表
+-- 按天增量同步，首次全量回填后可避免重复抓取
+CREATE TABLE IF NOT EXISTS stock_hist_kline (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(20) NOT NULL,
+    trade_date DATE NOT NULL,
+    open NUMERIC,
+    close NUMERIC,
+    high NUMERIC,
+    low NUMERIC,
+    volume NUMERIC,
+    UNIQUE (code, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_hist_kline_code_date ON stock_hist_kline(code, trade_date);

@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 
 
-def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=None):
+def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=None, selector_result=None):
     """
     检查数据完整性，返回质量报告和可信度评分。
 
@@ -21,6 +21,7 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
             "has_stock_board_map": bool,
             "stock_board_map_days_old": int or None,
             "ma_missing_ratio": float,
+            "obs_ma_coverage": float,      # 观察池均线覆盖率
         }
     """
     score = 100
@@ -221,6 +222,32 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
     # 确保分数在 0-100
     confidence_score = max(0, min(100, score))
 
+    # 12. 观察池均线覆盖率
+    obs_ma_coverage = 0.0
+    if selector_result:
+        obs_total = 0
+        obs_has_ma = 0
+        for pool_df in selector_result.values():
+            if pool_df is None or pool_df.empty:
+                continue
+            for _, row in pool_df.iterrows():
+                obs_total += 1
+                if pd.notna(row.get("ma5")) and pd.notna(row.get("ma20")):
+                    obs_has_ma += 1
+        obs_ma_coverage = obs_has_ma / max(obs_total, 1) if obs_total > 0 else 0.0
+
+    if obs_total > 0:
+        if obs_ma_coverage >= 0.7:
+            items.append({"item": "观察池均线", "status": "正常", "detail": f"观察池均线覆盖率 {obs_ma_coverage:.0%}（{obs_has_ma}/{obs_total}）"})
+        elif obs_ma_coverage >= 0.4:
+            score -= 5
+            items.append({"item": "观察池均线", "status": "部分缺失", "detail": f"观察池均线覆盖率 {obs_ma_coverage:.0%}（{obs_has_ma}/{obs_total}），部分股票缺少历史数据"})
+            issues.append(f"观察池均线覆盖率仅 {obs_ma_coverage:.0%}。")
+        elif obs_total > 0:
+            score -= 10
+            items.append({"item": "观察池均线", "status": "大量缺失", "detail": f"观察池均线覆盖率 {obs_ma_coverage:.0%}（{obs_has_ma}/{obs_total}）"})
+            issues.append(f"观察池均线覆盖率仅 {obs_ma_coverage:.0%}，报告可读性下降。")
+
     return {
         "confidence_score": confidence_score,
         "items": items,
@@ -231,5 +258,6 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
         "has_stock_board_map": has_stock_board_map,
         "stock_board_map_days_old": stock_board_map_days_old,
         "ma_missing_ratio": ma_missing_ratio,
+        "obs_ma_coverage": obs_ma_coverage,
         "has_volume_ratio": has_volume_ratio,
     }

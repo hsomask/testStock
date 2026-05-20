@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import psycopg2
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ from analysis.data_fetcher import (
     fetch_industry_boards,
     fetch_concept_boards,
     enrich_stock_indicators,
+    enrich_selected_stocks_indicators,
 )
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
@@ -130,17 +132,39 @@ def _get_db_conn():
         return None
 
 
+def _num_or_none(x):
+    """NaN 安全转 float，NaN 返回 None"""
+    try:
+        if pd.isna(x):
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
 def save_stock_signals(selector_result, trade_date, db_conn=None):
     """写入观察池股票信号到 stock_signal 表"""
     conn = db_conn if db_conn and not db_conn.closed else _get_db_conn()
     if conn is None:
+        print("[错误] stock_signal 写入跳过：数据库不可用")
         return
+
+    total_candidates = sum(
+        len(df) for df in selector_result.values()
+        if df is not None and not df.empty
+    )
+    print(f"准备写入 stock_signal：{total_candidates} 条候选")
+
     cur = conn.cursor()
     written = 0
+    failed = 0
+
     for pool_name, pool_df in selector_result.items():
         if pool_df is None or pool_df.empty:
             continue
         for _, row in pool_df.iterrows():
+            code = str(row.get("code", ""))
+            name = str(row.get("name", ""))
             try:
                 cur.execute("""
                     INSERT INTO stock_signal (
@@ -182,24 +206,24 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                         risk_reasons = EXCLUDED.risk_reasons
                 """, (
                     trade_date,
-                    str(row.get("code", "")),
-                    str(row.get("name", "")),
+                    code,
+                    name,
                     str(pool_name),
                     str(row.get("action_signal", "")),
                     json.dumps(row.get("hot_board_hits", []), ensure_ascii=False) if row.get("hot_board_hits") else None,
-                    float(row["close"]) if row.get("close") is not None else None,
-                    float(row["pct_chg"]) if row.get("pct_chg") is not None else None,
-                    float(row["volume_ratio"]) if row.get("volume_ratio") is not None else None,
-                    float(row["turnover"]) if row.get("turnover") is not None else None,
-                    float(row["ma5"]) if row.get("ma5") is not None else None,
-                    float(row["ma10"]) if row.get("ma10") is not None else None,
-                    float(row["ma20"]) if row.get("ma20") is not None else None,
-                    float(row["pct_5d"]) if row.get("pct_5d") is not None else None,
-                    float(row["pct_20d"]) if row.get("pct_20d") is not None else None,
-                    float(row["observe_low"]) if row.get("observe_low") is not None else None,
-                    float(row["observe_high"]) if row.get("observe_high") is not None else None,
-                    float(row["pressure_price"]) if row.get("pressure_price") is not None else None,
-                    float(row["invalid_price"]) if row.get("invalid_price") is not None else None,
+                    _num_or_none(row.get("close")),
+                    _num_or_none(row.get("pct_chg")),
+                    _num_or_none(row.get("volume_ratio")),
+                    _num_or_none(row.get("turnover")),
+                    _num_or_none(row.get("ma5")),
+                    _num_or_none(row.get("ma10")),
+                    _num_or_none(row.get("ma20")),
+                    _num_or_none(row.get("pct_5d")),
+                    _num_or_none(row.get("pct_20d")),
+                    _num_or_none(row.get("observe_low")),
+                    _num_or_none(row.get("observe_high")),
+                    _num_or_none(row.get("pressure_price")),
+                    _num_or_none(row.get("invalid_price")),
                     str(row.get("risk_level", "")),
                     str(row.get("action_signal", "")),
                     str(row.get("entry_reason", "")),
@@ -207,13 +231,57 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                 ))
                 written += 1
             except Exception as e:
-                logger.exception(f"写入 stock_signal 失败：{row.get('code')} {row.get('name')}")
+                failed += 1
+                print(f"[错误] 写入 stock_signal 失败：{code} {name} {e}")
+                logger.exception(f"写入 stock_signal 失败：{code} {name}")
 
     conn.commit()
     cur.close()
     if conn is not db_conn:
         conn.close()
-    print(f"stock_signal 写入完成：{written} 条")
+
+    if total_candidates > 0 and written == 0:
+        print("[警告] selector_result 有数据，但 stock_signal 未写入任何记录，请检查表结构和数据库权限。")
+    else:
+        print(f"stock_signal 写入完成：成功 {written} 条，失败 {failed} 条")
+
+
+def save_data_quality_log(trade_date, quality, data_status, db_conn=None):
+    """写入数据质量日志到 data_quality_log 表"""
+    conn = db_conn if db_conn and not db_conn.closed else _get_db_conn()
+    if conn is None:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO data_quality_log (
+                trade_date, stock_count, industry_count, concept_count,
+                has_board_amount_ratio, has_stock_board_map,
+                has_3d_history, has_5d_history,
+                ma_missing_ratio, confidence_score, issues
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            trade_date,
+            data_status.get("stock_count", 0),
+            data_status.get("industry_count", 0),
+            data_status.get("concept_count", 0),
+            bool(quality.get("has_board_amount_ratio", False)),
+            bool(quality.get("has_stock_board_map", False)),
+            bool(quality.get("has_3d_history", False)),
+            bool(quality.get("has_5d_history", False)),
+            round(quality.get("ma_missing_ratio", 0), 4),
+            quality.get("confidence_score", 0),
+            "\n".join(quality.get("issues", [])),
+        ))
+        conn.commit()
+        print("data_quality_log 写入完成")
+    except Exception as e:
+        print(f"[错误] data_quality_log 写入失败：{e}")
+        logger.exception("data_quality_log 写入失败")
+    finally:
+        cur.close()
+        if conn is not db_conn:
+            conn.close()
 
 
 def log_job_start(job_name, trade_date):
@@ -353,14 +421,14 @@ def main():
 
         market_score = market_result["score"]
 
-        quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn)
-
         selector_result = run_all_selectors(
             stock_df=stock_df,
             industry_df=industry_df,
             concept_df=concept_df,
             market_score=market_score,
         )
+
+        selector_result = enrich_selected_stocks_indicators(selector_result)
 
         board_ratio_changes = get_board_ratio_changes()
 
@@ -370,6 +438,10 @@ def main():
             board_ratio_changes=board_ratio_changes,
             stock_pools=selector_result,
         )
+
+        quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn, selector_result)
+
+        save_data_quality_log(trade_date, quality, data_status, db_conn)
 
         # 生成结构化摘要 JSON
         summary = build_summary_json(trade_date, market_result, sentiment_result,
