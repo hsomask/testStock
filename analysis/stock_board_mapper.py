@@ -1,6 +1,7 @@
 """
 个股所属行业/概念映射模块
 每周运行一次，将板块成分股数据写入 stock_board_map 表
+支持断点续跑：已存在的 board 跳过，每板块即时落表
 """
 import time
 import pandas as pd
@@ -55,13 +56,17 @@ def _get_board_cons(board_code):
     return [(str(row["f12"]).zfill(6), row.get("f14", "")) for _, row in df.iterrows()]
 
 
-def save_stock_board_map(rows):
-    if not rows:
-        return
+def _board_already_mapped(cur, board_type, board_name):
+    """检查该板块是否已写入过"""
+    cur.execute(
+        "SELECT COUNT(*) FROM stock_board_map WHERE board_type=%s AND board_name=%s",
+        (board_type, board_name)
+    )
+    return cur.fetchone()[0] > 0
 
-    conn = psycopg2.connect(DATABASE_DSN)
-    cur = conn.cursor()
 
+def _flush_batch(cur, batch, conn):
+    """写入一批记录"""
     sql = """
     INSERT INTO stock_board_map (
         code, name, board_type, board_name, source
@@ -73,74 +78,89 @@ def save_stock_board_map(rows):
         source = EXCLUDED.source,
         updated_at = CURRENT_TIMESTAMP;
     """
-
-    for row in rows:
+    for row in batch:
         cur.execute(sql, (
-            row["code"],
-            row["name"],
-            row["board_type"],
-            row["board_name"],
-            row["source"],
+            row["code"], row["name"], row["board_type"],
+            row["board_name"], row["source"],
         ))
-
     conn.commit()
-    cur.close()
-    conn.close()
 
 
-def update_industry_stock_map():
+def _map_boards(boards, board_type_label, cur, conn):
+    """遍历板块列表，逐个获取成分股并即时落表"""
+    total_written = 0
+    batch = []
+
+    for idx, (board_code, board_name) in enumerate(boards):
+        if _board_already_mapped(cur, board_type_label, board_name):
+            if idx % 50 == 0:
+                print(f"  [{idx+1}/{len(boards)}] {board_name} — 已存在，跳过")
+            continue
+
+        try:
+            cons = _get_board_cons(board_code)
+            for code, name in cons:
+                batch.append({
+                    "code": code, "name": name,
+                    "board_type": board_type_label,
+                    "board_name": board_name,
+                    "source": "push2delay",
+                })
+
+            # 每收集约 50 条就落表
+            if len(batch) >= 50:
+                _flush_batch(cur, batch, conn)
+                total_written += len(batch)
+                batch = []
+
+            print(f"  [{idx+1}/{len(boards)}] {board_name} — {len(cons)}只")
+            time.sleep(0.15)
+
+        except Exception as e:
+            print(f"  [{idx+1}/{len(boards)}] {board_name} — 失败：{e}")
+
+    # 剩余批次落表
+    if batch:
+        _flush_batch(cur, batch, conn)
+        total_written += len(batch)
+
+    return total_written
+
+
+def update_industry_stock_map(cur, conn):
     boards = _get_board_list("行业")
-    print(f"获取行业板块列表：{len(boards)} 个")
-
-    all_rows = []
-    for board_code, board_name in boards:
-        try:
-            cons = _get_board_cons(board_code)
-            for code, name in cons:
-                all_rows.append({
-                    "code": code,
-                    "name": name,
-                    "board_type": "行业",
-                    "board_name": board_name,
-                    "source": "push2delay",
-                })
-            print(f"行业映射完成：{board_name}，{len(cons)}只")
-            time.sleep(0.2)
-        except Exception as e:
-            print(f"行业映射失败：{board_name}，错误：{e}")
-
-    save_stock_board_map(all_rows)
-    print(f"行业成分股映射更新完成，共 {len(all_rows)} 条")
+    print(f"行业板块列表：{len(boards)} 个")
+    written = _map_boards(boards, "行业", cur, conn)
+    print(f"行业映射完成，本次写入 {written} 条")
 
 
-def update_concept_stock_map():
+def update_concept_stock_map(cur, conn):
     boards = _get_board_list("概念")
-    print(f"获取概念板块列表：{len(boards)} 个")
-
-    all_rows = []
-    for board_code, board_name in boards:
-        try:
-            cons = _get_board_cons(board_code)
-            for code, name in cons:
-                all_rows.append({
-                    "code": code,
-                    "name": name,
-                    "board_type": "概念",
-                    "board_name": board_name,
-                    "source": "push2delay",
-                })
-            print(f"概念映射完成：{board_name}，{len(cons)}只")
-            time.sleep(0.2)
-        except Exception as e:
-            print(f"概念映射失败：{board_name}，错误：{e}")
-
-    save_stock_board_map(all_rows)
-    print(f"概念成分股映射更新完成，共 {len(all_rows)} 条")
+    print(f"概念板块列表：{len(boards)} 个")
+    written = _map_boards(boards, "概念", cur, conn)
+    print(f"概念映射完成，本次写入 {written} 条")
 
 
 def update_all_stock_board_map():
-    update_industry_stock_map()
-    update_concept_stock_map()
+    if not DATABASE_DSN:
+        print("DATABASE_DSN 未配置")
+        return
+
+    conn = psycopg2.connect(DATABASE_DSN)
+    cur = conn.cursor()
+
+    try:
+        update_industry_stock_map(cur, conn)
+    except Exception as e:
+        print(f"行业映射异常：{e}")
+
+    try:
+        update_concept_stock_map(cur, conn)
+    except Exception as e:
+        print(f"概念映射异常：{e}")
+
+    cur.close()
+    conn.close()
 
 
 if __name__ == "__main__":
