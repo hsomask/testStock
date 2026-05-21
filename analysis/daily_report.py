@@ -11,11 +11,14 @@ import argparse
 import json
 import logging
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 import psycopg2
+
+warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
 
@@ -261,17 +264,17 @@ def save_data_quality_log(trade_date, quality, data_status, db_conn=None):
                 ma_missing_ratio, confidence_score, issues
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
-            trade_date,
-            data_status.get("stock_count", 0),
-            data_status.get("industry_count", 0),
-            data_status.get("concept_count", 0),
+            str(trade_date),
+            int(data_status.get("stock_count", 0)),
+            int(data_status.get("industry_count", 0)),
+            int(data_status.get("concept_count", 0)),
             bool(quality.get("has_board_amount_ratio", False)),
             bool(quality.get("has_stock_board_map", False)),
             bool(quality.get("has_3d_history", False)),
             bool(quality.get("has_5d_history", False)),
-            round(quality.get("ma_missing_ratio", 0), 4),
-            quality.get("confidence_score", 0),
-            "\n".join(quality.get("issues", [])),
+            float(quality.get("ma_missing_ratio", 0)),
+            int(quality.get("confidence_score", 0)),
+            str("\n".join(quality.get("issues", []))),
         ))
         conn.commit()
         print("data_quality_log 写入完成")
