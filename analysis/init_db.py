@@ -20,6 +20,7 @@ TABLES = [
     "stock_signal",
     "job_run_log",
     "stock_hist_kline",
+    "signal_performance",
 ]
 
 

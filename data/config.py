@@ -37,3 +37,13 @@ EMAIL_TO = os.getenv("EMAIL_TO", "")
 
 MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
 MINIMAX_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
+
+# ── 账户过滤配置 ──
+ALLOW_MAIN_BOARD = os.getenv("ALLOW_MAIN_BOARD", "true").lower() == "true"
+ALLOW_CHINEXT = os.getenv("ALLOW_CHINEXT", "false").lower() == "true"
+ALLOW_STAR = os.getenv("ALLOW_STAR", "false").lower() == "true"
+ALLOW_BSE = os.getenv("ALLOW_BSE", "false").lower() == "true"
+EXCLUDE_ST = os.getenv("EXCLUDE_ST", "true").lower() == "true"
+MIN_PRICE = float(os.getenv("MIN_PRICE", "2"))
+MAX_PRICE = float(os.getenv("MAX_PRICE", "200"))
+MIN_AMOUNT = float(os.getenv("MIN_AMOUNT", "100000000"))

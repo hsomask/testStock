@@ -1,4 +1,4 @@
-.PHONY: build init-db preflight mapper daily email logs
+.PHONY: build init-db preflight mapper daily email logs tracker backtest
 
 build:
 	docker compose build
@@ -17,6 +17,12 @@ daily:
 
 email:
 	docker compose run --rm --entrypoint "" stock-report python -m analysis.email_sender
+
+tracker:
+	docker compose run --rm --entrypoint "" stock-report python -m analysis.signal_tracker
+
+backtest:
+	docker compose run --rm --entrypoint "" stock-report python -m analysis.backtest_report
 
 logs:
 	docker compose logs -f

@@ -10,6 +10,12 @@ python -m analysis.board_history
 echo "=== 生成报告 ==="
 python -m analysis.daily_report --mode both --force
 
+echo "=== 更新信号表现 ==="
+python -m analysis.signal_tracker || echo "[警告] 信号表现更新失败"
+
+echo "=== 生成策略统计 ==="
+python -m analysis.backtest_report || echo "[警告] 策略统计生成失败"
+
 echo "=== 推送消息 ==="
 
 if [ "$PUSH_CHANNEL" = "email" ]; then

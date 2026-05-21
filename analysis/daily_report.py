@@ -32,6 +32,8 @@ from analysis.data_fetcher import (
     enrich_stock_indicators,
     enrich_selected_stocks_indicators,
 )
+from analysis.account_filter import filter_tradeable_stocks
+from analysis.trade_plan import generate_trade_plan, save_trade_plan
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
@@ -445,6 +447,16 @@ def main():
         quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn, selector_result)
 
         save_data_quality_log(trade_date, quality, data_status, db_conn)
+
+        # 账户过滤
+        filtered_result, excluded_result = filter_tradeable_stocks(selector_result)
+
+        # 生成交易计划
+        trade_plan = generate_trade_plan(
+            trade_date, market_result, quality, themes,
+            filtered_result, excluded_result
+        )
+        save_trade_plan(trade_plan, trade_date)
 
         # 生成结构化摘要 JSON
         summary = build_summary_json(trade_date, market_result, sentiment_result,
