@@ -1,8 +1,11 @@
 import pandas as pd
 import numpy as np
+import warnings
 from datetime import datetime
 import akshare as ak
 import logging
+
+warnings.filterwarnings("ignore")
 
 from analysis.utils import safe_numeric
 
@@ -286,8 +289,8 @@ def fetch_concept_boards():
     return _fetch_boards_ths("概念", ak.stock_board_concept_name_ths)
 
 
-def _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500):
-    """通用 EastMoney push2delay 数据获取"""
+def _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=100):
+    """通用 EastMoney push2delay 分页获取"""
     import requests as _req
 
     s = _req.Session()
@@ -298,22 +301,33 @@ def _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=500):
     })
 
     url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": "1",
-        "pz": str(pz),
-        "po": "1",
-        "np": "1",
-        "fltt": "2",
-        "invt": "2",
-        "fid": "f3",
-        "fs": fs_filter,
-        "fields": fields,
-    }
+    all_rows = []
+    page = 1
+    total = None
 
-    resp = s.get(url, params=params, timeout=30)
-    data = resp.json()
-    rows = data.get("data", {}).get("diff") or []
-    df = pd.DataFrame(rows)
+    while True:
+        params = {
+            "pn": str(page),
+            "pz": str(pz),
+            "po": "1",
+            "np": "1",
+            "fltt": "2",
+            "invt": "2",
+            "fid": "f3",
+            "fs": fs_filter,
+            "fields": fields,
+        }
+        resp = s.get(url, params=params, timeout=30)
+        data = resp.json()
+        if total is None:
+            total = data.get("data", {}).get("total", 0)
+        diff = data.get("data", {}).get("diff") or []
+        all_rows.extend(diff)
+        if len(all_rows) >= total:
+            break
+        page += 1
+
+    df = pd.DataFrame(all_rows)
     if df.empty:
         return df
 
@@ -439,23 +453,56 @@ def _get_stock_history_tx(code: str, days: int = 80):
         return pd.DataFrame()
 
 
-def _get_hist_from_db(code, days=80):
-    """从 stock_hist_kline 表读取历史K线"""
+_hist_db_conn = None
+
+def _get_hist_db_conn():
+    global _hist_db_conn
+    if _hist_db_conn is not None:
+        try:
+            if not _hist_db_conn.closed:
+                # 验证连接仍可用
+                cur = _hist_db_conn.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                return _hist_db_conn
+        except Exception:
+            # 连接已断开，关闭并重建
+            try:
+                _hist_db_conn.close()
+            except Exception:
+                pass
+            _hist_db_conn = None
+
     import psycopg2 as _pg
     from data.config import DATABASE_DSN as _dsn
     if not _dsn:
+        return None
+    _hist_db_conn = _pg.connect(_dsn)
+    return _hist_db_conn
+
+
+def _close_hist_db_conn():
+    global _hist_db_conn
+    if _hist_db_conn is not None and not _hist_db_conn.closed:
+        _hist_db_conn.close()
+    _hist_db_conn = None
+
+
+def _get_hist_from_db(code, days=80):
+    """从 stock_hist_kline 表读取历史K线"""
+    conn = _get_hist_db_conn()
+    if conn is None:
         return pd.DataFrame()
     try:
-        conn = _pg.connect(_dsn)
         df = pd.read_sql(
             "SELECT trade_date as date, open, close, high, low, volume "
             "FROM stock_hist_kline WHERE code=%s "
             "ORDER BY trade_date DESC LIMIT %s",
             conn, params=(code, days)
         )
-        conn.close()
         if df.empty:
             return df
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
         df = df.sort_values("date")
         df["amount"] = np.nan
         df["pct_chg"] = np.nan
@@ -467,13 +514,11 @@ def _get_hist_from_db(code, days=80):
 
 
 def _save_hist_to_db(code, df):
-    """保存历史K线到 stock_hist_kline"""
-    import psycopg2 as _pg
-    from data.config import DATABASE_DSN as _dsn
-    if not _dsn or df.empty or "date" not in df.columns:
+    """保存历史K线到 stock_hist_kline，复用连接批量写入"""
+    conn = _get_hist_db_conn()
+    if conn is None or df.empty or "date" not in df.columns:
         return
     try:
-        conn = _pg.connect(_dsn)
         cur = conn.cursor()
         for _, row in df.iterrows():
             if pd.isna(row.get("date")):
@@ -481,12 +526,7 @@ def _save_hist_to_db(code, df):
             cur.execute("""
                 INSERT INTO stock_hist_kline (code, trade_date, open, close, high, low, volume)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (code, trade_date) DO UPDATE SET
-                    open = EXCLUDED.open,
-                    close = EXCLUDED.close,
-                    high = EXCLUDED.high,
-                    low = EXCLUDED.low,
-                    volume = EXCLUDED.volume
+                ON CONFLICT (code, trade_date) DO NOTHING
             """, (
                 code,
                 str(row["date"])[:10],
@@ -498,7 +538,6 @@ def _save_hist_to_db(code, df):
             ))
         conn.commit()
         cur.close()
-        conn.close()
     except Exception as e:
         logger.debug(f"保存历史K线失败：{code}, {e}")
 

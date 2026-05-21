@@ -4,6 +4,9 @@
 """
 import pandas as pd
 import numpy as np
+import psycopg2
+
+from data.config import DATABASE_DSN
 
 
 def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=None, selector_result=None):
@@ -97,6 +100,14 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
     has_stock_board_map = False
     stock_board_map_days_old = None
     ma_missing_ratio = 0.0
+
+    # 确保连接可用，断开则重连
+    if DATABASE_DSN:
+        if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
+            try:
+                db_conn = psycopg2.connect(DATABASE_DSN)
+            except Exception:
+                db_conn = None
 
     if db_conn is not None:
         try:
@@ -224,6 +235,8 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
 
     # 12. 观察池均线覆盖率
     obs_ma_coverage = 0.0
+    obs_total = 0
+    obs_has_ma = 0
     if selector_result:
         obs_total = 0
         obs_has_ma = 0
