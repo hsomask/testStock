@@ -32,6 +32,8 @@ from analysis.data_fetcher import (
     enrich_stock_indicators,
     enrich_selected_stocks_indicators,
 )
+from analysis.account_filter import filter_tradeable_stocks
+from analysis.trade_plan import generate_trade_plan, save_trade_plan
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
@@ -327,7 +329,8 @@ def log_job_end(job_id, status="success", error_message=None):
 
 def generate_report_mode(trade_date, mode, data_status, market_result,
                          industry_result, concept_result, sentiment_result,
-                         selector_result, board_ratio_changes, quality, themes):
+                         selector_result, board_ratio_changes, quality, themes,
+                         trade_plan=None):
     """生成单个模式的报告并保存，返回报告文本"""
     report = render_daily_report(
         trade_date=trade_date,
@@ -341,6 +344,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         mode=mode,
         quality=quality,
         themes=themes,
+        trade_plan=trade_plan,
     )
     path = save_report(report, trade_date, mode)
     try:
@@ -446,6 +450,16 @@ def main():
 
         save_data_quality_log(trade_date, quality, data_status, db_conn)
 
+        # 账户过滤
+        filtered_result, excluded_result = filter_tradeable_stocks(selector_result)
+
+        # 生成交易计划
+        trade_plan = generate_trade_plan(
+            trade_date, market_result, quality, themes,
+            filtered_result, excluded_result
+        )
+        save_trade_plan(trade_plan, trade_date)
+
         # 生成结构化摘要 JSON
         summary = build_summary_json(trade_date, market_result, sentiment_result,
                                      themes, quality, selector_result)
@@ -461,6 +475,7 @@ def main():
                 market_result, industry_result, concept_result,
                 sentiment_result, selector_result, board_ratio_changes,
                 quality, themes,
+                trade_plan=trade_plan,
             )
 
         log_job_end(job_id, "success")
@@ -468,6 +483,7 @@ def main():
     except Exception as e:
         logger.exception(f"日报生成失败：{e}")
         log_job_end(job_id, "failed", str(e))
+        raise
 
     finally:
         if db_conn:

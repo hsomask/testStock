@@ -147,3 +147,32 @@ CREATE TABLE IF NOT EXISTS stock_hist_kline (
     UNIQUE (code, trade_date)
 );
 CREATE INDEX IF NOT EXISTS idx_hist_kline_code_date ON stock_hist_kline(code, trade_date);
+
+
+-- 信号表现追踪表
+-- 追踪 stock_signal 中每条信号的后续表现
+CREATE TABLE IF NOT EXISTS signal_performance (
+    id SERIAL PRIMARY KEY,
+    trade_date DATE NOT NULL,
+    code VARCHAR(20) NOT NULL,
+    name VARCHAR(100),
+    strategy VARCHAR(100),
+    signal_close NUMERIC,
+    next_trade_date DATE,
+    close_t1 NUMERIC,
+    close_t3 NUMERIC,
+    close_t5 NUMERIC,
+    return_t1 NUMERIC,
+    return_t3 NUMERIC,
+    return_t5 NUMERIC,
+    max_high_5d NUMERIC,
+    max_return_5d NUMERIC,
+    min_low_5d NUMERIC,
+    max_drawdown_5d NUMERIC,
+    risk_level VARCHAR(20),
+    action_signal VARCHAR(20),
+    hit_pressure BOOLEAN,
+    hit_invalid BOOLEAN,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (trade_date, code, strategy)
+);
