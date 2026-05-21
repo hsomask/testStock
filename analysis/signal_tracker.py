@@ -7,7 +7,7 @@ import psycopg2
 import pandas as pd
 import numpy as np
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 
 from data.config import DATABASE_DSN
 
@@ -51,10 +51,10 @@ def track_signals(lookback_days=10):
         conn.close()
         return
 
-    # 读取过去 N 天的信号
-    start_date = (datetime.now() - timedelta(days=lookback_days + 5)).strftime("%Y-%m-%d")
+    # 读取过去 N 天的信号（trade_date 为 YYYYMMDD 格式 VARCHAR）
+    start_date = (datetime.now() - timedelta(days=lookback_days + 5)).strftime("%Y%m%d")
     cur.execute(
-        "SELECT DISTINCT trade_date, code, name, strategy, close_price "
+        "SELECT DISTINCT trade_date, code, name, strategy, close_price, risk_level, action_signal "
         "FROM stock_signal WHERE trade_date >= %s ORDER BY trade_date",
         (start_date,)
     )
@@ -76,20 +76,27 @@ def track_signals(lookback_days=10):
     updated = 0
     skipped = 0
 
-    for trade_date, code, name, strategy, signal_close in signals:
+    for trade_date, code, name, strategy, signal_close, risk_level, action_signal in signals:
+        signal_close = float(signal_close) if signal_close else 0
         hist = hist_map.get(code)
         if hist is None or hist.empty:
             skipped += 1
             continue
 
-        # 找到信号日之后的K线
-        if isinstance(trade_date, datetime):
-            td_str = trade_date.strftime("%Y-%m-%d")
+        # trade_date 统一为 YYYYMMDD（兼容 date / datetime / str）
+        if isinstance(trade_date, (datetime, date)):
+            td_str = trade_date.strftime("%Y%m%d")
         else:
-            td_str = str(trade_date)[:10]
+            raw = str(trade_date).strip()
+            td_str = raw.replace("-", "")[:8]
+        td_dash = f"{td_str[:4]}-{td_str[4:6]}-{td_str[6:8]}"
 
-        hist["date"] = pd.to_datetime(hist["date"])
-        future = hist[hist["date"] > td_str].copy()
+        hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
+        hist = hist.dropna(subset=["date"])
+        if hist.empty:
+            skipped += 1
+            continue
+        future = hist[hist["date"] > pd.Timestamp(td_dash)].copy()
 
         if len(future) < 1:
             skipped += 1
@@ -106,7 +113,7 @@ def track_signals(lookback_days=10):
         next_td = future["date"].iloc[0]
 
         def _ret(n):
-            if len(close) >= n:
+            if len(close) >= n and signal_close:
                 return round(float((close.iloc[n - 1] / signal_close - 1) * 100), 2)
             return None
 
@@ -120,9 +127,9 @@ def track_signals(lookback_days=10):
 
         # 5日内最高/最低/最大回撤
         max_high_5d = round(float(high.head(5).max()), 2) if len(high) >= 1 else None
-        max_return_5d = round(float((max_high_5d / signal_close - 1) * 100), 2) if max_high_5d else None
+        max_return_5d = round(float((max_high_5d / signal_close - 1) * 100), 2) if max_high_5d and signal_close else None
         min_low_5d = round(float(low.head(5).min()), 2) if len(low) >= 1 else None
-        max_drawdown_5d = round(float((min_low_5d / signal_close - 1) * 100), 2) if min_low_5d else None
+        max_drawdown_5d = round(float((min_low_5d / signal_close - 1) * 100), 2) if min_low_5d and signal_close else None
 
         # 是否触及压力位/失效位
         hit_pressure = False
@@ -148,19 +155,22 @@ def track_signals(lookback_days=10):
                     close_t1, close_t3, close_t5,
                     return_t1, return_t3, return_t5,
                     max_high_5d, max_return_5d, min_low_5d, max_drawdown_5d,
+                    risk_level, action_signal,
                     hit_pressure, hit_invalid
-                ) VALUES (%s,%s,%s,%s, %s,%s, %s,%s,%s, %s,%s,%s, %s,%s,%s,%s, %s,%s)
+                ) VALUES (%s,%s,%s,%s, %s,%s, %s,%s,%s, %s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
                 ON CONFLICT (trade_date, code, strategy) DO UPDATE SET
                     close_t1=EXCLUDED.close_t1, close_t3=EXCLUDED.close_t3, close_t5=EXCLUDED.close_t5,
                     return_t1=EXCLUDED.return_t1, return_t3=EXCLUDED.return_t3, return_t5=EXCLUDED.return_t5,
                     max_high_5d=EXCLUDED.max_high_5d, max_return_5d=EXCLUDED.max_return_5d,
                     min_low_5d=EXCLUDED.min_low_5d, max_drawdown_5d=EXCLUDED.max_drawdown_5d,
+                    risk_level=EXCLUDED.risk_level, action_signal=EXCLUDED.action_signal,
                     hit_pressure=EXCLUDED.hit_pressure, hit_invalid=EXCLUDED.hit_invalid
             """, (
                 td_str, code, name, strategy, signal_close, next_td,
                 close_t1, close_t3, close_t5,
                 return_t1, return_t3, return_t5,
                 max_high_5d, max_return_5d, min_low_5d, max_drawdown_5d,
+                risk_level, action_signal,
                 hit_pressure, hit_invalid
             ))
             updated += 1

@@ -72,34 +72,25 @@ def _classify_stock(row):
     if pd.notna(turnover) and turnover >= 30:
         return "高风险回避", f"换手率{turnover:.0f}%≥30%"
 
+    # 关键指标缺失 → 只能观察
+    has_ma5 = pd.notna(row.get("ma5"))
+    has_ma20 = pd.notna(row.get("ma20"))
+    has_pct_5d = pd.notna(pct_5d)
+    has_pct_20d = pd.notna(pct_20d)
+    has_vr = pd.notna(vr)
+    has_to = pd.notna(turnover)
+
+    if not ((has_ma5 or has_ma20) and has_pct_5d and has_pct_20d and has_vr and has_to):
+        return "只观察", "关键指标缺失，只能观察"
+
     # 候选低吸
     conditions = []
-    if action == "观察":
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    if risk in ("低", "中"):
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    if pd.isna(pct_20d) or pct_20d < 50:
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    if pd.isna(pct_5d) or pct_5d < 20:
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    if pd.isna(vr) or vr < 6:
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    if pd.isna(turnover) or turnover < 25:
-        conditions.append(True)
-    else:
-        conditions.append(False)
-    ma_ok = pd.notna(row.get("ma5")) or pd.notna(row.get("ma20"))
-    conditions.append(ma_ok)
+    conditions.append(action == "观察")
+    conditions.append(risk in ("低", "中"))
+    conditions.append(pct_20d < 50)
+    conditions.append(pct_5d < 20)
+    conditions.append(vr < 6)
+    conditions.append(turnover < 25)
 
     if all(conditions):
         return "候选低吸", "满足全部低吸条件"
@@ -167,6 +158,16 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
     trade_plan = {
         "trade_date": trade_date,
         "generated_at": datetime.now().isoformat(),
+        "market_snapshot": {
+            "market_score": market_result.get("score"),
+            "market_status": market_result.get("status"),
+            "confidence_score": quality.get("confidence_score"),
+            "up_count": market_result.get("up_count"),
+            "down_count": market_result.get("down_count"),
+            "limit_up": market_result.get("limit_up"),
+            "limit_down": market_result.get("limit_down"),
+            "sentiment_stage": market_result.get("status", ""),
+        },
         "market_restrictions": restrictions,
         "entry_notes": _gen_entry_notes(),
         "plans": plans,

@@ -320,6 +320,7 @@ def render_themes(themes):
 def render_beginner_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, themes, board_ratio_changes=None,
+    trade_plan=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
 
@@ -421,7 +422,55 @@ def render_beginner_report(
     lines.append("---")
     lines.append("")
 
-    # 7. 明日策略（AI）
+    # 7. 明日交易计划
+    lines.append("## 明日交易计划")
+    lines.append("")
+    if trade_plan:
+        r = trade_plan.get("market_restrictions", {})
+        s = trade_plan.get("summary", {})
+        ms = trade_plan.get("market_snapshot", {})
+
+        if not r.get("allow_real_trade", True):
+            lines.append("> **当前仅适合模拟观察，不建议实盘买入。**")
+            lines.append("")
+
+        lines.append(f"- 是否允许实盘：{'是' if r.get('allow_real_trade') else '否（仅模拟）'}")
+        lines.append(f"- 总仓位上限：{r.get('max_position_pct', 0)}成")
+        lines.append(f"- 单票仓位：{r.get('single_stock_pct', 0)}成")
+        if r.get("reasons"):
+            for reason in r["reasons"]:
+                lines.append(f"  - {reason}")
+        lines.append("")
+
+        lines.append(f"- 候选低吸：{s.get('候选低吸', 0)}只")
+        lines.append(f"- 只观察：{s.get('只观察', 0)}只")
+        lines.append(f"- 高风险回避：{s.get('高风险回避', 0)}只")
+        lines.append(f"- 不可交易过滤：{s.get('不可交易过滤', 0)}只")
+        lines.append("")
+
+        # 候选低吸 Top 3
+        low_buy = trade_plan.get("plans", {}).get("候选低吸", [])
+        if low_buy:
+            lines.append("**候选低吸 Top 3：**")
+            for st in low_buy[:3]:
+                lines.append(f"- {st['name']}（{st['code']}）| 策略：{st.get('strategy','')} | 风险：{st.get('risk_level','')}")
+            lines.append("")
+
+        # 高风险回避 Top 3
+        high_risk = trade_plan.get("plans", {}).get("高风险回避", [])
+        if high_risk:
+            lines.append("**高风险回避 Top 3：**")
+            for st in high_risk[:3]:
+                lines.append(f"- {st['name']}（{st['code']}）| 策略：{st.get('strategy','')} | 原因：{st.get('reason','')}")
+            lines.append("")
+    else:
+        lines.append("暂无交易计划数据")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+
+    # 8. 明日策略（AI）
     lines.append("## 明日策略")
     lines.append("")
     strategy_prompt = build_strategy_prompt(date_display, market, sentiment, selectors)
@@ -464,6 +513,7 @@ def render_beginner_report(
 def render_pro_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
+    trade_plan=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
@@ -589,6 +639,19 @@ def render_pro_report(
         lines.append("---")
         lines.append("")
 
+    # 交易计划
+    if trade_plan:
+        r = trade_plan.get("market_restrictions", {})
+        s = trade_plan.get("summary", {})
+        lines.append(f"## 明日交易计划 | {date_display}")
+        lines.append("")
+        if not r.get("allow_real_trade", True):
+            lines.append("> **当前仅适合模拟观察，不建议实盘买入。**")
+            lines.append("")
+        lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '禁止'} | 仓位上限：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+        lines.append("")
+
     # 风险与机会
     lines.append(f"## 风险与机会 | {date_display}")
     lines.append("")
@@ -652,18 +715,20 @@ def render_pro_report(
 def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
-    quality=None, themes=None,
+    quality=None, themes=None, trade_plan=None,
 ):
     """统一入口，根据 mode 分发到 beginner 或 pro 渲染"""
     if mode == "pro":
         return render_pro_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, board_ratio_changes,
+            trade_plan=trade_plan,
         )
     else:
         return render_beginner_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, themes, board_ratio_changes,
+            trade_plan=trade_plan,
         )
 
 

@@ -13,7 +13,7 @@ from data.config import (
 MAIN_BOARD_PREFIXES = ("000", "001", "002", "600", "601", "603", "605")
 CHINEXT_PREFIXES = ("300", "301")
 STAR_PREFIXES = ("688",)
-BSE_PREFIXES = ("8", "4", "9")
+BSE_PREFIXES = ("920", "8", "4")
 
 
 def _board_check(code):

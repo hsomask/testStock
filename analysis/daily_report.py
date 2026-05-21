@@ -329,7 +329,8 @@ def log_job_end(job_id, status="success", error_message=None):
 
 def generate_report_mode(trade_date, mode, data_status, market_result,
                          industry_result, concept_result, sentiment_result,
-                         selector_result, board_ratio_changes, quality, themes):
+                         selector_result, board_ratio_changes, quality, themes,
+                         trade_plan=None):
     """生成单个模式的报告并保存，返回报告文本"""
     report = render_daily_report(
         trade_date=trade_date,
@@ -343,6 +344,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         mode=mode,
         quality=quality,
         themes=themes,
+        trade_plan=trade_plan,
     )
     path = save_report(report, trade_date, mode)
     try:
@@ -473,6 +475,7 @@ def main():
                 market_result, industry_result, concept_result,
                 sentiment_result, selector_result, board_ratio_changes,
                 quality, themes,
+                trade_plan=trade_plan,
             )
 
         log_job_end(job_id, "success")

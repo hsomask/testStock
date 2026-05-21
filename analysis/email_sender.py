@@ -31,6 +31,28 @@ def find_latest_summary():
     return files[-1]
 
 
+def find_latest_trade_plan():
+    """查找最新 trade_plan JSON"""
+    files = sorted(REPORTS_DIR.glob("trade_plan_*.json"))
+    if not files:
+        return None
+    return files[-1]
+
+
+def build_trade_plan_section(tp):
+    """从 trade_plan JSON 组装邮件摘要"""
+    r = tp.get("market_restrictions", {})
+    s = tp.get("summary", {})
+    parts = ["## 明日交易计划"]
+    if not r.get("allow_real_trade", True):
+        parts.append("**当前仅适合模拟观察，不建议实盘买入。**")
+    parts.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '禁止'} | 仓位上限：{r.get('max_position_pct',0)}成")
+    parts.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+    for reason in r.get("reasons", []):
+        parts.append(f"  - {reason}")
+    return "\n".join(parts)
+
+
 def find_latest_report(pro=False):
     files = sorted(REPORTS_DIR.glob("daily_report_*.md"))
 
@@ -232,6 +254,14 @@ def main():
 
         subject = f"A股每日复盘 · {date_str}"
         body = build_email_body_from_json(data, beginner_path, pro_path)
+
+        # 交易计划摘要（优先展示）
+        tp_path = find_latest_trade_plan()
+        if tp_path:
+            tp = json.loads(tp_path.read_text(encoding="utf-8"))
+            tp_section = build_trade_plan_section(tp)
+            body = tp_section + "\n\n---\n\n" + body
+
         print(f"[邮件] 使用 summary JSON：{summary}")
     elif beginner_path is not None:
         # 降级：解析 Markdown

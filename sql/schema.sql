@@ -169,6 +169,8 @@ CREATE TABLE IF NOT EXISTS signal_performance (
     max_return_5d NUMERIC,
     min_low_5d NUMERIC,
     max_drawdown_5d NUMERIC,
+    risk_level VARCHAR(20),
+    action_signal VARCHAR(20),
     hit_pressure BOOLEAN,
     hit_invalid BOOLEAN,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
