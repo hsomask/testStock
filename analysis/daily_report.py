@@ -468,6 +468,7 @@ def main():
     except Exception as e:
         logger.exception(f"日报生成失败：{e}")
         log_job_end(job_id, "failed", str(e))
+        raise
 
     finally:
         if db_conn:

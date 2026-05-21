@@ -230,9 +230,6 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
         has_volume_ratio = False
         items.append({"item": "量比字段", "status": "不可用", "detail": "无个股数据"})
 
-    # 确保分数在 0-100
-    confidence_score = max(0, min(100, score))
-
     # 12. 观察池均线覆盖率
     obs_ma_coverage = 0.0
     obs_total = 0
@@ -260,6 +257,9 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
             score -= 10
             items.append({"item": "观察池均线", "status": "大量缺失", "detail": f"观察池均线覆盖率 {obs_ma_coverage:.0%}（{obs_has_ma}/{obs_total}）"})
             issues.append(f"观察池均线覆盖率仅 {obs_ma_coverage:.0%}，报告可读性下降。")
+
+    # 确保分数在 0-100（所有检查完成后再计算）
+    confidence_score = max(0, min(100, score))
 
     return {
         "confidence_score": confidence_score,
