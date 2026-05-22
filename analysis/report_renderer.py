@@ -102,8 +102,23 @@ def build_strategy_prompt(trade_date, market, sentiment, selectors):
 def render_board_table(df, max_rows=10):
     if df is None or df.empty:
         return "暂无数据\n"
+    seen = set()
+    deduped = []
+    for _, row in df.iterrows():
+        key = (
+            row.get("pct_chg", np.nan),
+            row.get("turnover", np.nan),
+            str(row.get("leader", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+        if len(deduped) >= max_rows:
+            break
+
     lines = []
-    for _, row in df.head(max_rows).iterrows():
+    for row in deduped:
         name = row.get("board_name", "-")
         pct = fmt_pct(row.get("pct_chg", np.nan))
         turnover = row.get("turnover", np.nan)
@@ -219,6 +234,14 @@ def render_stock_pool_beginner(df, pool_label):
         entry_reason = row.get("entry_reason", row.get("reason", ""))
         lines.append(f"**入选原因**：{entry_reason}")
         lines.append("")
+
+        # 新股/数据不足说明
+        is_new_stock = str(row.get("name", "")).startswith("N")
+        missing_ma = pd.isna(row.get("ma5")) and pd.isna(row.get("ma20"))
+        missing_hist = pd.isna(row.get("pct_5d")) and pd.isna(row.get("pct_20d"))
+        if is_new_stock or (missing_ma and missing_hist):
+            lines.append("> 新股或历史交易日不足，量比和均线无法正常计算。")
+            lines.append("")
 
         # 风险原因
         risk_reasons = row.get("risk_reasons", "")
@@ -419,6 +442,26 @@ def render_beginner_report(
     for pool_key, label in pool_sections:
         pool_df = selectors.get(pool_key)
         lines.append(render_stock_pool_beginner(pool_df, label))
+
+    # 多策略重合个股
+    code_to_pools = {}
+    for pool_key, _ in pool_sections:
+        pool_df = selectors.get(pool_key)
+        if pool_df is None or pool_df.empty:
+            continue
+        for _, row in pool_df.iterrows():
+            code = str(row.get("code", ""))
+            if code not in code_to_pools:
+                code_to_pools[code] = {"name": str(row.get("name", "")), "pools": []}
+            code_to_pools[code]["pools"].append(pool_key)
+
+    overlaps = {k: v for k, v in code_to_pools.items() if len(v["pools"]) > 1}
+    if overlaps:
+        lines.append("### 多策略重合个股")
+        lines.append("")
+        for code, info in sorted(overlaps.items(), key=lambda x: -len(x[1]["pools"])):
+            lines.append(f"- **{info['name']}**（{code}）：{'、'.join(info['pools'])}")
+        lines.append("")
     lines.append("---")
     lines.append("")
 
@@ -597,6 +640,26 @@ def render_pro_report(
                 lines.append("|---|---|---|---|")
                 lines.append(render_ratio_change_table(df))
                 lines.append("")
+
+    # 动态概念说明
+    lines.append("### 动态概念说明")
+    lines.append("")
+    lines.append("以下板块为短线情绪类动态板块，非传统行业分类：")
+    lines.append("- **昨日连板**：昨日连续涨停股票组成的动态板块；")
+    lines.append("- **昨日连板_含一字**：包含一字涨停的昨日连板股票；")
+    lines.append("- **昨日打二板以上表现**：昨日尝试二板及以上接力股票的整体表现；")
+    lines.append("- **昨日高换手**：昨日换手率较高股票组合；")
+    lines.append("- **历史新高/近期新高**：价格创出历史或近期高点的股票组合；")
+    lines.append("- **最近多板**：近期多次涨停股票组合。")
+    lines.append("")
+
+    # 榜单说明
+    lines.append("### 榜单说明")
+    lines.append("")
+    lines.append("- **涨幅榜**：板块今天涨得多不多；")
+    lines.append("- **活跃度榜**：偏重换手率/交易热度，涨幅不一定最高但换手最充分；")
+    lines.append("- **强度榜**：综合涨幅、换手、领涨股表现后的评分，强度和活跃度可能有交叉但含义不同。")
+    lines.append("")
 
     lines.append("---")
     lines.append("")
