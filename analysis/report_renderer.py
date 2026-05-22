@@ -444,6 +444,7 @@ def render_beginner_report(
 
         lines.append(f"- 候选低吸：{s.get('候选低吸', 0)}只")
         lines.append(f"- 只观察：{s.get('只观察', 0)}只")
+        lines.append(f"- 交易条件不满足：{s.get('交易条件不满足', 0)}只")
         lines.append(f"- 高风险回避：{s.get('高风险回避', 0)}只")
         lines.append(f"- 不可交易过滤：{s.get('不可交易过滤', 0)}只")
         lines.append("")
@@ -649,7 +650,9 @@ def render_pro_report(
             lines.append("> **当前仅适合模拟观察，不建议实盘买入。**")
             lines.append("")
         lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '禁止'} | 仓位上限：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
-        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 交易条件不满足：{s.get('交易条件不满足',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+        for reason in r.get("reasons", []):
+            lines.append(f"  - {reason}")
         lines.append("")
 
     # 风险与机会

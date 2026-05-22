@@ -60,19 +60,30 @@ def _classify_stock(row):
     vr = row.get("volume_ratio", np.nan)
     turnover = row.get("turnover", np.nan)
 
-    # 高风险回避
+    # 获取今日涨幅
+    today_pct = row.get("pct_chg", np.nan)
+
+    # 1. 高风险回避（仅 signal/risk 触发）
     if action == "回避" or risk == "高":
         return "高风险回避", "信号/风险等级预警"
-    if pd.notna(pct_20d) and pct_20d >= 80:
-        return "高风险回避", f"20日涨幅{pct_20d:.0f}%≥80%"
-    if pd.notna(pct_5d) and pct_5d >= 30:
-        return "高风险回避", f"5日涨幅{pct_5d:.0f}%≥30%"
-    if pd.notna(vr) and vr >= 10:
-        return "高风险回避", f"量比{vr:.1f}≥10"
-    if pd.notna(turnover) and turnover >= 30:
-        return "高风险回避", f"换手率{turnover:.0f}%≥30%"
 
-    # 关键指标缺失 → 只能观察
+    # 2. 交易条件不满足
+    trade_issues = []
+    if pd.notna(pct_20d) and pct_20d >= 80:
+        trade_issues.append(f"20日涨幅{pct_20d:.0f}%≥80%")
+    if pd.notna(pct_5d) and pct_5d >= 30:
+        trade_issues.append(f"5日涨幅{pct_5d:.0f}%≥30%")
+    if pd.notna(vr) and vr >= 10:
+        trade_issues.append(f"量比{vr:.1f}≥10")
+    if pd.notna(turnover) and turnover >= 30:
+        trade_issues.append(f"换手率{turnover:.0f}%≥30")
+    if pd.notna(today_pct) and today_pct >= 19:
+        trade_issues.append(f"今日涨幅{today_pct:.1f}%过高")
+
+    if trade_issues:
+        return "交易条件不满足", "；".join(trade_issues)
+
+    # 3. 关键指标缺失 → 只能观察
     has_ma5 = pd.notna(row.get("ma5"))
     has_ma20 = pd.notna(row.get("ma20"))
     has_pct_5d = pd.notna(pct_5d)
@@ -83,18 +94,12 @@ def _classify_stock(row):
     if not ((has_ma5 or has_ma20) and has_pct_5d and has_pct_20d and has_vr and has_to):
         return "只观察", "关键指标缺失，只能观察"
 
-    # 候选低吸
-    conditions = []
-    conditions.append(action == "观察")
-    conditions.append(risk in ("低", "中"))
-    conditions.append(pct_20d < 50)
-    conditions.append(pct_5d < 20)
-    conditions.append(vr < 6)
-    conditions.append(turnover < 25)
-
-    if all(conditions):
+    # 4. 候选低吸
+    if (action == "观察" and risk in ("低", "中")
+            and pct_20d < 50 and pct_5d < 20 and vr < 6 and turnover < 25):
         return "候选低吸", "满足全部低吸条件"
 
+    # 5. 其他
     return "只观察", "部分条件不满足，继续观察"
 
 
@@ -117,6 +122,7 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
     plans = {
         "候选低吸": [],
         "只观察": [],
+        "交易条件不满足": [],
         "高风险回避": [],
         "不可交易过滤": [],
     }
@@ -174,6 +180,7 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
         "summary": {
             "候选低吸": len(plans["候选低吸"]),
             "只观察": len(plans["只观察"]),
+            "交易条件不满足": len(plans["交易条件不满足"]),
             "高风险回避": len(plans["高风险回避"]),
             "不可交易过滤": len(plans["不可交易过滤"]),
         },
