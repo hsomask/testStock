@@ -1,4 +1,4 @@
-.PHONY: build init-db preflight mapper daily email logs tracker backtest
+.PHONY: build init-db preflight mapper daily email logs tracker backtest validate test-all branch-check
 
 build:
 	docker compose build
@@ -26,3 +26,16 @@ backtest:
 
 logs:
 	docker compose logs -f
+
+validate:
+	python -m analysis.validate_pipeline
+
+test-all:
+	python -m analysis.daily_report --mode both --force
+	python -m analysis.signal_tracker
+	python -m analysis.backtest_report
+	python -m analysis.validate_pipeline
+
+branch-check:
+	git branch
+	git status

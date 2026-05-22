@@ -47,7 +47,7 @@ def build_trade_plan_section(tp):
     if not r.get("allow_real_trade", True):
         parts.append("**当前仅适合模拟观察，不建议实盘买入。**")
     parts.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '禁止'} | 仓位上限：{r.get('max_position_pct',0)}成")
-    parts.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+    parts.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 条件不满足：{s.get('交易条件不满足',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
     for reason in r.get("reasons", []):
         parts.append(f"  - {reason}")
     return "\n".join(parts)
@@ -142,9 +142,14 @@ def send_email(subject, body, attachments=None):
         print("[邮件] SMTP 配置不完整，跳过邮件推送")
         return
 
+    recipients = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
+    if not recipients:
+        print("[邮件] 收件人列表为空，跳过推送")
+        return
+
     msg = MIMEMultipart()
     msg["From"] = SMTP_USER
-    msg["To"] = EMAIL_TO
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
 
     msg.attach(MIMEText(body, "plain", "utf-8"))
@@ -155,7 +160,7 @@ def send_email(subject, body, attachments=None):
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
             server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, [EMAIL_TO], msg.as_string())
+            server.sendmail(SMTP_USER, recipients, msg.as_string())
 
         print("[邮件] 推送成功")
 
