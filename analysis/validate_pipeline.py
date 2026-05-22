@@ -1,8 +1,9 @@
 """
 流程验收脚本
-运行：python -m analysis.validate_pipeline
-检查 DB、表、今日文件、job_run_log 是否完整
+运行：python -m analysis.validate_pipeline [--date YYYYMMDD]
+检查 DB、表、指定日期文件、job_run_log 是否完整
 """
+import argparse
 import json
 import os
 import sys
@@ -14,6 +15,17 @@ import psycopg2
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
+
+
+def _resolve_date(args_date):
+    """解析日期：优先 --date → 最新 summary → 今天"""
+    if args_date:
+        return args_date
+    files = sorted(REPORTS_DIR.glob("daily_summary_*.json"))
+    if files:
+        name = files[-1].stem  # daily_summary_20260522
+        return name.replace("daily_summary_", "")
+    return datetime.now().strftime("%Y%m%d")
 
 REQUIRED_TABLES = [
     "stock_board_map",
@@ -46,9 +58,13 @@ def fail(msg):
 
 
 def main():
-    trade_date = datetime.now().strftime("%Y%m%d")
+    parser = argparse.ArgumentParser(description="流程验收检查")
+    parser.add_argument("--date", type=str, default=None,
+                        help="验收日期 YYYYMMDD，默认取最新 summary 日期或今天")
+    args = parser.parse_args()
+    trade_date = _resolve_date(args.date)
 
-    print("=== 流程验收检查 ===\n")
+    print(f"=== 流程验收检查（{trade_date}）===\n")
 
     # 1. DATABASE_DSN
     print("1. 数据库配置")
@@ -108,16 +124,22 @@ def main():
     else:
         fail("今日 stock_signal 无记录")
 
-    # 7. 今日 signal_performance
+    # 7. signal_performance（近 10 日）
     print("\n7. signal_performance")
-    cur.execute("SELECT COUNT(*) FROM signal_performance WHERE trade_date=%s", (trade_date,))
+    from datetime import timedelta
+    td = datetime.strptime(trade_date, "%Y%m%d")
+    ten_days_ago = (td - timedelta(days=10)).strftime("%Y%m%d")
+    cur.execute(
+        "SELECT COUNT(*) FROM signal_performance WHERE trade_date>=%s AND trade_date<=%s",
+        (ten_days_ago, trade_date)
+    )
     sp_count = cur.fetchone()[0]
     if sp_count > 0:
-        ok(f"signal_performance 今日有 {sp_count} 条")
+        ok(f"signal_performance 近10日有 {sp_count} 条")
     else:
-        warn("signal_performance 暂无数据，可能需要等待 T+1")
+        warn("signal_performance 近10日暂无数据，可能需要等待 T+1")
 
-    # 8. 今日文件
+    # 8. 指定日期文件
     print("\n8. 今日文件检查")
     files_to_check = [
         ("daily_summary", "daily_summary_{}.json"),

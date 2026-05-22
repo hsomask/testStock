@@ -1,4 +1,4 @@
-.PHONY: build init-db preflight mapper daily email logs tracker backtest validate test-all branch-check
+.PHONY: build init-db preflight mapper daily email logs tracker backtest validate test-all branch-check sync-dev release-main
 
 build:
 	docker compose build
@@ -39,3 +39,15 @@ test-all:
 branch-check:
 	git branch
 	git status
+
+sync-dev:
+	git checkout dev
+	git pull origin dev
+	git merge origin/main
+	git push origin dev
+
+release-main:
+	git checkout main
+	git pull origin main
+	git merge dev
+	git push origin main
