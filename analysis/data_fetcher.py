@@ -225,11 +225,23 @@ def _fetch_stock_spot_sina():
 def fetch_index_spot():
     """
     获取主要指数行情
-    优先东方财富，不可用时降级新浪
+    优先东方财富，降级新浪，最终 fallback 腾讯
     """
+    # 东方财富
     if _check_eastmoney():
-        return _fetch_index_spot_em()
-    return _fetch_index_spot_sina()
+        df = _fetch_index_spot_em()
+        if df is not None and not df.empty:
+            return df
+    # 新浪
+    df = _fetch_index_spot_sina()
+    if df is not None and not df.empty:
+        return df
+    # 腾讯 fallback
+    from analysis.data_sources.tencent import fetch_index_spot_tencent
+    indices = fetch_index_spot_tencent()
+    if indices:
+        return pd.DataFrame(indices)
+    return pd.DataFrame()
 
 
 def _fetch_index_spot_em():

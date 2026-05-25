@@ -264,6 +264,12 @@ def render_stock_pool_beginner(df, pool_label):
 
         lines.append("")
 
+        # 题材归因（同花顺热点）
+        ths_reason = row.get("ths_reason", "")
+        if ths_reason:
+            lines.append(f"**题材归因**：{ths_reason}")
+            lines.append("")
+
         # 入选原因
         entry_reason = row.get("entry_reason", row.get("reason", ""))
         lines.append(f"**入选原因**：{entry_reason}")
