@@ -553,7 +553,12 @@ def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=
     n_breakout = select_n_breakout(stock_df, limit=5, market_score=market_score)
     board_linkage = select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score)
     short_strong = select_short_strong(stock_df, limit=5, market_score=market_score)
-    snowball = select_snowball_trend(stock_df, limit=5, market_score=market_score)
+    try:
+        snowball = select_snowball_trend(stock_df, limit=5, market_score=market_score)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(f"滚雪球趋势筛选失败：{e}")
+        snowball = pd.DataFrame()
 
     return {
         "一次起爆": first,
@@ -592,6 +597,8 @@ def main():
         result_map["一次起爆"] = select_first_breakout(stock_df, market_score=market_score)
     if "board_linkage" in indicators:
         result_map["板块联动"] = select_board_linkage(stock_df, market_score=market_score)
+    if "snowball" in indicators:
+        result_map["滚雪球趋势"] = select_snowball_trend(stock_df, market_score=market_score)
 
     for name, df in result_map.items():
         print(f"\n{name}")
