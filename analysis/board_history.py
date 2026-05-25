@@ -208,6 +208,12 @@ def update_board_history():
         logger.warning("DATABASE_DSN 未设置，数据库功能跳过")
         return
 
+    from analysis.data_fetcher import is_trade_day
+    today_ymd = datetime.now().strftime("%Y%m%d")
+    if not is_trade_day(today_ymd):
+        print(f"{today_ymd} 非交易日，跳过板块成交占比更新")
+        return
+
     conn = psycopg2.connect(DATABASE_DSN)
 
     from analysis.data_fetcher import fetch_stock_spot
