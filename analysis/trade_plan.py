@@ -63,6 +63,10 @@ def _classify_stock(row):
     # 获取今日涨幅
     today_pct = row.get("pct_chg", np.nan)
 
+    # 0. 滚雪球趋势 + 可信度 < 70 → 强制只观察
+    # （strategy 从 row 传入，无法在此函数参数中获取，由调用方传入）
+    # 此逻辑在 generate_trade_plan 中处理
+
     # 1. 高风险回避（仅 signal/risk 触发）
     if action == "回避" or risk == "高":
         return "高风险回避", "信号/风险等级预警"
@@ -144,6 +148,10 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
             code = str(row.get("code", ""))
             name = str(row.get("name", ""))
             category, reason = _classify_stock(row)
+            # 滚雪球趋势 + 可信度 < 70 → 强制只观察
+            if pool_name == "滚雪球趋势" and quality.get("confidence_score", 0) < 70 and category == "候选低吸":
+                category = "只观察"
+                reason = "报告可信度低于70，只观察，不生成候选低吸"
             close = row.get("close", np.nan)
             plans[category].append({
                 "code": code,

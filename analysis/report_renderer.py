@@ -102,23 +102,8 @@ def build_strategy_prompt(trade_date, market, sentiment, selectors):
 def render_board_table(df, max_rows=10):
     if df is None or df.empty:
         return "暂无数据\n"
-    seen = set()
-    deduped = []
-    for _, row in df.iterrows():
-        key = (
-            row.get("pct_chg", np.nan),
-            row.get("turnover", np.nan),
-            str(row.get("leader", "")),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-        if len(deduped) >= max_rows:
-            break
-
     lines = []
-    for row in deduped:
+    for _, row in df.head(max_rows).iterrows():
         name = row.get("board_name", "-")
         pct = fmt_pct(row.get("pct_chg", np.nan))
         turnover = row.get("turnover", np.nan)
@@ -196,6 +181,50 @@ def render_market(market):
 
 # ── 观察池渲染 ──
 
+def render_snowball_pool_beginner(df, pool_label):
+    """滚雪球趋势观察池：MACD金叉+MA20+量比，强调趋势跟随"""
+    if df is None or df.empty:
+        return f"暂无符合条件个股\n"
+
+    lines = []
+    lines.append(f"### {pool_label}")
+    lines.append("")
+    lines.append("> 该池偏趋势跟随，不追求当天最强。核心规则：MACD回踩零轴附近后金叉，")
+    lines.append("> 价格站上20日均线，成交量温和放大。持有时以20日均线为生命线，")
+    lines.append("> 收盘跌破则次日离场。若从观察价上涨约30%，考虑减仓。")
+    lines.append("")
+
+    for idx, row in df.reset_index(drop=True).iterrows():
+        risk_level = row.get("risk_level", "数据不足")
+        action_signal = row.get("action_signal", "数据不足")
+        risk_emoji = {"低": "[低]", "中": "[中]", "高": "[高]"}.get(risk_level, "")
+
+        lines.append(f"**{idx + 1}. {row['name']}（{row['code']}）** [观察] {action_signal} | {risk_emoji} {risk_level}风险")
+        lines.append("")
+
+        lines.append(f"- 收盘：{fmt_num(row['close'])} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{fmt_num(row.get('volume_ratio', np.nan))}")
+        lines.append(f"- MA20：{fmt_num(row.get('ma20', np.nan))} | 距离MA20：{fmt_num(row.get('ma20_distance_pct', np.nan), 1)}%")
+        lines.append(f"- MACD DIF：{fmt_num(row.get('macd_dif', np.nan), 4)} | DEA：{fmt_num(row.get('macd_dea', np.nan), 4)}")
+        lines.append(f"- 止损线（MA20）：{fmt_num(row.get('invalid_price', np.nan))} | 止盈提示：上涨30%减仓")
+        lines.append(f"- 持仓周期：{row.get('hold_days', '-')}")
+        lines.append("")
+
+        entry_reason = row.get("entry_reason", row.get("reason", ""))
+        lines.append(f"**入选原因**：{entry_reason}")
+        lines.append("")
+
+        risk_reasons = row.get("risk_reasons", "")
+        if risk_reasons:
+            lines.append(f"**风险原因**：")
+            lines.append(risk_reasons)
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def render_stock_pool_beginner(df, pool_label):
     """小白版：每只股票展示入选原因/风险原因/风险等级/操作信号"""
     if df is None or df.empty:
@@ -234,14 +263,6 @@ def render_stock_pool_beginner(df, pool_label):
         entry_reason = row.get("entry_reason", row.get("reason", ""))
         lines.append(f"**入选原因**：{entry_reason}")
         lines.append("")
-
-        # 新股/数据不足说明
-        is_new_stock = str(row.get("name", "")).startswith("N")
-        missing_ma = pd.isna(row.get("ma5")) and pd.isna(row.get("ma20"))
-        missing_hist = pd.isna(row.get("pct_5d")) and pd.isna(row.get("pct_20d"))
-        if is_new_stock or (missing_ma and missing_hist):
-            lines.append("> 新股或历史交易日不足，量比和均线无法正常计算。")
-            lines.append("")
 
         # 风险原因
         risk_reasons = row.get("risk_reasons", "")
@@ -438,30 +459,14 @@ def render_beginner_report(
         ("二次起爆", "二次起爆观察池"),
         ("板块联动", "板块联动观察池"),
         ("短线强势", "短线强势观察池"),
+        ("滚雪球趋势", "滚雪球趋势观察池"),
     ]
     for pool_key, label in pool_sections:
         pool_df = selectors.get(pool_key)
-        lines.append(render_stock_pool_beginner(pool_df, label))
-
-    # 多策略重合个股
-    code_to_pools = {}
-    for pool_key, _ in pool_sections:
-        pool_df = selectors.get(pool_key)
-        if pool_df is None or pool_df.empty:
-            continue
-        for _, row in pool_df.iterrows():
-            code = str(row.get("code", ""))
-            if code not in code_to_pools:
-                code_to_pools[code] = {"name": str(row.get("name", "")), "pools": []}
-            code_to_pools[code]["pools"].append(pool_key)
-
-    overlaps = {k: v for k, v in code_to_pools.items() if len(v["pools"]) > 1}
-    if overlaps:
-        lines.append("### 多策略重合个股")
-        lines.append("")
-        for code, info in sorted(overlaps.items(), key=lambda x: -len(x[1]["pools"])):
-            lines.append(f"- **{info['name']}**（{code}）：{'、'.join(info['pools'])}")
-        lines.append("")
+        if pool_key == "滚雪球趋势":
+            lines.append(render_snowball_pool_beginner(pool_df, label))
+        else:
+            lines.append(render_stock_pool_beginner(pool_df, label))
     lines.append("---")
     lines.append("")
 
@@ -641,26 +646,6 @@ def render_pro_report(
                 lines.append(render_ratio_change_table(df))
                 lines.append("")
 
-    # 动态概念说明
-    lines.append("### 动态概念说明")
-    lines.append("")
-    lines.append("以下板块为短线情绪类动态板块，非传统行业分类：")
-    lines.append("- **昨日连板**：昨日连续涨停股票组成的动态板块；")
-    lines.append("- **昨日连板_含一字**：包含一字涨停的昨日连板股票；")
-    lines.append("- **昨日打二板以上表现**：昨日尝试二板及以上接力股票的整体表现；")
-    lines.append("- **昨日高换手**：昨日换手率较高股票组合；")
-    lines.append("- **历史新高/近期新高**：价格创出历史或近期高点的股票组合；")
-    lines.append("- **最近多板**：近期多次涨停股票组合。")
-    lines.append("")
-
-    # 榜单说明
-    lines.append("### 榜单说明")
-    lines.append("")
-    lines.append("- **涨幅榜**：板块今天涨得多不多；")
-    lines.append("- **活跃度榜**：偏重换手率/交易热度，涨幅不一定最高但换手最充分；")
-    lines.append("- **强度榜**：综合涨幅、换手、领涨股表现后的评分，强度和活跃度可能有交叉但含义不同。")
-    lines.append("")
-
     lines.append("---")
     lines.append("")
 
@@ -695,11 +680,20 @@ def render_pro_report(
         ("二次起爆", "观察池 · 二次起爆"),
         ("板块联动", "观察池 · 板块联动"),
         ("短线强势", "观察池 · 短线强势"),
+        ("滚雪球趋势", "观察池 · 滚雪球趋势"),
     ]
     for pool_key, header in pool_sections:
         lines.append(f"## {header} | {date_display}")
         lines.append("")
-        lines.append(render_stock_pool_pro(selectors.get(pool_key)))
+        if pool_key == "滚雪球趋势":
+            pool_df = selectors.get(pool_key)
+            if pool_df is not None and not pool_df.empty:
+                lines.append("> 趋势跟随策略：MACD回踩零轴附近后金叉，站上MA20，量比温和放大。")
+                lines.append("> 持有时以MA20为生命线，收盘跌破次日离场，上涨30%考虑减仓。")
+                lines.append("")
+            lines.append(render_stock_pool_pro(pool_df))
+        else:
+            lines.append(render_stock_pool_pro(selectors.get(pool_key)))
         lines.append("---")
         lines.append("")
 
