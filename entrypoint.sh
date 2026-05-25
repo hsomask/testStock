@@ -8,7 +8,7 @@ echo "=== 更新板块成交占比 ==="
 python -m analysis.board_history
 
 echo "=== 生成报告 ==="
-python -m analysis.daily_report --mode both --force
+python -m analysis.daily_report --mode both
 
 echo "=== 更新信号表现 ==="
 python -m analysis.signal_tracker || echo "[警告] 信号表现更新失败"
