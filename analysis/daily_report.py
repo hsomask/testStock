@@ -34,7 +34,7 @@ from analysis.data_fetcher import (
 )
 from analysis.account_filter import filter_tradeable_stocks
 from analysis.trade_plan import generate_trade_plan, save_trade_plan
-from analysis.data_sources.ths_hot import ths_hot_reasons, match_ths_reasons
+from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
@@ -438,22 +438,17 @@ def main():
 
         selector_result = enrich_selected_stocks_indicators(selector_result)
 
-        # 同花顺热点原因匹配（失败不影响主流程）
-        ths_hot_data = []
+        # 同花顺热点股票级归因（按 code 精确匹配，失败不影响主流程）
         try:
-            ths_hot_data = ths_hot_reasons()
-            for pool_name, pool_df in selector_result.items():
-                if pool_df is None or pool_df.empty:
-                    continue
-                pool_df["ths_reason"] = pool_df.apply(
-                    lambda row: ", ".join(
-                        match_ths_reasons(
-                            row.get("concept_tags", []) or [],
-                            ths_hot_data
-                        )
-                    ) if ths_hot_data else "",
-                    axis=1
-                )
+            hot_data = ths_hot_reasons_by_stock()
+            if hot_data:
+                hot_map = {item["code"]: item["reason"] for item in hot_data}
+                for pool_name, pool_df in selector_result.items():
+                    if pool_df is None or pool_df.empty:
+                        continue
+                    pool_df["ths_reason"] = pool_df["code"].apply(
+                        lambda c: hot_map.get(str(c).zfill(6), "")
+                    )
         except Exception as e:
             import logging
             logging.getLogger(__name__).warning(f"同花顺热点匹配失败：{e}")

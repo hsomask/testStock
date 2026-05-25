@@ -4,17 +4,63 @@
 Repository: https://github.com/simonlin1212/a-stock-data
 """
 import logging
-import akshare as ak
+import requests
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
-def ths_hot_reasons():
+def _session():
+    s = requests.Session()
+    s.trust_env = False
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.10jqka.com.cn/",
+    })
+    return s
+
+
+def ths_hot_reasons_by_stock(date=None):
     """
-    获取同花顺概念板块摘要（含热点事件/原因）
-    返回 list[dict]: code, name, reason, pct_chg 等
+    获取同花顺当日强势股 + 题材归因（股票级）
+    date: YYYYMMDD 或 YYYY-MM-DD，默认今天
+    返回 list[dict]: code, name, reason
     """
+    if date is None:
+        date = datetime.now().strftime("%Y%m%d")
+    date = str(date).replace("-", "")
+
     try:
+        s = _session()
+        url = f"http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
+        r = s.get(url, timeout=15)
+        r.encoding = "GBK"
+        data = r.json()
+
+        if data.get("errocode") != 0:
+            logger.debug(f"同花顺热点接口返回异常：{data.get('errormsg', '')}")
+            return []
+
+        results = []
+        for item in data.get("data", []):
+            code = str(item.get("code", "")).zfill(6)
+            if not code or code == "000000":
+                continue
+            results.append({
+                "code": code,
+                "name": str(item.get("name", "")),
+                "reason": str(item.get("reason", "")),
+            })
+        return results
+    except Exception as e:
+        logger.warning(f"同花顺热点数据获取失败：{e}")
+        return []
+
+
+def ths_hot_reasons():
+    """获取同花顺概念板块摘要（保留，概念级）"""
+    try:
+        import akshare as ak
         df = ak.stock_board_concept_summary_ths()
         if df is None or df.empty:
             return []
@@ -25,29 +71,8 @@ def ths_hot_reasons():
                 "date": str(row.get("日期", "")),
                 "reason": str(row.get("板块事件", "")),
                 "leader": str(row.get("龙头股", "")),
-                "count": int(row.get("成分股数量", 0)) if row.get("成分股数量") else 0,
             })
         return results
     except Exception as e:
-        logger.warning(f"同花顺热点数据获取失败：{e}")
+        logger.warning(f"同花顺概念摘要获取失败：{e}")
         return []
-
-
-def match_ths_reasons(stock_concept_tags, hot_reasons):
-    """
-    匹配个股的概念标签与同花顺热点原因
-    stock_concept_tags: list[str] 个股的概念标签
-    hot_reasons: list[dict] 同花顺热点数据
-    返回匹配的热点原因文本
-    """
-    if not stock_concept_tags or not hot_reasons:
-        return []
-    hot_names = {r["name"] for r in hot_reasons}
-    matches = []
-    for tag in stock_concept_tags:
-        if tag in hot_names:
-            for r in hot_reasons:
-                if r["name"] == tag and r["reason"]:
-                    matches.append(f"{tag}：{r['reason']}")
-                    break
-    return matches[:3]

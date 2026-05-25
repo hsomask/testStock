@@ -199,7 +199,7 @@ def render_market(market):
 def render_snowball_pool_beginner(df, pool_label):
     """滚雪球趋势池：MACD金叉+MA20+量比"""
     if df is None or df.empty:
-        return f"暂无符合条件个股\n"
+        return f"### {pool_label}\n\n暂无符合条件个股\n"
     lines = []
     lines.append(f"### {pool_label}")
     lines.append("")
@@ -311,6 +311,9 @@ def render_stock_pool_pro(df):
             extra = f" | 风险：{risk_level} | 信号：{action_signal}"
 
         lines.append(f"{idx + 1}. {row['name']}({row['code']}) — {row['strategy']}{extra}")
+        ths_reason = row.get("ths_reason", "")
+        if ths_reason:
+            lines.append(f"题材归因：{ths_reason}")
         lines.append(f"收盘：{row['close']} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{row['volume_ratio']}")
         lines.append(
             f"MA5：{fmt_num(row.get('ma5', np.nan))} | MA10：{fmt_num(row.get('ma10', np.nan))} | MA20：{fmt_num(row.get('ma20', np.nan))} | "
