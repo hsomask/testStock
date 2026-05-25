@@ -39,6 +39,12 @@ def _market_restrictions(market_result, quality):
         restrictions["max_position_pct"] = 1
         restrictions["reasons"].append(f"下跌{down_count}只超上涨{up_count}只2倍，仓位上限1成")
 
+    if down_count > up_count:
+        old = restrictions["max_position_pct"]
+        restrictions["max_position_pct"] = min(old, 3)
+        if old > 3:
+            restrictions["reasons"].append(f"下跌{down_count}只多于上涨{up_count}只，市场分化，仓位上限降至3成")
+
     if score < 45:
         restrictions["allow_real_trade"] = False
         restrictions["max_position_pct"] = 0
@@ -81,8 +87,11 @@ def _classify_stock(row):
         trade_issues.append(f"量比{vr:.1f}≥10")
     if pd.notna(turnover) and turnover >= 30:
         trade_issues.append(f"换手率{turnover:.0f}%≥30")
-    if pd.notna(today_pct) and today_pct >= 19:
-        trade_issues.append(f"今日涨幅{today_pct:.1f}%过高")
+    # 接近涨停判断：20cm板(300/301/688)用19%，主板用9.5%
+    is_20cm = str(row.get("code", "")).startswith(("300", "301", "688"))
+    limit_like = 19 if is_20cm else 9.5
+    if pd.notna(today_pct) and today_pct >= limit_like:
+        trade_issues.append(f"今日涨幅{today_pct:.1f}%接近涨停，不适合作为低吸候选")
 
     if trade_issues:
         return "交易条件不满足", "；".join(trade_issues)
