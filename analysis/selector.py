@@ -395,12 +395,165 @@ def _select_board_linkage_fallback(stock_df, limit=5, market_score=None):
     return add_common_fields(result, "板块联动", style="short", market_score=market_score)
 
 
+def _pass_snowball_base_filter(row, ALLOW_CHINEXT=False, ALLOW_STAR=False, ALLOW_BSE=False,
+                                 ALLOW_MAIN_BOARD=True, MIN_AMOUNT=100000000):
+    """滚雪球趋势基础过滤，返回 (通过, 原因)"""
+    code = str(row.get("code", ""))
+    name = str(row.get("name", ""))
+    close = row.get("close", np.nan)
+    amount = row.get("amount", np.nan)
+    volume_ratio = row.get("volume_ratio", np.nan)
+    pct_20d = row.get("pct_20d", np.nan)
+    pct_5d = row.get("pct_5d", np.nan)
+    ma20 = row.get("ma20", np.nan)
+
+    # ST / 退市 / 新股
+    if "ST" in name or "*ST" in name or "退" in name:
+        return False, "ST/退市过滤"
+    if name.startswith("N"):
+        return False, "新股N开头，历史数据不足"
+
+    # 账户权限过滤
+    if code.startswith(("300", "301")) and not ALLOW_CHINEXT:
+        return False, "创业板未开放"
+    if code.startswith("688") and not ALLOW_STAR:
+        return False, "科创板未开放"
+    if code.startswith(("920", "8", "4")) and not ALLOW_BSE:
+        return False, "北交所未开放"
+    if code.startswith(("000", "001", "002", "600", "601", "603", "605")) and not ALLOW_MAIN_BOARD:
+        return False, "主板未开放"
+
+    # 基础数据完整性
+    if pd.isna(close) or pd.isna(amount) or pd.isna(volume_ratio) or pd.isna(pct_20d) or pd.isna(ma20):
+        return False, "关键指标缺失"
+    if close <= 2:
+        return False, "价格过低"
+    if amount < MIN_AMOUNT:
+        return False, "成交额过低"
+
+    # 20日涨幅
+    if pct_20d > 50:
+        return False, "20日涨幅超过50%，位置偏高"
+
+    # 量比
+    if volume_ratio < 1.5:
+        return False, "量比不足，放量不明显"
+    if volume_ratio > 8:
+        return False, "量比过高，可能异常放量"
+
+    # 距离MA20
+    if ma20 <= 0:
+        return False, "MA20无效"
+    ma20_distance_pct = (close / ma20 - 1) * 100
+    if ma20_distance_pct < 0:
+        return False, "收盘价未站上MA20"
+    if ma20_distance_pct > 15:
+        return False, "距离MA20超过15%，不适合追高"
+
+    # 5日涨幅可选过滤
+    if pd.notna(pct_5d) and pct_5d > 20:
+        return False, "5日涨幅超过20%，短期涨速偏快"
+
+    return True, str(round(ma20_distance_pct, 2))
+
+
+def select_snowball_trend(stock_df, limit=5, market_score=None):
+    """
+    滚雪球趋势观察池
+    MACD 回踩零轴附近金叉 + 站上 MA20 + 量比温和放大
+    """
+    from data.config import ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE, ALLOW_MAIN_BOARD, MIN_AMOUNT
+    from analysis.data_fetcher import get_stock_history, calc_macd
+
+    df = filter_common_stock_pool(stock_df)
+
+    candidates = []
+    for _, row in df.iterrows():
+        passed, reason = _pass_snowball_base_filter(
+            row, ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE, ALLOW_MAIN_BOARD, MIN_AMOUNT
+        )
+        if not passed:
+            continue
+
+        code = str(row.get("code", ""))
+        hist = get_stock_history(code, days=80)
+        if hist.empty or len(hist) < 35:
+            continue
+
+        close_series = hist["close"]
+        close = row.get("close")
+        ma20 = row.get("ma20")
+        ma20_distance_pct = (close / ma20 - 1) * 100 if ma20 and ma20 > 0 else np.nan
+
+        dif, dea, macd_bar = calc_macd(close_series)
+        if dif.empty or len(dif) < 10:
+            continue
+
+        latest_dif = dif.iloc[-1]
+        latest_dea = dea.iloc[-1]
+        prev_dif = dif.iloc[-2]
+        prev_dea = dea.iloc[-2]
+
+        # MACD 金叉（当日 DIF > DEA，前一日 DIF <= DEA）
+        if not (latest_dif > latest_dea and prev_dif <= prev_dea):
+            continue
+
+        # 近10日 DIF 最低在零轴附近
+        if dif.tail(10).min() <= -0.1:
+            continue
+
+        # 最新 DIF 不要离零轴太远
+        if abs(latest_dif) > 1.0:
+            continue
+
+        risk_level = "低" if ma20_distance_pct <= 10 else "中"
+        candidates.append({
+            "code": code,
+            "name": row.get("name"),
+            "close": close,
+            "pct_chg": row.get("pct_chg"),
+            "volume_ratio": row.get("volume_ratio"),
+            "turnover": row.get("turnover"),
+            "ma5": row.get("ma5"),
+            "ma10": row.get("ma10"),
+            "ma20": ma20,
+            "pct_5d": row.get("pct_5d"),
+            "pct_20d": row.get("pct_20d"),
+            "amount": row.get("amount"),
+            "hot_board_hits": row.get("hot_board_hits", []),
+            "hot_board_hit_count": row.get("hot_board_hit_count", 0),
+            "ma20_distance_pct": round(float(ma20_distance_pct), 2),
+            "macd_dif": round(float(latest_dif), 4),
+            "macd_dea": round(float(latest_dea), 4),
+            "macd_bar": round(float(macd_bar.iloc[-1]), 4),
+            "observe_low": round(float(ma20), 2),
+            "observe_high": round(float(close * 1.03), 2),
+            "pressure_price": round(float(close * 1.30), 2),
+            "invalid_price": round(float(ma20), 2),
+            "hold_days": "趋势持有，跌破MA20离场",
+            "strategy": "滚雪球趋势",
+            "action_signal": "观察",
+            "risk_level": risk_level,
+            "entry_reason": f"MACD回踩零轴附近后金叉，收盘站上MA20，量比{row.get('volume_ratio', '-')}",
+            "risk_reasons": "若收盘跌破MA20，次日必须离场；涨幅达到30%后考虑减仓",
+        })
+
+    if not candidates:
+        return pd.DataFrame()
+
+    result = pd.DataFrame(candidates)
+    # 按 MA20 距离从小到大排（越靠近 MA20 越好）
+    result = result.sort_values("ma20_distance_pct", ascending=True).head(limit)
+    return result
+
+
 def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=None):
     first = select_first_breakout(stock_df, limit=5, market_score=market_score)
     n_latent = select_n_latent(stock_df, limit=5, market_score=market_score)
     n_breakout = select_n_breakout(stock_df, limit=5, market_score=market_score)
     board_linkage = select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score)
     short_strong = select_short_strong(stock_df, limit=5, market_score=market_score)
+    snowball = select_snowball_trend(stock_df, limit=5, market_score=market_score)
 
     return {
         "一次起爆": first,
@@ -408,6 +561,7 @@ def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=
         "二次起爆": n_breakout,
         "板块联动": board_linkage,
         "短线强势": short_strong,
+        "滚雪球趋势": snowball,
     }
 
 

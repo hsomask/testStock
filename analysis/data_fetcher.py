@@ -488,6 +488,19 @@ def _close_hist_db_conn():
     _hist_db_conn = None
 
 
+def calc_macd(close_series, fast=12, slow=26, signal=9):
+    """计算 MACD 指标，返回 DIF, DEA, MACD 柱"""
+    close = pd.to_numeric(pd.Series(close_series), errors="coerce").dropna()
+    if len(close) < slow + signal:
+        return pd.Series(dtype=float), pd.Series(dtype=float), pd.Series(dtype=float)
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    dif = ema_fast - ema_slow
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    macd_bar = (dif - dea) * 2
+    return dif, dea, macd_bar
+
+
 def _get_hist_from_db(code, days=80):
     """从 stock_hist_kline 表读取历史K线"""
     conn = _get_hist_db_conn()
