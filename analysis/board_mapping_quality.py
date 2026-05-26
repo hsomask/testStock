@@ -52,21 +52,29 @@ def run(trade_date=None):
         return
 
     # 读取最新 board_amount_ratio
+    requested_date = date_display
     ba_df = pd.read_sql(
         "SELECT * FROM board_amount_ratio WHERE trade_date=%s",
         conn, params=(date_display,)
     )
+    actual_board_date = date_display
     if ba_df.empty:
         ba_df = pd.read_sql(
             "SELECT * FROM board_amount_ratio WHERE trade_date=(SELECT MAX(trade_date) FROM board_amount_ratio)",
             conn
         )
+        if not ba_df.empty:
+            actual_board_date = str(ba_df["trade_date"].max())[:10]
 
     conn.close()
 
     map_df["display_name"] = map_df["board_name"].apply(normalize_board_name)
 
     lines = [f"# 板块映射质量报告 | {date_display}", ""]
+
+    if actual_board_date != requested_date:
+        lines.append(f"> 注意：指定日期无 board_amount_ratio 数据，已使用最近可用日期：{actual_board_date}。")
+        lines.append("")
 
     # ── 一、基本统计 ──
     lines.append("## 一、基本统计")
@@ -165,6 +173,8 @@ def run(trade_date=None):
     # ── JSON 输出 ──
     quality_json = {
         "trade_date": trade_date,
+        "requested_date": requested_date,
+        "actual_board_date": actual_board_date,
         "industry_raw": int(map_df[map_df["board_type"] == "行业"]["board_name"].nunique()),
         "industry_norm": int(map_df[map_df["board_type"] == "行业"]["display_name"].nunique()),
         "concept_raw": int(map_df[map_df["board_type"] == "概念"]["board_name"].nunique()),
