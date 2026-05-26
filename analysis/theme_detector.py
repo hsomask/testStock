@@ -50,6 +50,12 @@ def detect_main_themes(
         if "hot_board_hits" in s and isinstance(s["hot_board_hits"], list):
             pool_board_names.update(s["hot_board_hits"])
 
+    # 板块名称归一化
+    for board in candidates:
+        raw_name = board.get("board_name", "")
+        board["board_name_raw"] = raw_name
+        board["board_name"] = normalize_board_name(raw_name)
+
     # 计算每个候选板块的观察池命中数
     for board in candidates:
         name = board.get("board_name", "")
