@@ -1,4 +1,4 @@
-.PHONY: build init-db preflight mapper daily email logs tracker backtest validate test-all branch-check sync-dev release-main
+.PHONY: build init-db preflight mapper daily email logs tracker backtest trend validate test-all branch-check sync-dev release-main
 
 build:
 	docker compose build
@@ -20,6 +20,9 @@ email:
 
 tracker:
 	docker compose run --rm --entrypoint "" stock-report python -m analysis.signal_tracker
+
+trend:
+	docker compose run --rm --entrypoint "" stock-report python -m analysis.board_trend_tracker
 
 backtest:
 	docker compose run --rm --entrypoint "" stock-report python -m analysis.backtest_report
