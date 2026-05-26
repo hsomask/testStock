@@ -7,6 +7,9 @@ python -m analysis.init_db
 echo "=== 更新板块成交占比 ==="
 python -m analysis.board_history
 
+echo "=== 板块资金趋势追踪 ==="
+python -m analysis.board_trend_tracker || echo "[警告] 资金趋势追踪失败"
+
 echo "=== 生成报告 ==="
 python -m analysis.daily_report --mode both
 
