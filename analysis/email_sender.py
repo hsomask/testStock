@@ -299,6 +299,13 @@ def main():
     if xlsx_path:
         attachments.append(xlsx_path)
 
+    # 附件：V3.1 质量报告
+    for pattern in ["board_mapping_quality_*.md", "board_mapping_quality_*.json",
+                    "board_alias_report_*.md"]:
+        qpath = find_latest_file(pattern)
+        if qpath:
+            attachments.append(qpath)
+
     send_email(subject, body, attachments)
 
 
