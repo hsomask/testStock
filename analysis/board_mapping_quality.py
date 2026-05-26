@@ -14,6 +14,7 @@ import psycopg2
 
 from data.config import DATABASE_DSN
 from analysis.board_alias import normalize_board_name, explain_alias, KEY_BOARDS
+from analysis.board_alias_config import LOW_VALUE_BOARDS, KEY_BOARD_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -157,17 +158,36 @@ def run(trade_date=None):
         lines.append("无疑似重复")
     lines.append("")
 
-    # ── 六、重点板块核查 ──
+    # ── 六、重点板块映射核查 ──
+    all_display = set(board_counts["display_name"].values)
     lines.append("## 六、重点板块映射核查")
-    lines.append("| 板块 | 是否存在 | 成分股数 | 今日成交占比 |")
-    lines.append("|---|---|---:|---:|")
+    lines.append("| 板块 | 是否存在 | 匹配名称 | 成分股数 | 今日成交占比 |")
+    lines.append("|---|---|---|---:|---:|")
     ba_latest = ba_df.dropna(subset=["amount_ratio"]) if not ba_df.empty else pd.DataFrame()
     for kb in KEY_BOARDS:
-        exists = kb in board_counts["display_name"].values
-        cnt = int(board_counts[board_counts["display_name"] == kb]["count"].values[0]) if exists else 0
-        ar_row = ba_latest[ba_latest["board_name"] == kb] if not ba_latest.empty else pd.DataFrame()
-        ar = f"{ar_row['amount_ratio'].values[0]*100:.2f}%" if len(ar_row) > 0 and pd.notna(ar_row['amount_ratio'].values[0]) else "-"
-        lines.append(f"| {kb} | {'是' if exists else '否'} | {cnt} | {ar} |")
+        aliases = KEY_BOARD_ALIASES.get(kb, [kb])
+        matched = [a for a in aliases if a in all_display]
+        if matched:
+            mname = matched[0]
+            cnt = int(board_counts[board_counts["display_name"] == mname]["count"].values[0])
+            ar_row = ba_latest[ba_latest["board_name"] == mname] if not ba_latest.empty else pd.DataFrame()
+            ar = f"{ar_row['amount_ratio'].values[0]*100:.2f}%" if len(ar_row) > 0 and pd.notna(ar_row['amount_ratio'].values[0]) else "-"
+            lines.append(f"| {kb} | 是 | {mname} | {cnt} | {ar} |")
+        else:
+            lines.append(f"| {kb} | 否 | - | 0 | - |")
+    lines.append("")
+
+    # ── 七、低价值/宽泛标签板块 ──
+    low_val = board_counts[board_counts["display_name"].isin(LOW_VALUE_BOARDS)]
+    lines.append("## 七、低价值/宽泛标签板块")
+    lines.append("| 板块 | 类型 | 成分股数 | 说明 |")
+    lines.append("|---|---|---:|---|")
+    for _, r in low_val.iterrows():
+        desc = "宽泛概念" if "概念" in r["display_name"] or "指数" in r["display_name"] else "动态标签"
+        lines.append(f"| {r['display_name']} | {r['board_type']} | {r['count']} | {desc} |")
+    if low_val.empty:
+        lines.append("| - | - | - | 无 |")
+    lines.append(f"> 共 {len(low_val)} 个，这些板块保留但不作为主线摘要优先项。")
     lines.append("")
 
     # ── JSON 输出 ──

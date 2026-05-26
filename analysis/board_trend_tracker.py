@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 
 from data.config import DATABASE_DSN
 from analysis.board_alias import aggregate_by_display_name, KEY_BOARDS
+from analysis.board_alias_config import LOW_VALUE_BOARDS
 
 logger = logging.getLogger(__name__)
 
@@ -649,23 +650,27 @@ def _generate_summary_json(df, trade_date):
     sdf = df[df["life_cycle_signal"].isin(st_signals)].copy()
     wdf = df[df["life_cycle_signal"].isin(wk_signals)].copy()
 
-    # summary_rank_score 排序：KEY_BOARDS优先 + trend_score + 成交占比 + 5日变化
+    # summary_rank_score 排序：KEY_BOARDS优先 + 低价值降权 + trend_score + 成交占比
     if not sdf.empty:
+        sdf["low_penalty"] = sdf["board_name"].apply(lambda n: -30 if n in LOW_VALUE_BOARDS else 0)
         sdf["key_bonus"] = sdf["board_name"].apply(lambda n: 20 if n in KEY_BOARDS else 0)
         sdf["rank_score"] = (
             sdf["trend_score"].fillna(0)
             + sdf["latest_amount_ratio"].fillna(0).clip(upper=0.04) * 500
             + sdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000
             + sdf["key_bonus"]
+            + sdf["low_penalty"]
         )
         sdf = sdf.sort_values("rank_score", ascending=False)
     if not wdf.empty:
+        wdf["low_penalty"] = wdf["board_name"].apply(lambda n: -30 if n in LOW_VALUE_BOARDS else 0)
         wdf["key_bonus"] = wdf["board_name"].apply(lambda n: 20 if n in KEY_BOARDS else 0)
         wdf["rank_score"] = (
             wdf["trend_score"].fillna(0)
             + wdf["latest_amount_ratio"].fillna(0).clip(upper=0.04) * 500
             + wdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000
             + wdf["key_bonus"]
+            + wdf["low_penalty"]
         )
 
     summary = {
