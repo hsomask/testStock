@@ -37,6 +37,13 @@ def _fmt_num(v, digits=1):
     return "-" if v is None or pd.isna(v) else f"{float(v):.{digits}f}"
 
 
+def _excel_num(v, mult=1):
+    """Excel 数值：None/NaN → None，否则 *mult"""
+    if v is None or pd.isna(v):
+        return None
+    return float(v) * mult
+
+
 def _get_db_conn():
     if not DATABASE_DSN:
         return None
@@ -412,14 +419,14 @@ def _generate_excel(df, trade_date):
                 r["board_name"],
                 r.get("flow_status", ""),
                 int(r["trend_score"]),
-                r["latest_amount_ratio"] * 100 if r["latest_amount_ratio"] is not None else None,
-                r.get("amount_ratio_change_5d") * 100 if r.get("amount_ratio_change_5d") is not None else None,
-                r.get("amount_ratio_change_10d") * 100 if r.get("amount_ratio_change_10d") is not None else None,
-                r.get("amount_ratio_change_20d") * 100 if r.get("amount_ratio_change_20d") is not None else None,
+                _excel_num(r.get("latest_amount_ratio"), 100),
+                _excel_num(r.get("amount_ratio_change_5d"), 100),
+                _excel_num(r.get("amount_ratio_change_10d"), 100),
+                _excel_num(r.get("amount_ratio_change_20d"), 100),
                 int(r.get("amount_ratio_up_streak", 0)),
-                r["latest_pct_chg"],
+                _excel_num(r.get("latest_pct_chg")),
                 r.get("leader_name", ""),
-                r.get("leader_pct_chg"),
+                _excel_num(r.get("leader_pct_chg")),
             ]
             for col, v in enumerate(vals, 1):
                 ws.cell(row=row_idx, column=col, value=v)
