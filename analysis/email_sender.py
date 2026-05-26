@@ -39,6 +39,14 @@ def find_latest_trade_plan():
     return files[-1]
 
 
+def find_latest_file(pattern):
+    """按 glob 模式查找最新文件"""
+    files = sorted(REPORTS_DIR.glob(pattern))
+    if not files:
+        return None
+    return files[-1]
+
+
 def build_trade_plan_section(tp):
     """从 trade_plan JSON 组装邮件摘要"""
     r = tp.get("market_restrictions", {})
@@ -285,6 +293,11 @@ def main():
         attachments.append(beginner_path)
     if pro_path:
         attachments.append(pro_path)
+
+    # 附件：Excel 趋势追踪表
+    xlsx_path = find_latest_file("board_trend_tracker_*.xlsx")
+    if xlsx_path:
+        attachments.append(xlsx_path)
 
     send_email(subject, body, attachments)
 
