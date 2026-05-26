@@ -59,23 +59,45 @@ def aggregate_by_display_name(df):
         return df
 
     # 按 (trade_date, board_type, display_name) 分组聚合
-    groups = df.groupby(["trade_date", "board_type", "display_name"], as_index=False, sort=False)
-    agg_map = {
-        "board_code": "first",
-        "pct_chg": "first",
-        "amount": "sum",
-        "amount_ratio": "sum",
-        "turnover": "first",
-        "up_count": "sum",
-        "down_count": "sum",
-        "leader_name": "first",
-        "leader_pct_chg": "first",
-    }
-    # 只聚合存在的列
-    agg_actual = {k: v for k, v in agg_map.items() if k in df.columns}
+    import numpy as np
 
-    result = groups.agg(agg_actual).reset_index(drop=True)
-    result["board_name"] = result["display_name"]
-    result = result.drop(columns=["display_name"])
+    results = []
+    for (td, bt, dname), group in df.groupby(["trade_date", "board_type", "display_name"], sort=False):
+        row = {"trade_date": td, "board_type": bt, "board_name": dname}
 
-    return result
+        row["amount"] = group["amount"].sum() if "amount" in group.columns else None
+        row["amount_ratio"] = group["amount_ratio"].sum() if "amount_ratio" in group.columns else None
+        row["up_count"] = int(group["up_count"].sum()) if "up_count" in group.columns else 0
+        row["down_count"] = int(group["down_count"].sum()) if "down_count" in group.columns else 0
+        row["board_code"] = group["board_code"].iloc[0] if "board_code" in group.columns else ""
+
+        # pct_chg 按 amount 加权平均
+        if "pct_chg" in group.columns and "amount" in group.columns:
+            v = group[group["amount"].notna() & group["pct_chg"].notna()]
+            total_amt = v["amount"].sum()
+            row["pct_chg"] = (v["pct_chg"] * v["amount"]).sum() / total_amt if total_amt > 0 else group["pct_chg"].mean()
+        elif "pct_chg" in group.columns:
+            row["pct_chg"] = group["pct_chg"].mean()
+
+        # turnover 按 amount 加权
+        if "turnover" in group.columns and "amount" in group.columns:
+            v = group[group["amount"].notna() & group["turnover"].notna()]
+            total_amt = v["amount"].sum()
+            row["turnover"] = (v["turnover"] * v["amount"]).sum() / total_amt if total_amt > 0 else group["turnover"].mean()
+        elif "turnover" in group.columns:
+            row["turnover"] = group["turnover"].mean()
+
+        # leader 取涨幅最大的
+        if "leader_pct_chg" in group.columns:
+            valid = group[group["leader_pct_chg"].notna()]
+            if not valid.empty:
+                best = valid.loc[valid["leader_pct_chg"].idxmax()]
+                row["leader_name"] = best.get("leader_name", "")
+                row["leader_pct_chg"] = best["leader_pct_chg"]
+            else:
+                row["leader_name"] = group["leader_name"].iloc[0] if "leader_name" in group.columns else ""
+                row["leader_pct_chg"] = None
+
+        results.append(row)
+
+    return pd.DataFrame(results)

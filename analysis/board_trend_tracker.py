@@ -456,6 +456,9 @@ def _generate_markdown(df, trade_date, windows_available):
     # 五、近10日主线
     lines.append("## 五、近10日主线延续")
     lines.append("")
+    if windows_available < 10:
+        lines.append(f"> 历史数据不足 10 个交易日（当前 {windows_available}），暂不生成近10日主线延续。")
+        lines.append("")
     lines.append("| 板块 | 类型 | 趋势评分 | 10日变化 | 10日上涨天 | 说明 |")
     lines.append("|---|---|---:|---:|---:|---|")
     top10 = df.nlargest(10, "trend_score")
@@ -471,6 +474,9 @@ def _generate_markdown(df, trade_date, windows_available):
     # 六、市场风格
     lines.append("## 六、近20日市场风格")
     lines.append("")
+    if windows_available < 20:
+        lines.append(f"> 历史数据不足 20 个交易日（当前 {windows_available}），暂不生成近20日市场风格。")
+        lines.append("")
     lines.append("| 板块 | 类型 | 趋势评分 | 20日变化 | 状态 |")
     lines.append("|---|---|---:|---:|---|")
     top20 = df.nlargest(10, "trend_score")
@@ -719,7 +725,7 @@ def run(trade_date=None, windows=None):
         print(f"[警告] board_amount_ratio 无数据或数据库不可用，跳过趋势追踪")
         return
 
-    # 板一块名称标准化（Ⅱ/Ⅲ去重 → display_name）
+    # 板块名称标准化（Ⅱ/Ⅲ去重 → display_name）
     df = aggregate_by_display_name(df)
 
     trade_days = sorted(df["trade_date"].dt.strftime("%Y%m%d").unique())
