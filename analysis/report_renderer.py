@@ -649,6 +649,23 @@ def render_pro_report(
     lines.append("")
 
     # 行业板块分析
+    # 板块资金趋势摘要
+    if board_trend_summary:
+        lines.append(f"## 板块资金趋势摘要 | {date_display}")
+        lines.append("")
+        lines.append("| 板块 | 类型 | 阶段变化 | 信号 | 趋势评分 |")
+        lines.append("|---|---|---|---|---:|")
+        for b in board_trend_summary.get("strengthening_boards", [])[:5]:
+            lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
+        for b in board_trend_summary.get("weakening_boards", [])[:5]:
+            lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
+        if board_trend_summary.get("watch_points"):
+            for w in board_trend_summary["watch_points"][:3]:
+                lines.append(f"> {w}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     lines.append(f"## 行业板块分析 | {date_display}")
     lines.append("")
     for title, key in [("行业涨幅 TOP10", "top_gain"), ("行业跌幅 TOP10", "top_loss"),

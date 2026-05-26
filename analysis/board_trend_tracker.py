@@ -25,23 +25,33 @@ REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
 
 # ── 格式化辅助 ──
 
+def _to_float(v):
+    try:
+        if v is None or pd.isna(v):
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
 def _fmt_ratio_pct(v):
-    return "-" if v is None or pd.isna(v) else f"{float(v) * 100:.2f}%"
+    x = _to_float(v)
+    return "-" if x is None else f"{x * 100:.2f}%"
 
 
 def _fmt_change_pct(v):
-    return "-" if v is None or pd.isna(v) else f"{float(v) * 100:+.2f}%"
+    x = _to_float(v)
+    return "-" if x is None else f"{x * 100:+.2f}%"
 
 
 def _fmt_num(v, digits=1):
-    return "-" if v is None or pd.isna(v) else f"{float(v):.{digits}f}"
+    x = _to_float(v)
+    return "-" if x is None else f"{x:.{digits}f}"
 
 
 def _excel_num(v, mult=1):
-    """Excel 数值：None/NaN → None，否则 *mult"""
-    if v is None or pd.isna(v):
-        return None
-    return float(v) * mult
+    x = _to_float(v)
+    return None if x is None else x * mult
 
 
 def _get_db_conn():
@@ -538,7 +548,7 @@ def _generate_excel(df, trade_date):
         bdf = df[df["board_type"] == board_type].sort_values("trend_score", ascending=False)
 
         headers = ["板块", "生命周期", "昨日阶段", "阶段变化", "资金状态", "趋势评分",
-                   "成交占比", "5日变化", "10日变化", "20日变化", "连续上升",
+                   "成交占比", "5日变化", "10日变化", "20日变化", "连续上升", "主线连续天数",
                    "最新涨幅", "领涨股", "领涨涨幅"]
         for col, h in enumerate(headers, 1):
             ws.cell(row=1, column=col, value=h)
@@ -556,6 +566,7 @@ def _generate_excel(df, trade_date):
                 _excel_num(r.get("amount_ratio_change_10d"), 100),
                 _excel_num(r.get("amount_ratio_change_20d"), 100),
                 int(r.get("amount_ratio_up_streak", 0)),
+                int(r.get("mainline_streak", 0)),
                 _excel_num(r.get("latest_pct_chg")),
                 r.get("leader_name", ""),
                 _excel_num(r.get("leader_pct_chg")),
