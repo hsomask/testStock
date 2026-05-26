@@ -3,6 +3,7 @@
 综合涨幅榜、成交占比变化、领涨股、观察池命中数判断当日主线方向
 """
 import pandas as pd
+from analysis.board_alias import normalize_board_name
 import numpy as np
 
 

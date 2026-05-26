@@ -409,6 +409,8 @@ def render_beginner_report(
     if board_trend_summary:
         lines.append("## 板块资金趋势摘要")
         lines.append("")
+        lines.append("> 板块名称已按同花顺常用名称归一，成分股仍基于当前系统映射。")
+        lines.append("")
         ts = board_trend_summary
         for b in ts.get("strengthening_boards", [])[:3]:
             lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}")

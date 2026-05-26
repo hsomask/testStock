@@ -17,6 +17,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 from data.config import DATABASE_DSN
+from analysis.board_alias import aggregate_by_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -717,6 +718,9 @@ def run(trade_date=None, windows=None):
     if df is None:
         print(f"[警告] board_amount_ratio 无数据或数据库不可用，跳过趋势追踪")
         return
+
+    # 板一块名称标准化（Ⅱ/Ⅲ去重 → display_name）
+    df = aggregate_by_display_name(df)
 
     trade_days = sorted(df["trade_date"].dt.strftime("%Y%m%d").unique())
     windows_available = len(trade_days)
