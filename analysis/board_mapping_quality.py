@@ -116,8 +116,41 @@ def run(trade_date=None):
         lines.append("无映射过多个股")
     lines.append("")
 
-    # ── 四、重点板块核查 ──
-    lines.append("## 四、重点板块映射核查")
+    # ── 四、已合并板块 ──
+    lines.append("## 四、已合并板块")
+    merged = {}
+    for name in map_df["board_name"].dropna().unique():
+        d = normalize_board_name(name)
+        if d not in merged:
+            merged[d] = []
+        merged[d].append(str(name))
+    multi = {k: v for k, v in merged.items() if len(v) > 1}
+    if multi:
+        lines.append("| 展示名称 | 原始名称列表 | 合并数量 |")
+        lines.append("|---|---|---:|")
+        for d, raws in sorted(multi.items(), key=lambda x: -len(x[1])):
+            lines.append(f"| {d} | {'、'.join(raws)} | {len(raws)} |")
+    else:
+        lines.append("无合并板块")
+    lines.append("")
+
+    # ── 五、疑似重复但未合并 ──
+    from analysis.board_alias import _find_suspicious_duplicates
+    raw_names = sorted(map_df["board_name"].dropna().unique())
+    suspicious = _find_suspicious_duplicates(raw_names)
+    lines.append("## 五、疑似重复但未合并")
+    if suspicious:
+        lines.append("| 板块A | 板块B | 原因 |")
+        lines.append("|---|---|---|")
+        for a, b, reason in suspicious[:20]:
+            lines.append(f"| {a} | {b} | {reason} |")
+        lines.append(f"> 共发现 {len(suspicious)} 对疑似重复，建议人工审查后决定是否加入 BOARD_ALIAS。")
+    else:
+        lines.append("无疑似重复")
+    lines.append("")
+
+    # ── 六、重点板块核查 ──
+    lines.append("## 六、重点板块映射核查")
     lines.append("| 板块 | 是否存在 | 成分股数 | 今日成交占比 |")
     lines.append("|---|---|---:|---:|")
     ba_latest = ba_df.dropna(subset=["amount_ratio"]) if not ba_df.empty else pd.DataFrame()
