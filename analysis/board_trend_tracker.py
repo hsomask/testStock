@@ -650,28 +650,22 @@ def _generate_summary_json(df, trade_date):
     sdf = df[df["life_cycle_signal"].isin(st_signals)].copy()
     wdf = df[df["life_cycle_signal"].isin(wk_signals)].copy()
 
-    # summary_rank_score 排序：KEY_BOARDS优先 + 低价值降权 + trend_score + 成交占比
+    # sort with KEY_BOARDS bonus
     if not sdf.empty:
-        sdf["low_penalty"] = sdf["board_name"].apply(lambda n: -30 if n in LOW_VALUE_BOARDS else 0)
         sdf["key_bonus"] = sdf["board_name"].apply(lambda n: 20 if n in KEY_BOARDS else 0)
-        sdf["rank_score"] = (
-            sdf["trend_score"].fillna(0)
+        sdf["rank_score"] = (sdf["trend_score"].fillna(0)
             + sdf["latest_amount_ratio"].fillna(0).clip(upper=0.04) * 500
-            + sdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000
-            + sdf["key_bonus"]
-            + sdf["low_penalty"]
-        )
+            + sdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000 + sdf["key_bonus"])
         sdf = sdf.sort_values("rank_score", ascending=False)
     if not wdf.empty:
-        wdf["low_penalty"] = wdf["board_name"].apply(lambda n: -30 if n in LOW_VALUE_BOARDS else 0)
         wdf["key_bonus"] = wdf["board_name"].apply(lambda n: 20 if n in KEY_BOARDS else 0)
-        wdf["rank_score"] = (
-            wdf["trend_score"].fillna(0)
+        wdf["rank_score"] = (wdf["trend_score"].fillna(0)
             + wdf["latest_amount_ratio"].fillna(0).clip(upper=0.04) * 500
-            + wdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000
-            + wdf["key_bonus"]
-            + wdf["low_penalty"]
-        )
+            + wdf["amount_ratio_change_5d"].fillna(0).clip(lower=0) * 1000 + wdf["key_bonus"])
+
+    # 日报 summary 排除低价值板块
+    sdf_summary = sdf[~sdf["board_name"].isin(LOW_VALUE_BOARDS)].copy() if not sdf.empty else sdf
+    wdf_summary = wdf[~wdf["board_name"].isin(LOW_VALUE_BOARDS)].copy() if not wdf.empty else wdf
 
     summary = {
         "trade_date": trade_date,
@@ -680,14 +674,14 @@ def _generate_summary_json(df, trade_date):
             {"board_name": r["board_name"], "board_type": r["board_type"],
              "prev_life_cycle": r["prev_life_cycle"], "life_cycle": r["life_cycle"],
              "life_cycle_signal": r["life_cycle_signal"], "trend_score": int(r["trend_score"])}
-            for _, r in sdf.iterrows()
-        ],
+            for _, r in sdf_summary.iterrows()
+        ] if not sdf_summary.empty else [],
         "weakening_boards": [
             {"board_name": r["board_name"], "board_type": r["board_type"],
              "prev_life_cycle": r["prev_life_cycle"], "life_cycle": r["life_cycle"],
              "life_cycle_signal": r["life_cycle_signal"], "trend_score": int(r["trend_score"])}
-            for _, r in wdf.iterrows()
-        ],
+            for _, r in wdf_summary.iterrows()
+        ] if not wdf_summary.empty else [],
         "top_inflow_5d": [
             {
                 "board_name": r["board_name"],
@@ -724,15 +718,16 @@ def _generate_summary_json(df, trade_date):
 
 def _gen_watch_points(df):
     points = []
-    inflow = df[df["flow_status"].isin(["持续流入", "加速流入"])]
+    df2 = df[~df["board_name"].isin(LOW_VALUE_BOARDS)].copy()
+    inflow = df2[df2["flow_status"].isin(["持续流入", "加速流入"])]
     if not inflow.empty:
         top = inflow.nlargest(2, "trend_score")
         for _, r in top.iterrows():
             points.append(f"如果 {r['board_name']} 继续成交占比提升，主线确认度提高")
-    divergence = df[df["flow_status"] == "高位分歧"]
+    divergence = df2[df2["flow_status"] == "高位分歧"]
     if not divergence.empty:
         points.append(f"如果 {divergence.iloc[0]['board_name']} 放量但上涨比例下降，警惕分歧")
-    outflow = df[df["flow_status"] == "资金退潮"]
+    outflow = df2[df2["flow_status"] == "资金退潮"]
     if not outflow.empty:
         points.append(f"如果 {outflow.iloc[0]['board_name']} 成交占比继续下降，降低关注")
     return points
