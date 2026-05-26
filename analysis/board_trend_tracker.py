@@ -21,7 +21,20 @@ from data.config import DATABASE_DSN
 logger = logging.getLogger(__name__)
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
-WINDOWS = [5, 10, 20]
+
+
+# ── 格式化辅助 ──
+
+def _fmt_ratio_pct(v):
+    return "-" if v is None or pd.isna(v) else f"{float(v) * 100:.2f}%"
+
+
+def _fmt_change_pct(v):
+    return "-" if v is None or pd.isna(v) else f"{float(v) * 100:+.2f}%"
+
+
+def _fmt_num(v, digits=1):
+    return "-" if v is None or pd.isna(v) else f"{float(v):.{digits}f}"
 
 
 def _get_db_conn():
@@ -34,7 +47,7 @@ def _get_db_conn():
         return None
 
 
-def _read_board_data(trade_date, lookback=30):
+def _read_board_data(trade_date, lookback=60):
     """读取 board_amount_ratio 最近 N 天数据"""
     conn = _get_db_conn()
     if conn is None:
@@ -55,7 +68,7 @@ def _read_board_data(trade_date, lookback=30):
     return df
 
 
-def _calc_metrics(df, trade_date):
+def _calc_metrics(df, trade_date, windows):
     """计算每个板块的核心指标"""
     end_dt = datetime.strptime(trade_date, "%Y%m%d")
     results = []
@@ -90,7 +103,7 @@ def _calc_metrics(df, trade_date):
             metrics["up_ratio"] = uc / (uc + dc) if (uc + dc) > 0 else None
 
             # 窗口指标
-            for w in WINDOWS:
+            for w in windows:
                 window = group[group["trade_date"] >= end_dt - timedelta(days=w * 2)].tail(w)
                 if len(window) < 2:
                     metrics[f"amount_ratio_change_{w}d"] = None
@@ -199,12 +212,11 @@ def _calc_trend_score(row):
     # 价格维度 max 20
     if pct > 0:
         score += 6
+    if pct > 1:
+        score += 8
     p5 = row.get("pct_positive_days_5d") or 0
     if p5 >= 3:
         score += 6
-    # 近5日涨幅均值
-    if c5 is not None:
-        score += min(8, max(0, int(c5 * 2000)))
 
     # 扩散维度 max 20
     if up_ratio >= 0.55:
@@ -272,12 +284,14 @@ def _generate_markdown(df, trade_date, windows_available):
     lines.append("|---|---|---|---:|---:|---:|---:|---:|")
     inflow5 = df[df["flow_status"].isin(["持续流入", "加速流入", "资金回流"])].nlargest(10, "trend_score")
     for _, r in inflow5.iterrows():
+        c5 = _fmt_change_pct(r.get("amount_ratio_change_5d"))
+        ar = _fmt_ratio_pct(r.get("latest_amount_ratio"))
+        pct = _fmt_num(r.get("latest_pct_chg"), 1)
+        streak = int(r.get("amount_ratio_up_streak", 0))
+        leader = r.get("leader_name", "-")
         lines.append(
             f"| {r['board_name']} | {r['board_type']} | {r['flow_status']} | "
-            f"{int(r['trend_score'])} | {r['latest_pct_chg']:.1f}% | "
-            f"{r['latest_amount_ratio']*100:.2f}%" if r['latest_amount_ratio'] is not None else "-"
-            f" | {r.get('amount_ratio_change_5d')*100:+.2f}" if r.get('amount_ratio_change_5d') is not None else "-"
-            f" | {int(r['amount_ratio_up_streak'])} | {r['leader_name']} |"
+            f"{int(r['trend_score'])} | {pct}% | {ar} | {c5} | {streak} | {leader} |"
         )
     lines.append("")
 
@@ -287,8 +301,9 @@ def _generate_markdown(df, trade_date, windows_available):
     lines.append("|---|---|---:|---:|---:|")
     outflow = df[df["flow_status"] == "资金退潮"].nlargest(10, "trend_score")
     for _, r in outflow.iterrows():
-        c5 = r.get("amount_ratio_change_5d")
-        lines.append(f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | {r['latest_pct_chg']:.1f}% | {c5*100:+.2f}%" if c5 is not None else "- |")
+        c5 = _fmt_change_pct(r.get("amount_ratio_change_5d"))
+        pct = _fmt_num(r.get("latest_pct_chg"), 1)
+        lines.append(f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | {pct}% | {c5} |")
     lines.append("")
 
     # 三、近10日主线
@@ -298,11 +313,11 @@ def _generate_markdown(df, trade_date, windows_available):
     lines.append("|---|---|---:|---:|---:|---|")
     top10 = df.nlargest(10, "trend_score")
     for _, r in top10.iterrows():
-        c10 = r.get("amount_ratio_change_10d")
+        c10 = _fmt_change_pct(r.get("amount_ratio_change_10d"))
         p10 = r.get("pct_positive_days_10d") or 0
         lines.append(
             f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
-            f"{c10*100:+.2f}%" if c10 is not None else "- | {p10} | {_score_to_label(r['trend_score'])} |"
+            f"{c10} | {p10} | {_score_to_label(r['trend_score'])} |"
         )
     lines.append("")
 
@@ -313,10 +328,10 @@ def _generate_markdown(df, trade_date, windows_available):
     lines.append("|---|---|---:|---:|---|")
     top20 = df.nlargest(10, "trend_score")
     for _, r in top20.iterrows():
-        c20 = r.get("amount_ratio_change_20d")
+        c20 = _fmt_change_pct(r.get("amount_ratio_change_20d"))
         lines.append(
             f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
-            f"{c20*100:+.2f}%" if c20 is not None else "- | {_score_to_label(r['trend_score'])} |"
+            f"{c20} | {_score_to_label(r['trend_score'])} |"
         )
     lines.append("")
 
@@ -327,10 +342,13 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append("| 板块 | 类型 | 成交占比 | 放量 | 涨幅 | 上涨比 | 风险 |")
         lines.append("|---|---|---:|---:|---:|---:|---|")
         for _, r in divergence.iterrows():
+            ar = _fmt_ratio_pct(r.get("latest_amount_ratio"))
+            vs5 = _fmt_num(r.get("amount_vs_5d_mean") or 1, 1)
+            pct = _fmt_num(r.get("latest_pct_chg"), 1)
+            ur = f"{r['up_ratio']*100:.0f}%" if r.get("up_ratio") else "-"
             lines.append(
                 f"| {r['board_name']} | {r['board_type']} | "
-                f"{r['latest_amount_ratio']*100:.2f}% | {r.get('amount_vs_5d_mean', 0) or 1:.1f}x | "
-                f"{r['latest_pct_chg']:.1f}% | {r['up_ratio']*100:.0f}% | 放量不涨，警惕分歧 |"
+                f"{ar} | {vs5}x | {pct}% | {ur} | 放量不涨，警惕分歧 |"
             )
     else:
         lines.append("暂无高位分歧板块")
@@ -344,11 +362,12 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append("| 板块 | 类型 | 趋势评分 | 5日变化 | 10日变化 | 涨幅 |")
         lines.append("|---|---|---:|---:|---:|---:|")
         for _, r in backflow.iterrows():
-            c5 = r.get("amount_ratio_change_5d")
-            c10 = r.get("amount_ratio_change_10d")
+            c5 = _fmt_change_pct(r.get("amount_ratio_change_5d"))
+            c10 = _fmt_change_pct(r.get("amount_ratio_change_10d"))
+            pct = _fmt_num(r.get("latest_pct_chg"), 1)
             lines.append(
                 f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
-                f"{c5*100:+.2f}%" if c5 is not None else "- | {c10*100:+.2f}%" if c10 is not None else "- | {r['latest_pct_chg']:.1f}% |"
+                f"{c5} | {c10} | {pct}% |"
             )
     else:
         lines.append("暂无资金回流板块")
@@ -382,7 +401,7 @@ def _generate_excel(df, trade_date):
         ws.title = sheet_name
         bdf = df[df["board_type"] == board_type].sort_values("trend_score", ascending=False)
 
-        headers = ["板块", "资金状态5d", "资金状态10d", "资金状态20d", "趋势评分",
+        headers = ["板块", "资金状态", "趋势评分",
                    "成交占比", "5日变化", "10日变化", "20日变化", "连续上升",
                    "最新涨幅", "领涨股", "领涨涨幅"]
         for col, h in enumerate(headers, 1):
@@ -391,8 +410,6 @@ def _generate_excel(df, trade_date):
         for row_idx, (_, r) in enumerate(bdf.iterrows(), 2):
             vals = [
                 r["board_name"],
-                r.get("flow_status", ""),
-                r.get("flow_status", ""),
                 r.get("flow_status", ""),
                 int(r["trend_score"]),
                 r["latest_amount_ratio"] * 100 if r["latest_amount_ratio"] is not None else None,
@@ -521,7 +538,8 @@ def run(trade_date=None, windows=None):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # 读取数据
-    df = _read_board_data(trade_date, lookback=30)
+    windows = windows or [5, 10, 20]
+    df = _read_board_data(trade_date)
     if df is None:
         print(f"[警告] board_amount_ratio 无数据或数据库不可用，跳过趋势追踪")
         return
@@ -534,7 +552,7 @@ def run(trade_date=None, windows=None):
         return
 
     # 计算指标
-    metrics_df = _calc_metrics(df, trade_date)
+    metrics_df = _calc_metrics(df, trade_date, windows)
     if metrics_df.empty:
         print("[警告] 指标计算结果为空")
         return
