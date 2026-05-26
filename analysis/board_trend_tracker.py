@@ -459,17 +459,18 @@ def _generate_markdown(df, trade_date, windows_available):
     if windows_available < 10:
         lines.append(f"> 历史数据不足 10 个交易日（当前 {windows_available}），暂不生成近10日主线延续。")
         lines.append("")
-    lines.append("| 板块 | 类型 | 趋势评分 | 10日变化 | 10日上涨天 | 说明 |")
-    lines.append("|---|---|---:|---:|---:|---|")
-    top10 = df.nlargest(10, "trend_score")
-    for _, r in top10.iterrows():
-        c10 = _fmt_change_pct(r.get("amount_ratio_change_10d"))
-        p10 = r.get("pct_positive_days_10d") or 0
-        lines.append(
-            f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
-            f"{c10} | {p10} | {_score_to_label(r['trend_score'])} |"
-        )
-    lines.append("")
+    else:
+        lines.append("| 板块 | 类型 | 趋势评分 | 10日变化 | 10日上涨天 | 说明 |")
+        lines.append("|---|---|---:|---:|---:|---|")
+        top10 = df.nlargest(10, "trend_score")
+        for _, r in top10.iterrows():
+            c10 = _fmt_change_pct(r.get("amount_ratio_change_10d"))
+            p10 = r.get("pct_positive_days_10d") or 0
+            lines.append(
+                f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
+                f"{c10} | {p10} | {_score_to_label(r['trend_score'])} |"
+            )
+        lines.append("")
 
     # 六、市场风格
     lines.append("## 六、近20日市场风格")
@@ -477,16 +478,17 @@ def _generate_markdown(df, trade_date, windows_available):
     if windows_available < 20:
         lines.append(f"> 历史数据不足 20 个交易日（当前 {windows_available}），暂不生成近20日市场风格。")
         lines.append("")
-    lines.append("| 板块 | 类型 | 趋势评分 | 20日变化 | 状态 |")
-    lines.append("|---|---|---:|---:|---|")
-    top20 = df.nlargest(10, "trend_score")
-    for _, r in top20.iterrows():
-        c20 = _fmt_change_pct(r.get("amount_ratio_change_20d"))
-        lines.append(
-            f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
-            f"{c20} | {_score_to_label(r['trend_score'])} |"
-        )
-    lines.append("")
+    else:
+        lines.append("| 板块 | 类型 | 趋势评分 | 20日变化 | 状态 |")
+        lines.append("|---|---|---:|---:|---|")
+        top20 = df.nlargest(10, "trend_score")
+        for _, r in top20.iterrows():
+            c20 = _fmt_change_pct(r.get("amount_ratio_change_20d"))
+            lines.append(
+                f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | "
+                f"{c20} | {_score_to_label(r['trend_score'])} |"
+            )
+        lines.append("")
 
     # 七、高位分歧
     lines.append("## 七、高位分歧方向")
