@@ -35,6 +35,16 @@ from analysis.data_fetcher import (
 from analysis.account_filter import filter_tradeable_stocks
 from analysis.trade_plan import generate_trade_plan, save_trade_plan
 from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
+
+
+def load_board_trend_summary(trade_date):
+    path = REPORTS_DIR / f"board_trend_summary_{trade_date}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
@@ -331,7 +341,7 @@ def log_job_end(job_id, status="success", error_message=None):
 def generate_report_mode(trade_date, mode, data_status, market_result,
                          industry_result, concept_result, sentiment_result,
                          selector_result, board_ratio_changes, quality, themes,
-                         trade_plan=None):
+                         trade_plan=None, board_trend_summary=None):
     """生成单个模式的报告并保存，返回报告文本"""
     report = render_daily_report(
         trade_date=trade_date,
@@ -346,6 +356,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         quality=quality,
         themes=themes,
         trade_plan=trade_plan,
+        board_trend_summary=board_trend_summary,
     )
     path = save_report(report, trade_date, mode)
     try:
@@ -466,6 +477,9 @@ def main():
 
         save_data_quality_log(trade_date, quality, data_status, db_conn)
 
+        # 板块资金趋势摘要
+        board_trend_summary = load_board_trend_summary(trade_date)
+
         # 账户过滤
         filtered_result, excluded_result = filter_tradeable_stocks(selector_result)
 
@@ -492,6 +506,7 @@ def main():
                 sentiment_result, selector_result, board_ratio_changes,
                 quality, themes,
                 trade_plan=trade_plan,
+                board_trend_summary=board_trend_summary,
             )
 
         log_job_end(job_id, "success")

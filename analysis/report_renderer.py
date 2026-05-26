@@ -386,7 +386,7 @@ def render_themes(themes):
 def render_beginner_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, themes, board_ratio_changes=None,
-    trade_plan=None,
+    trade_plan=None, board_trend_summary=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
 
@@ -405,6 +405,21 @@ def render_beginner_report(
     lines.append("")
 
     # 2. 今日市场一句话结论（AI）
+    # 板块资金趋势摘要
+    if board_trend_summary:
+        lines.append("## 板一块资金趋势摘要")
+        lines.append("")
+        ts = board_trend_summary
+        for b in ts.get("strengthening_boards", [])[:3]:
+            lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}")
+        for b in ts.get("weakening_boards", [])[:2]:
+            lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}，短线注意")
+        if ts.get("watch_points") and ts["watch_points"]:
+            lines.append(f"- {ts['watch_points'][0]}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     lines.append("## 今日市场一句话结论")
     lines.append("")
     one_line_prompt = build_one_line_prompt(date_display, market, sentiment, industry, concept)
@@ -604,7 +619,7 @@ def render_beginner_report(
 def render_pro_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
-    trade_plan=None,
+    trade_plan=None, board_trend_summary=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
@@ -837,20 +852,20 @@ def render_pro_report(
 def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
-    quality=None, themes=None, trade_plan=None,
+    quality=None, themes=None, trade_plan=None, board_trend_summary=None,
 ):
     """统一入口，根据 mode 分发到 beginner 或 pro 渲染"""
     if mode == "pro":
         return render_pro_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, board_ratio_changes,
-            trade_plan=trade_plan,
+            trade_plan=trade_plan, board_trend_summary=board_trend_summary,
         )
     else:
         return render_beginner_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, themes, board_ratio_changes,
-            trade_plan=trade_plan,
+            trade_plan=trade_plan, board_trend_summary=board_trend_summary,
         )
 
 

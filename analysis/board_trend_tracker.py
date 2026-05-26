@@ -194,6 +194,95 @@ def _classify_flow(row):
     return "无明显方向"
 
 
+def _classify_lifecycle(row):
+    """按优先级判断板块生命周期：分歧→退潮→加速→主升→修复→启动→沉寂"""
+    fs = row.get("flow_status", "")
+    ts = row.get("trend_score", 0)
+    c5 = row.get("amount_ratio_change_5d")
+    c10 = row.get("amount_ratio_change_10d")
+    vs5 = row.get("amount_vs_5d_mean")
+    ar20 = row.get("amount_ratio_mean_20d")
+    ar_latest = row.get("latest_amount_ratio")
+    pct = row.get("latest_pct_chg") or 0
+    ur = row.get("up_ratio") or 0
+
+    # 分歧期
+    if fs == "高位分歧" or (ar_latest is not None and ar20 is not None and ar_latest >= ar20
+            and vs5 is not None and vs5 >= 1.2 and (pct <= 1 or ur < 0.5)):
+        return "分歧期"
+    # 退潮期
+    if fs == "资金退潮" or (c5 is not None and c5 < 0 and pct < 0):
+        return "退潮期"
+    # 加速期
+    if fs == "加速流入" or (c5 is not None and c5 > 0.002 and vs5 is not None and vs5 >= 1.3 and pct > 1):
+        return "加速期"
+    # 主升期
+    if ts >= 70 and c10 is not None and c10 > 0 and c5 is not None and c5 > 0 and ur >= 0.55 and pct > 0:
+        return "主升期"
+    # 修复期
+    if fs == "资金回流" or (c5 is not None and c5 > 0 and c10 is not None and c10 <= 0 and pct > 0):
+        return "修复期"
+    # 启动期
+    if c5 is not None and c5 > 0 and ts >= 40 and ts < 70 and pct > 0:
+        return "启动期"
+    return "沉寂期"
+
+
+def _lifecycle_desc(stage):
+    return {
+        "启动期": "资金开始关注，持续性仍需观察。",
+        "加速期": "成交占比快速提升，短线资金明显加速。",
+        "主升期": "中短期资金持续流入，主线确认度较高。",
+        "分歧期": "成交活跃但上涨扩散不足，需警惕高位分歧。",
+        "修复期": "前期退潮后资金回流，观察修复持续性。",
+        "退潮期": "成交占比下降且表现转弱，资金热度下降。",
+        "沉寂期": "资金方向不明显，暂时不是市场重点。",
+    }.get(stage, "")
+
+
+def _classify_lifecycle_signal(prev_stage, curr_stage):
+    if not prev_stage:
+        return "新增观察"
+    positive = {
+        ("沉寂期", "启动期"): "新启动",
+        ("启动期", "加速期"): "主线加强",
+        ("启动期", "主升期"): "主线确认",
+        ("修复期", "启动期"): "修复转强",
+        ("修复期", "加速期"): "资金回流加强",
+        ("加速期", "主升期"): "主线延续",
+        ("主升期", "主升期"): "主线延续",
+    }
+    warning = {
+        ("主升期", "分歧期"): "主线分歧",
+        ("加速期", "分歧期"): "加速后分歧",
+        ("分歧期", "退潮期"): "分歧转退潮",
+        ("主升期", "退潮期"): "主线退潮",
+        ("启动期", "退潮期"): "启动失败",
+        ("修复期", "退潮期"): "修复失败",
+    }
+    if (prev_stage, curr_stage) in positive:
+        return positive[(prev_stage, curr_stage)]
+    if (prev_stage, curr_stage) in warning:
+        return warning[(prev_stage, curr_stage)]
+    if curr_stage == prev_stage:
+        return "状态延续"
+    if curr_stage in ("启动期", "加速期", "主升期"):
+        return "状态转强"
+    if curr_stage in ("分歧期", "退潮期"):
+        return "状态转弱"
+    return "状态变化"
+
+
+def _calc_mainline_streak(row):
+    """主线连续天数近似：连续上升+上涨天数"""
+    streak = row.get("amount_ratio_up_streak") or 0
+    p5 = row.get("pct_positive_days_5d") or 0
+    stage = row.get("life_cycle", "")
+    if stage in ("启动期", "加速期", "主升期", "修复期"):
+        return min(streak + p5, 5)
+    return 0
+
+
 def _calc_trend_score(row):
     """计算趋势评分 0-100"""
     score = 0
@@ -282,8 +371,48 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append(f"- 当前风险：{names_d} 高位分歧")
     lines.append("")
 
-    # 二、近5日资金流向
-    lines.append("## 二、近5日资金流向")
+    # 二、板块生命周期概览
+    lines.append("## 二、板块生命周期概览")
+    lines.append("")
+    lines.append("| 阶段 | 板块数量 | 代表板块 |")
+    lines.append("|---|---:|---|")
+    for stage in ["主升期", "加速期", "启动期", "分歧期", "修复期", "退潮期", "沉寂期"]:
+        sub = df[df["life_cycle"] == stage]
+        cnt = len(sub)
+        examples = "、".join(sub.nlargest(3, "trend_score")["board_name"].tolist()) if cnt > 0 else "-"
+        lines.append(f"| {stage} | {cnt} | {examples} |")
+    lines.append("")
+
+    # 三、状态迁移提醒
+    lines.append("## 三、状态迁移提醒")
+    lines.append("")
+    strengthen = df[df["life_cycle_signal"].isin([
+        "新启动", "主线加强", "主线确认", "修复转强", "资金回流加强", "主线延续", "状态转强"
+    ])]
+    weaken = df[df["life_cycle_signal"].isin([
+        "主线分歧", "加速后分歧", "分歧转退潮", "主线退潮", "启动失败", "修复失败", "状态转弱"
+    ])]
+
+    if not strengthen.empty:
+        lines.append("### 主线加强")
+        lines.append("")
+        lines.append("| 板块 | 类型 | 昨日 | 今日 | 信号 | 趋势评分 |")
+        lines.append("|---|---|---|---|---:|---:|")
+        for _, r in strengthen.head(10).iterrows():
+            lines.append(f"| {r['board_name']} | {r['board_type']} | {r['prev_life_cycle']} | {r['life_cycle']} | {r['life_cycle_signal']} | {int(r['trend_score'])} |")
+        lines.append("")
+
+    if not weaken.empty:
+        lines.append("### 风险转弱")
+        lines.append("")
+        lines.append("| 板块 | 类型 | 昨日 | 今日 | 信号 | 趋势评分 |")
+        lines.append("|---|---|---|---|---:|---:|")
+        for _, r in weaken.head(10).iterrows():
+            lines.append(f"| {r['board_name']} | {r['board_type']} | {r['prev_life_cycle']} | {r['life_cycle']} | {r['life_cycle_signal']} | {int(r['trend_score'])} |")
+        lines.append("")
+
+    # 四、近5日资金流向
+    lines.append("## 四、近5日资金流向")
     lines.append("")
     lines.append("### 资金流入增强 TOP10")
     lines.append("")
@@ -313,8 +442,8 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append(f"| {r['board_name']} | {r['board_type']} | {int(r['trend_score'])} | {pct}% | {c5} |")
     lines.append("")
 
-    # 三、近10日主线
-    lines.append("## 三、近10日主线延续")
+    # 五、近10日主线
+    lines.append("## 五、近10日主线延续")
     lines.append("")
     lines.append("| 板块 | 类型 | 趋势评分 | 10日变化 | 10日上涨天 | 说明 |")
     lines.append("|---|---|---:|---:|---:|---|")
@@ -328,8 +457,8 @@ def _generate_markdown(df, trade_date, windows_available):
         )
     lines.append("")
 
-    # 四、市场风格
-    lines.append("## 四、近20日市场风格")
+    # 六、市场风格
+    lines.append("## 六、近20日市场风格")
     lines.append("")
     lines.append("| 板块 | 类型 | 趋势评分 | 20日变化 | 状态 |")
     lines.append("|---|---|---:|---:|---|")
@@ -342,8 +471,8 @@ def _generate_markdown(df, trade_date, windows_available):
         )
     lines.append("")
 
-    # 五、高位分歧
-    lines.append("## 五、高位分歧方向")
+    # 七、高位分歧
+    lines.append("## 七、高位分歧方向")
     lines.append("")
     if not divergence.empty:
         lines.append("| 板块 | 类型 | 成交占比 | 放量 | 涨幅 | 上涨比 | 风险 |")
@@ -361,8 +490,8 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append("暂无高位分歧板块")
     lines.append("")
 
-    # 六、资金回流
-    lines.append("## 六、资金回流方向")
+    # 八、资金回流
+    lines.append("## 八、资金回流方向")
     lines.append("")
     backflow = df[df["flow_status"] == "资金回流"]
     if not backflow.empty:
@@ -380,8 +509,8 @@ def _generate_markdown(df, trade_date, windows_available):
         lines.append("暂无资金回流板块")
     lines.append("")
 
-    # 七、观察重点
-    lines.append("## 七、明日观察重点")
+    # 九、观察重点
+    lines.append("## 九、明日观察重点")
     lines.append("")
     if not inflow.empty:
         top2 = inflow.nlargest(2, "trend_score")
@@ -408,7 +537,7 @@ def _generate_excel(df, trade_date):
         ws.title = sheet_name
         bdf = df[df["board_type"] == board_type].sort_values("trend_score", ascending=False)
 
-        headers = ["板块", "资金状态", "趋势评分",
+        headers = ["板块", "生命周期", "昨日阶段", "阶段变化", "资金状态", "趋势评分",
                    "成交占比", "5日变化", "10日变化", "20日变化", "连续上升",
                    "最新涨幅", "领涨股", "领涨涨幅"]
         for col, h in enumerate(headers, 1):
@@ -417,6 +546,9 @@ def _generate_excel(df, trade_date):
         for row_idx, (_, r) in enumerate(bdf.iterrows(), 2):
             vals = [
                 r["board_name"],
+                r.get("life_cycle", ""),
+                r.get("prev_life_cycle", ""),
+                r.get("life_cycle_signal", ""),
                 r.get("flow_status", ""),
                 int(r["trend_score"]),
                 _excel_num(r.get("latest_amount_ratio"), 100),
@@ -486,8 +618,32 @@ def _generate_excel(df, trade_date):
 def _generate_summary_json(df, trade_date):
     """生成摘要 JSON"""
     inflow = df[df["flow_status"].isin(["持续流入", "加速流入", "资金回流"])].nlargest(10, "trend_score")
+    # 生命周期概览
+    life_cycle_overview = {}
+    for stage in ["主升期", "加速期", "启动期", "分歧期", "修复期", "退潮期", "沉寂期"]:
+        sub = df[df["life_cycle"] == stage]
+        life_cycle_overview[stage] = sub.nlargest(5, "trend_score")["board_name"].tolist() if not sub.empty else []
+
+    st_signals = ["新启动", "主线加强", "主线确认", "修复转强", "资金回流加强", "主线延续", "状态转强"]
+    wk_signals = ["主线分歧", "加速后分歧", "分歧转退潮", "主线退潮", "启动失败", "修复失败", "状态转弱"]
+    sdf = df[df["life_cycle_signal"].isin(st_signals)]
+    wdf = df[df["life_cycle_signal"].isin(wk_signals)]
+
     summary = {
         "trade_date": trade_date,
+        "life_cycle_overview": life_cycle_overview,
+        "strengthening_boards": [
+            {"board_name": r["board_name"], "board_type": r["board_type"],
+             "prev_life_cycle": r["prev_life_cycle"], "life_cycle": r["life_cycle"],
+             "life_cycle_signal": r["life_cycle_signal"], "trend_score": int(r["trend_score"])}
+            for _, r in sdf.iterrows()
+        ],
+        "weakening_boards": [
+            {"board_name": r["board_name"], "board_type": r["board_type"],
+             "prev_life_cycle": r["prev_life_cycle"], "life_cycle": r["life_cycle"],
+             "life_cycle_signal": r["life_cycle_signal"], "trend_score": int(r["trend_score"])}
+            for _, r in wdf.iterrows()
+        ],
         "top_inflow_5d": [
             {
                 "board_name": r["board_name"],
@@ -564,10 +720,35 @@ def run(trade_date=None, windows=None):
         print("[警告] 指标计算结果为空")
         return
 
-    # 分类 + 评分
+    # 分类 + 评分 + 生命周期
     metrics_df["flow_status"] = metrics_df.apply(_classify_flow, axis=1)
     metrics_df["trend_score"] = metrics_df.apply(_calc_trend_score, axis=1)
     metrics_df["trend_label"] = metrics_df["trend_score"].apply(_score_to_label)
+    metrics_df["life_cycle"] = metrics_df.apply(_classify_lifecycle, axis=1)
+    metrics_df["life_cycle_desc"] = metrics_df["life_cycle"].apply(_lifecycle_desc)
+
+    # 状态迁移：计算上一交易日
+    prev_trade_dates = sorted([d for d in trade_days if d < trade_date])
+    prev_map = {}
+    if prev_trade_dates:
+        prev_date = prev_trade_dates[-1]
+        prev_df = _calc_metrics(df[df["trade_date"] <= datetime.strptime(prev_date, "%Y%m%d")], prev_date, windows)
+        if not prev_df.empty:
+            prev_df["flow_status"] = prev_df.apply(_classify_flow, axis=1)
+            prev_df["trend_score"] = prev_df.apply(_calc_trend_score, axis=1)
+            prev_df["life_cycle"] = prev_df.apply(_classify_lifecycle, axis=1)
+            prev_map = {(r["board_type"], r["board_name"]): r["life_cycle"] for _, r in prev_df.iterrows()}
+
+    metrics_df["prev_life_cycle"] = metrics_df.apply(
+        lambda r: prev_map.get((r["board_type"], r["board_name"]), ""), axis=1
+    )
+    metrics_df["life_cycle_change"] = metrics_df.apply(
+        lambda r: f"{r['prev_life_cycle']} → {r['life_cycle']}" if r["prev_life_cycle"] else r["life_cycle"], axis=1
+    )
+    metrics_df["life_cycle_signal"] = metrics_df.apply(
+        lambda r: _classify_lifecycle_signal(r["prev_life_cycle"], r["life_cycle"]), axis=1
+    )
+    metrics_df["mainline_streak"] = metrics_df.apply(_calc_mainline_streak, axis=1)
 
     # 输出
     md = _generate_markdown(metrics_df, trade_date, windows_available)
