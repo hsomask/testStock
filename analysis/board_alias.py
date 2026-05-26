@@ -3,30 +3,40 @@
 将东方财富/申万等层级名称统一到同花顺常用口径
 """
 import re
+from datetime import datetime
 
-# 手工映射（优先级高于自动规则）
-BOARD_ALIAS = {}
+from analysis.board_alias_config import BOARD_ALIAS
 
 # 自动规则：去除结尾罗马数字层级 Ⅱ/Ⅲ/II/III/Ⅳ/IV
 _ROMAN_SUFFIX = re.compile(r"[ 　]*(Ⅱ|Ⅲ|Ⅳ|II|III|IV)$")
+# 疑似重复但未合并的概念后缀
+_CONCEPT_SUFFIX = re.compile(r"概念$")
+
+KEY_BOARDS = [
+    "半导体", "先进封装", "存储芯片", "国产芯片", "集成电路封测",
+    "通信技术", "5G", "机器人", "液冷服务器", "算力",
+    "贵金属", "黄金",
+]
+
+
+def explain_alias(raw_name):
+    """返回 alias 解释"""
+    if not raw_name:
+        return {"raw_name": raw_name, "display_name": raw_name, "method": "empty"}
+
+    if raw_name in BOARD_ALIAS:
+        return {"raw_name": raw_name, "display_name": BOARD_ALIAS[raw_name], "method": "manual"}
+
+    cleaned = _ROMAN_SUFFIX.sub("", str(raw_name).strip()).strip()
+    if cleaned != raw_name:
+        return {"raw_name": raw_name, "display_name": cleaned, "method": "roman_suffix"}
+
+    return {"raw_name": raw_name, "display_name": raw_name, "method": "unchanged"}
 
 
 def normalize_board_name(raw_name):
     """标准化板块名称"""
-    if not raw_name:
-        return raw_name
-
-    # 1. 手工映射优先
-    if raw_name in BOARD_ALIAS:
-        return BOARD_ALIAS[raw_name]
-
-    # 2. 自动去除罗马层级后缀
-    cleaned = _ROMAN_SUFFIX.sub("", raw_name).strip()
-    if cleaned != raw_name:
-        # 如果去掉后缀后与其他板块同名，返回清理后的名称
-        return cleaned
-
-    return raw_name
+    return explain_alias(raw_name)["display_name"]
 
 
 def build_alias_map(board_names):
@@ -35,6 +45,113 @@ def build_alias_map(board_names):
     for name in board_names:
         alias_map[name] = normalize_board_name(name)
     return alias_map
+
+
+def generate_alias_report(df, trade_date):
+    """生成板块名称归一报告"""
+    import pandas as pd
+
+    date_display = trade_date[:4] + "-" + trade_date[4:6] + "-" + trade_date[6:]
+    lines = [f"# 板块名称归一报告 | {date_display}", ""]
+
+    # 取最新一天数据
+    latest = df[df["trade_date"] == df["trade_date"].max()] if "trade_date" in df.columns else df
+    raw_names = sorted(latest["board_name"].dropna().unique())
+    explained = [explain_alias(n) for n in raw_names]
+
+    manual = [e for e in explained if e["method"] == "manual"]
+    suffix = [e for e in explained if e["method"] == "roman_suffix"]
+    unchanged = [e for e in explained if e["method"] == "unchanged"]
+    display_names = set(e["display_name"] for e in explained)
+
+    # 总体统计
+    lines.append("## 一、总体统计")
+    lines.append(f"- 原始板块数：{len(raw_names)}")
+    lines.append(f"- 归一后板块数：{len(display_names)}")
+    lines.append(f"- 合并减少：{len(raw_names) - len(display_names)}")
+    lines.append(f"- 手工 alias：{len(manual)}")
+    lines.append(f"- 自动去层级：{len(suffix)}")
+    lines.append(f"- 未变化：{len(unchanged)}")
+    lines.append("")
+
+    # 手工 alias
+    if manual:
+        lines.append("## 二、手工 alias 生效列表")
+        lines.append("| 原始名称 | 展示名称 |")
+        lines.append("|---|---|")
+        for e in manual:
+            lines.append(f"| {e['raw_name']} | {e['display_name']} |")
+        lines.append("")
+
+    # 自动去层级
+    if suffix:
+        lines.append("## 三、自动去层级列表")
+        lines.append("| 原始名称 | 展示名称 |")
+        lines.append("|---|---|")
+        for e in suffix:
+            lines.append(f"| {e['raw_name']} | {e['display_name']} |")
+        lines.append("")
+
+    # 已合并板块
+    merged = {}
+    for e in explained:
+        d = e["display_name"]
+        if d not in merged:
+            merged[d] = []
+        merged[d].append(e["raw_name"])
+    multi = {k: v for k, v in merged.items() if len(v) > 1}
+    if multi:
+        lines.append("## 四、发生合并的板块")
+        lines.append("| 展示名称 | 原始名称列表 | 合并数量 |")
+        lines.append("|---|---|---:|")
+        for d, raws in sorted(multi.items(), key=lambda x: -len(x[1])):
+            lines.append(f"| {d} | {'、'.join(raws)} | {len(raws)} |")
+        lines.append("")
+
+    # 疑似重复但未合并
+    suspicious = _find_suspicious_duplicates(raw_names)
+    if suspicious:
+        lines.append("## 五、疑似重复但未合并")
+        lines.append("| 板块A | 板块B | 原因 |")
+        lines.append("|---|---|---|")
+        for a, b, reason in suspicious:
+            lines.append(f"| {a} | {b} | {reason} |")
+        lines.append("")
+
+    # 风险提示
+    lines.append("## 六、风险提示")
+    lines.append("- 如果某些概念被过度合并，需要从 BOARD_ALIAS 中移除；")
+    lines.append("- 当前只是名称归一，不代表成分股完全等同于同花顺真实口径；")
+    lines.append("- 半导体/半导体概念、国产芯片/存储芯片/先进封装 等概念不自动合并。")
+    lines.append("")
+
+    # 保存
+    from pathlib import Path
+    out_dir = Path(__file__).resolve().parents[1] / "reports" / "daily"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"board_alias_report_{trade_date}.md"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Alias 报告已保存：{path}")
+
+
+def _find_suspicious_duplicates(names):
+    """识别疑似重复但未合并的板块"""
+    suspicious = []
+    for a in names:
+        for b in names:
+            if a >= b:
+                continue
+            # 概念后缀：A 和 A概念
+            a_no_concept = _CONCEPT_SUFFIX.sub("", a).strip()
+            b_no_concept = _CONCEPT_SUFFIX.sub("", b).strip()
+            if a_no_concept == b_no_concept:
+                suspicious.append((a, b, "概念后缀重复"))
+                continue
+            # 包含关系
+            if a in b or b in a:
+                suspicious.append((a, b, "名称包含"))
+                continue
+    return suspicious[:30]
 
 
 def aggregate_by_display_name(df):
