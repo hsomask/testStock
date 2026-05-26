@@ -407,7 +407,7 @@ def render_beginner_report(
     # 2. 今日市场一句话结论（AI）
     # 板块资金趋势摘要
     if board_trend_summary:
-        lines.append("## 板一块资金趋势摘要")
+        lines.append("## 板块资金趋势摘要")
         lines.append("")
         ts = board_trend_summary
         for b in ts.get("strengthening_boards", [])[:3]:
