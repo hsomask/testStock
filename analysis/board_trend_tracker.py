@@ -123,7 +123,7 @@ def _calc_metrics(df, trade_date, windows):
             # 窗口指标
             for w in windows:
                 window = group[group["trade_date"] >= end_dt - timedelta(days=w * 2)].tail(w)
-                if len(window) < 2:
+                if len(window) < w:
                     metrics[f"amount_ratio_change_{w}d"] = None
                     metrics[f"amount_ratio_mean_{w}d"] = None
                     metrics[f"amount_vs_{w}d_mean"] = None

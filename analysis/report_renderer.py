@@ -662,6 +662,7 @@ def render_pro_report(
         for b in board_trend_summary.get("weakening_boards", [])[:5]:
             lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
         if board_trend_summary.get("watch_points"):
+            lines.append("")
             for w in board_trend_summary["watch_points"][:3]:
                 lines.append(f"> {w}")
         lines.append("")
