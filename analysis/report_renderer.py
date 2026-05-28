@@ -579,12 +579,8 @@ def render_beginner_report(
     lines.append("---")
     lines.append("")
 
-    # 原观察池详情（保留）
-    for pool_key, label in pool_sections:
-        pool_df = selectors.get(pool_key)
-        if pool_key == "滚雪球趋势":
-            continue
-        lines.append(render_stock_pool_beginner(pool_df, label))
+    # 小白版：分层展示已完成，专业版保留完整策略明细
+    # 不再重复展示高风险票在原策略池中
 
     # 多策略重合个股
     code_to_pools = {}
@@ -732,11 +728,17 @@ def render_pro_report(
     if board_trend_summary:
         lines.append(f"## 板块资金趋势摘要 | {date_display}")
         lines.append("")
-        lines.append("| 板块 | 类型 | 阶段变化 | 信号 | 趋势评分 |")
-        lines.append("|---|---|---|---|---:|")
-        for b in board_trend_summary.get("strengthening_boards", [])[:5]:
+        st_p = board_trend_summary.get("strengthening_boards", [])
+        wk_p = board_trend_summary.get("weakening_boards", [])
+        if not st_p and not wk_p and board_trend_summary.get("watch_points"):
+            lines.append("暂无明显阶段切换板块，今日仅列出资金观察点。")
+            lines.append("")
+        else:
+            lines.append("| 板块 | 类型 | 阶段变化 | 信号 | 趋势评分 |")
+            lines.append("|---|---|---|---|---:|")
+        for b in st_p[:5]:
             lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
-        for b in board_trend_summary.get("weakening_boards", [])[:5]:
+        for b in wk_p[:5]:
             lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
         if board_trend_summary.get("watch_points"):
             lines.append("")

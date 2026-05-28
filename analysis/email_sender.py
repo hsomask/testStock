@@ -286,8 +286,12 @@ def main():
         subject = f"A股每日复盘 · {date_str}"
         body = build_email_body_from_json(data, beginner_path, pro_path)
 
-        # 交易计划摘要（优先展示）
-        tp_path = find_latest_trade_plan()
+        # 交易计划摘要（--date 模式只取当天，否则取最新）
+        if args.date:
+            tp_path = REPORTS_DIR / f"trade_plan_{date_str}.json"
+            tp_path = tp_path if tp_path.exists() else None
+        else:
+            tp_path = find_latest_trade_plan()
         if tp_path:
             tp = json.loads(tp_path.read_text(encoding="utf-8"))
             tp_section = build_trade_plan_section(tp)

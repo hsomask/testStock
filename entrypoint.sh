@@ -17,7 +17,7 @@ echo "=== 板块资金趋势追踪 ==="
 python -m analysis.board_trend_tracker --date "$TRADE_DATE" || echo "[警告] 资金趋势追踪失败"
 
 echo "=== 生成报告 ==="
-python -m analysis.daily_report --mode both
+python -m analysis.daily_report --mode both --date "$TRADE_DATE"
 
 echo "=== 流程检查 ==="
 python -m analysis.pipeline_check --date "$TRADE_DATE" || echo "[警告] 部分流程文件缺失"
@@ -31,7 +31,7 @@ python -m analysis.backtest_report || echo "[警告] 策略统计生成失败"
 echo "=== 推送消息 ==="
 
 if [ "$PUSH_CHANNEL" = "email" ]; then
-    python -m analysis.email_sender || echo "[警告] 邮件推送失败，但报告已生成"
+    python -m analysis.email_sender --date "$TRADE_DATE" || echo "[警告] 邮件推送失败，但报告已生成"
 elif [ "$PUSH_CHANNEL" = "feishu" ]; then
     python -m analysis.feishu_sender || echo "[警告] 飞书推送失败，但报告已生成"
 else

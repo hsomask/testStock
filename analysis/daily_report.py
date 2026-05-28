@@ -38,18 +38,11 @@ from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
 
 
 def load_board_trend_summary(trade_date):
-    """优先读取当天趋势摘要，fallback 到任意最新文件"""
+    """读取当天趋势摘要，不存在返回 None（不 fallback）"""
     path = REPORTS_DIR / f"board_trend_summary_{trade_date}.json"
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    # fallback: latest summary
-    files = sorted(REPORTS_DIR.glob("board_trend_summary_*.json"))
-    if files:
-        try:
-            return json.loads(files[-1].read_text(encoding="utf-8"))
         except Exception:
             pass
     return None

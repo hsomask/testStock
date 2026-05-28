@@ -177,6 +177,16 @@ def filter_common_stock_pool(stock_df):
     df = df[df["close"] > 2]
     df = df[df["amount"] > 100000000]
 
+    # 账户权限过滤
+    from data.config import ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE
+    code_str = df["code"].astype(str)
+    if not ALLOW_CHINEXT:
+        df = df[~code_str.str.startswith(("300", "301"))]
+    if not ALLOW_STAR:
+        df = df[~code_str.str.startswith("688")]
+    if not ALLOW_BSE:
+        df = df[~code_str.str.startswith("920")]
+
     return df
 
 
