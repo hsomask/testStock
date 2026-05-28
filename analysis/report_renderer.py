@@ -425,9 +425,14 @@ def render_beginner_report(
         lines.append("> 板块名称已按同花顺常用名称归一，成分股仍基于当前系统映射。")
         lines.append("")
         ts = board_trend_summary
-        for b in ts.get("strengthening_boards", [])[:3]:
+        st = ts.get("strengthening_boards", [])
+        wk = ts.get("weakening_boards", [])
+        if not st and not wk and ts.get("watch_points"):
+            lines.append("暂无明显阶段切换板块，今日仅列出资金观察点。")
+            lines.append("")
+        for b in st[:3]:
             lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}")
-        for b in ts.get("weakening_boards", [])[:2]:
+        for b in wk[:2]:
             lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}，短线注意")
         if ts.get("watch_points") and ts["watch_points"]:
             lines.append(f"- {ts['watch_points'][0]}")
