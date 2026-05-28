@@ -10,6 +10,7 @@ from datetime import datetime
 
 import akshare as ak
 from data.config import DATABASE_DSN
+from analysis.utils import to_date_display
 
 logger = logging.getLogger(__name__)
 
@@ -323,5 +324,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
     args = parser.parse_args()
-    date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}" if args.date else None
+    date = to_date_display(args.date) if args.date else None
     update_board_history(trade_date=date)
