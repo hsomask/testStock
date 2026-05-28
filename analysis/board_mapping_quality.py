@@ -13,6 +13,7 @@ import pandas as pd
 import psycopg2
 
 from data.config import DATABASE_DSN
+from analysis.utils import to_date_display, to_ymd
 from analysis.board_alias import normalize_board_name, explain_alias, KEY_BOARDS
 from analysis.board_alias_config import LOW_VALUE_BOARDS, KEY_BOARD_ALIASES
 
@@ -39,7 +40,7 @@ def _count_dist(df, col):
 def run(trade_date=None):
     if trade_date is None:
         trade_date = datetime.now().strftime("%Y%m%d")
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    date_display = to_date_display(trade_date)
 
     conn = _get_conn()
     if conn is None:
@@ -191,6 +192,14 @@ def run(trade_date=None):
     lines.append("")
 
     # ── JSON 输出 ──
+    key_check = {}
+    key_matched = {}
+    for kb in KEY_BOARDS:
+        aliases = KEY_BOARD_ALIASES.get(kb, [kb])
+        matched = [a for a in aliases if a in all_display]
+        key_check[kb] = bool(matched)
+        key_matched[kb] = matched
+
     quality_json = {
         "trade_date": trade_date,
         "requested_date": requested_date,
@@ -203,7 +212,8 @@ def run(trade_date=None):
         "too_few_boards": len(too_few),
         "too_many_boards": len(too_many),
         "over_mapped_stocks": len(over_mapped),
-        "key_boards_check": {kb: kb in board_counts["display_name"].values for kb in KEY_BOARDS},
+        "key_boards_check": key_check,
+        "key_boards_matched": key_matched,
     }
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
