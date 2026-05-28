@@ -5,6 +5,7 @@ import numpy as np
 
 from analysis.utils import fmt_num, fmt_pct, fmt_yi
 from analysis.explainer import explain_market_status, get_daily_learning_topics
+from analysis.board_alias import normalize_board_name
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
@@ -45,7 +46,7 @@ def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors)
         "",
         f"## 市场数据",
         f"- 市场状态：{market['status']}",
-        f"- 市场情绪评分：{market['score']}/100",
+        f"- 市场宽度评分：{market['score']}/100",
         f"- 成交额：{market['total_amount']:.0f}亿",
         f"- 上涨：{market['up_count']}只，下跌：{market['down_count']}只",
         f"- 涨停：{market['limit_up']}只，跌停：{market['limit_down']}只",
@@ -86,7 +87,7 @@ def build_one_line_prompt(trade_date, market, sentiment, industry, concept):
 def build_strategy_prompt(trade_date, market, sentiment, selectors):
     prompt = (
         f"日期：{trade_date}\n"
-        f"市场情绪评分：{market['score']}/100，状态：{market['status']}\n"
+        f"市场宽度评分：{market['score']}/100，状态：{market['status']}\n"
         f"情绪阶段：{sentiment['stage']}\n\n"
         f"请按以下三个场景给出明日应对建议（简洁，每个场景2-3句话，适合新手阅读）：\n"
         f"1. 市场放量上涨 → 应对方式\n"
@@ -119,7 +120,7 @@ def render_board_table(df, max_rows=10):
 
     lines = []
     for row in deduped:
-        name = row.get("board_name", "-")
+        name = normalize_board_name(row.get("board_name", "-"))
         pct = fmt_pct(row.get("pct_chg", np.nan))
         turnover = row.get("turnover", np.nan)
         leader = row.get("leader", "-")
@@ -138,7 +139,7 @@ def render_ratio_change_table(ratio_df, max_rows=10):
 
     lines = []
     for _, row in ratio_df.head(max_rows).iterrows():
-        name = row.get("board_name", "-")
+        name = normalize_board_name(row.get("board_name", "-"))
         pct = fmt_pct(row.get("pct_chg", np.nan))
         ratio_today = row.get("ratio_today", np.nan)
         change = row.get("ratio_change_3d", row.get("ratio_change_5d", np.nan))
@@ -187,7 +188,7 @@ def render_market(market):
     lines.append(f"- 20cm涨停：{market['limit_up_20cm']}只")
     lines.append(f"- 20cm跌停：{market['limit_down_20cm']}只")
     lines.append("")
-    lines.append(f"市场情绪评分：{market['score']} / 100，状态：{market['status']}")
+    lines.append(f"市场宽度评分：{market['score']} / 100，状态：{market['status']}")
     lines.append("")
     lines.append(f"简评：{market['summary']}")
     lines.append("")
@@ -409,6 +410,8 @@ def render_beginner_report(
     if board_trend_summary:
         lines.append("## 板块资金趋势摘要")
         lines.append("")
+        lines.append("> 今日主线判断 = 当前综合强度 | 板块资金趋势摘要 = 资金趋势和生命周期变化")
+        lines.append("> 来源：板块资金趋势追踪 | 优先参考近5日资金变化和生命周期迁移")
         lines.append("> 板块名称已按同花顺常用名称归一，成分股仍基于当前系统映射。")
         lines.append("")
         ts = board_trend_summary
@@ -443,8 +446,8 @@ def render_beginner_report(
     # 3. 市场情绪
     lines.append("## 市场情绪")
     lines.append("")
-    lines.append(f"- 市场情绪评分：**{sentiment['score']} / 100**")
-    lines.append(f"- 当前状态：**{sentiment['stage']}**")
+    lines.append(f"- 市场宽度评分：**{market['score']} / 100**（状态：{market['status']}）")
+    lines.append(f"- 短线情绪周期评分：**{sentiment['score']} / 100**（阶段：{sentiment['stage']}）")
     lines.append(f"- 小白解释：{explain_market_status(sentiment['score'])}")
     lines.append("")
 
@@ -626,16 +629,11 @@ def render_pro_report(
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
 
-    # 数据质量检查
-    lines.append(render_quality_check(quality))
-
-    # 原日报结构
+    # 标题（第一行）
     lines.append(f"# A股日报 · 专业版 | {date_display}")
     lines.append("")
-    lines.append("---")
-    lines.append("")
 
-    # 数据获取
+    # 数据获取概要
     lines.append(f"## 数据获取完成 {date_display}")
     lines.append("")
     lines.append(f"- 个股日线：{data_status.get('stock_count', 0)}只")
@@ -644,6 +642,9 @@ def render_pro_report(
     lines.append("")
     lines.append("---")
     lines.append("")
+
+    # 数据质量检查
+    lines.append(render_quality_check(quality))
 
     # 大盘总览
     lines.append(render_market(market))
