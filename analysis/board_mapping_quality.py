@@ -53,20 +53,13 @@ def run(trade_date=None):
         conn.close()
         return
 
-    # 读取最新 board_amount_ratio
+    # 读取指定日期 board_amount_ratio（不 fallback）
     requested_date = date_display
     ba_df = pd.read_sql(
         "SELECT * FROM board_amount_ratio WHERE trade_date=%s",
         conn, params=(date_display,)
     )
-    actual_board_date = date_display
-    if ba_df.empty:
-        ba_df = pd.read_sql(
-            "SELECT * FROM board_amount_ratio WHERE trade_date=(SELECT MAX(trade_date) FROM board_amount_ratio)",
-            conn
-        )
-        if not ba_df.empty:
-            actual_board_date = str(ba_df["trade_date"].max())[:10]
+    actual_board_date = date_display if not ba_df.empty else None
 
     conn.close()
 
