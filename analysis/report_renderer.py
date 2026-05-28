@@ -74,10 +74,10 @@ def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors)
 def build_one_line_prompt(trade_date, market, sentiment, industry, concept):
     return (
         f"日期：{trade_date}\n"
-        f"市场状态：{market['status']}，情绪评分：{market['score']}/100\n"
+        f"市场宽度状态：{market['status']}，综合评分：{market['score']}/100\n"
         f"成交额：{market['total_amount']:.0f}亿，上涨{market['up_count']}只，下跌{market['down_count']}只\n"
         f"涨停{market['limit_up']}只，跌停{market['limit_down']}只\n"
-        f"情绪阶段：{sentiment['stage']}\n"
+        f"短线情绪周期：{sentiment['stage']}，评分：{sentiment['score']}/100\n"
         f"强势行业：{'、'.join(industry.get('active_boards', [])[:5])}\n"
         f"强势概念：{'、'.join(concept.get('active_boards', [])[:5])}\n"
         f"请用2-3句话总结今天市场整体情况，用简洁专业的交易员语气，面向新手可理解。"
@@ -137,9 +137,15 @@ def render_ratio_change_table(ratio_df, max_rows=10):
     if "ratio_today" in ratio_df.columns and ratio_df["ratio_today"].notna().sum() == 0:
         return "板块成交额暂缺，无法展示成交占比变化\n"
 
+    seen_names = set()
     lines = []
-    for _, row in ratio_df.head(max_rows).iterrows():
+    for _, row in ratio_df.iterrows():
         name = normalize_board_name(row.get("board_name", "-"))
+        if name in seen_names:
+            continue
+        if len(seen_names) >= max_rows:
+            break
+        seen_names.add(name)
         pct = fmt_pct(row.get("pct_chg", np.nan))
         ratio_today = row.get("ratio_today", np.nan)
         change = row.get("ratio_change_3d", row.get("ratio_change_5d", np.nan))
@@ -188,7 +194,7 @@ def render_market(market):
     lines.append(f"- 20cm涨停：{market['limit_up_20cm']}只")
     lines.append(f"- 20cm跌停：{market['limit_down_20cm']}只")
     lines.append("")
-    lines.append(f"市场宽度评分：{market['score']} / 100，状态：{market['status']}")
+    lines.append(f"市场综合评分：{market['score']} / 100，状态：{market['status']}")
     lines.append("")
     lines.append(f"简评：{market['summary']}")
     lines.append("")
@@ -372,7 +378,11 @@ def render_themes(themes):
 
     for i, theme in enumerate(themes):
         lines.append(f"### {i + 1}. {theme['name']}（{theme['board_type']}）")
-        lines.append(f"- **主线强度**：{theme['level']}（评分 {theme['score']}）")
+        tt = theme.get("theme_type", "")
+        if tt:
+            lines.append(f"- **主线类型**：{tt} | **主线强度**：{theme['level']}（评分 {theme['score']}）")
+        else:
+            lines.append(f"- **主线强度**：{theme['level']}（评分 {theme['score']}）")
         lines.append(f"- **判断依据**：")
         for r in theme["reasons"]:
             lines.append(f"  - {r}")
@@ -446,7 +456,7 @@ def render_beginner_report(
     # 3. 市场情绪
     lines.append("## 市场情绪")
     lines.append("")
-    lines.append(f"- 市场宽度评分：**{market['score']} / 100**（状态：{market['status']}）")
+    lines.append(f"- 市场综合评分：**{market['score']} / 100**（状态：{market['status']}）")
     lines.append(f"- 短线情绪周期评分：**{sentiment['score']} / 100**（阶段：{sentiment['stage']}）")
     lines.append(f"- 小白解释：{explain_market_status(sentiment['score'])}")
     lines.append("")
@@ -476,10 +486,14 @@ def render_beginner_report(
     lines.append("## 今日风险方向")
     lines.append("")
     if industry and industry.get("top_loss") is not None and not industry["top_loss"].empty:
-        top_loss_names = industry["top_loss"]["board_name"].head(5).tolist()
+        top_loss_names = list(dict.fromkeys(
+            normalize_board_name(n) for n in industry["top_loss"]["board_name"].head(8).tolist()
+        ))[:5]
         lines.append(f"- **跌幅靠前行业**：{'、'.join(top_loss_names)}")
     if concept and concept.get("top_loss") is not None and not concept["top_loss"].empty:
-        top_loss_concepts = concept["top_loss"]["board_name"].head(5).tolist()
+        top_loss_concepts = list(dict.fromkeys(
+            normalize_board_name(n) for n in concept["top_loss"]["board_name"].head(8).tolist()
+        ))[:5]
         lines.append(f"- **跌幅靠前概念**：{'、'.join(top_loss_concepts)}")
     lines.append(f"- **跌停数量**：{market['limit_down']}只" + ("，亏钱效应较强" if market['limit_down'] >= 30 else ""))
     lines.append("")
@@ -503,12 +517,69 @@ def render_beginner_report(
         ("短线强势", "短线强势观察池"),
         ("滚雪球趋势", "滚雪球趋势观察池"),
     ]
+    # 观察池分层展示
+    all_visible = []
+    all_caution = []
+    all_high_risk = []
+    for pool_key, label in pool_sections:
+        pool_df = selectors.get(pool_key)
+        if pool_df is None or pool_df.empty:
+            if pool_key == "滚雪球趋势":
+                lines.append(render_snowball_pool_beginner(pool_df, label))
+            continue
+        for _, row in pool_df.iterrows():
+            entry = {"pool": pool_key, "row": row}
+            risk = str(row.get("risk_level", ""))
+            action = str(row.get("action_signal", ""))
+            name = str(row.get("name", ""))
+            # 新股 N 开头 → 高风险
+            if name.startswith("N"):
+                all_high_risk.append(entry)
+            elif risk == "高" or action == "回避" or action == "数据不足":
+                all_high_risk.append(entry)
+            elif risk == "中" and action == "谨慎":
+                all_caution.append(entry)
+            else:
+                all_visible.append(entry)
+        # 滚雪球单独渲染
+        if pool_key == "滚雪球趋势":
+            lines.append(render_snowball_pool_beginner(pool_df, label))
+
+    # 可观察池
+    lines.append("### 可观察池")
+    lines.append("")
+    if all_visible:
+        for entry in all_visible:
+            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | 风险：{entry['row'].get('risk_level','-')}")
+        lines.append("")
+    else:
+        lines.append("暂无符合条件个股")
+        lines.append("")
+
+    # 谨慎观察池
+    if all_caution:
+        lines.append("### 谨慎观察池")
+        lines.append("")
+        for entry in all_caution:
+            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | 风险：{entry['row'].get('risk_level','-')}")
+        lines.append("")
+
+    # 高风险复盘池
+    if all_high_risk:
+        lines.append("### 高风险复盘池（仅复盘，不建议买入）")
+        lines.append("")
+        for entry in all_high_risk[:8]:
+            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | {entry['row'].get('risk_level','-')}/{entry['row'].get('action_signal','-')}")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # 原观察池详情（保留）
     for pool_key, label in pool_sections:
         pool_df = selectors.get(pool_key)
         if pool_key == "滚雪球趋势":
-            lines.append(render_snowball_pool_beginner(pool_df, label))
-        else:
-            lines.append(render_stock_pool_beginner(pool_df, label))
+            continue
+        lines.append(render_stock_pool_beginner(pool_df, label))
 
     # 多策略重合个股
     code_to_pools = {}
