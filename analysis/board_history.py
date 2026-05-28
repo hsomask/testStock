@@ -201,15 +201,16 @@ def save_board_amount_ratio(df, trade_date):
     conn.close()
 
 
-def update_board_history():
-    trade_date = datetime.now().strftime("%Y-%m-%d")
+def update_board_history(trade_date=None):
+    if trade_date is None:
+        trade_date = datetime.now().strftime("%Y-%m-%d")
+    today_ymd = trade_date.replace("-", "")
 
     if not DATABASE_DSN:
         logger.warning("DATABASE_DSN 未设置，数据库功能跳过")
         return
 
     from analysis.data_fetcher import is_trade_day
-    today_ymd = datetime.now().strftime("%Y%m%d")
     if not is_trade_day(today_ymd):
         print(f"{today_ymd} 非交易日，跳过板块成交占比更新")
         return
@@ -317,8 +318,10 @@ def get_all_ratio_changes():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    )
-    update_board_history()
+    import argparse
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
+    args = parser.parse_args()
+    date = f"{args.date[:4]}-{args.date[4:6]}-{args.date[6:8]}" if args.date else None
+    update_board_history(trade_date=date)

@@ -294,17 +294,23 @@ def main():
     if pro_path:
         attachments.append(pro_path)
 
-    # 附件：Excel 趋势追踪表
-    xlsx_path = find_latest_file("board_trend_tracker_*.xlsx")
-    if xlsx_path:
-        attachments.append(xlsx_path)
+    # 附件：当天文件（按 trade_date 精确匹配，不混旧日期）
+    date_str = date_str.replace("-", "") if len(date_str) > 8 else date_str
+    missing_hint = []
+    for fname in [f"board_trend_tracker_{date_str}.xlsx",
+                  f"board_mapping_quality_{date_str}.md",
+                  f"board_mapping_quality_{date_str}.json",
+                  f"board_alias_report_{date_str}.md"]:
+        fpath = REPORTS_DIR / fname
+        if fpath.exists():
+            attachments.append(fpath)
+        else:
+            missing_hint.append(fname)
 
-    # 附件：V3.1 质量报告
-    for pattern in ["board_mapping_quality_*.md", "board_mapping_quality_*.json",
-                    "board_alias_report_*.md"]:
-        qpath = find_latest_file(pattern)
-        if qpath:
-            attachments.append(qpath)
+    if missing_hint:
+        body += "\n\n---\n以下当天文件未生成：\n"
+        for f in missing_hint:
+            body += f"- {f}\n"
 
     send_email(subject, body, attachments)
 
