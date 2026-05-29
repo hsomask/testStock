@@ -1814,6 +1814,732 @@ reports/
 9. 无 pycache / reports / local config 污染。
 
 
+# V3-Stabilization 第 3 轮 Review：selector 安全边界
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已经完成：
+
+1. 第 0 轮：结构占位 ✅
+2. 第 1 轮：`report_context` 最小接入 ✅
+3. 第 2 轮：`pipeline_check + email` 联动 ✅
+
+当前 `dev` 已 push，最新提交为：
+
+```bash
+d096132 docs: update pipeline email linkage notes
+4574e53 fix: pipeline_check status规则修正 critical/warning/ok
+15e7aaa fix: pipeline_check + email联动，CRITICAL扩至7项，email读pipeline JSON
+```
+
+本轮进入：
+
+> selector 安全边界 review
+
+本轮只做 review，不直接改代码。
+
+---
+
+## 一、本轮目标
+
+检查当前 selector / 观察池生成逻辑是否存在风险边界缺口。
+
+重点检查：
+
+1. N 开头新股是否会进入普通观察池；
+2. 创业板 / 科创板 / 北交所是否按账户权限过滤；
+3. N字异动 / 二次起爆是否有 `pct_20d <= 60` 高位上限；
+4. 缺 MA / 缺 volume_ratio 是否会默认通过；
+5. 低价值板块是否会作为板块联动理由；
+6. 高风险票是否会进入可观察 / 谨慎观察池；
+7. 高风险票是否只进入高风险复盘池；
+8. 小白版观察池是否可能出现账户不可买市场。
+
+---
+
+## 二、本轮禁止事项
+
+本轮禁止修改任何文件。
+
+不要执行：
+
+```bash
+git add
+git commit
+git push
+```
+
+不要修改：
+
+```text
+analysis/selector.py
+analysis/risk_engine.py
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+entrypoint.sh
+```
+
+本轮只做检查、梳理和给出最小改造建议。
+
+---
+
+## 三、先确认当前状态
+
+请执行：
+
+```bash
+git checkout dev
+git pull origin dev
+git status --short
+git log -5 --oneline
+```
+
+要求：
+
+```text
+git status --short 为空
+```
+
+如果工作区不干净，先停止 review，说明未提交文件。
+
+---
+
+## 四、重点查看 selector 相关文件
+
+请执行：
+
+```bash
+sed -n '1,320p' analysis/selector.py
+```
+
+如果存在以下文件，也请查看：
+
+```bash
+sed -n '1,320p' analysis/risk_engine.py
+sed -n '1,260p' analysis/stock_board_mapper.py
+sed -n '1,260p' analysis/report_renderer.py
+```
+
+如果某些文件不存在，请说明不存在，不要创建。
+
+---
+
+## 五、检查账户权限过滤
+
+请搜索：
+
+```bash
+grep -R "ALLOW_CHINEXT\|ALLOW_STAR\|ALLOW_BSE" -n analysis
+grep -R "创业板\|科创板\|北交所\|688\|689\|300\|301\|8" -n analysis/selector.py analysis/risk_engine.py 2>/dev/null
+```
+
+检查点：
+
+1. 是否存在 `ALLOW_CHINEXT`；
+2. 是否存在 `ALLOW_STAR`；
+3. 是否存在 `ALLOW_BSE`；
+4. 创业板股票是否按权限过滤；
+5. 科创板股票是否按权限过滤；
+6. 北交所股票是否按权限过滤；
+7. 过滤是否只作用于普通观察池；
+8. 高风险复盘池是否可以保留但明确标记不可买；
+9. 小白版可观察 / 谨慎观察是否会出现账户不可买市场。
+
+---
+
+## 六、检查 N 开头新股过滤
+
+请搜索：
+
+```bash
+grep -R "N开头\|新股\|startswith('N')\|startswith(\"N\")\|name.startswith" -n analysis
+```
+
+检查点：
+
+1. 股票名称以 `N` 开头是否被识别；
+2. N 开头新股是否会进入普通观察池；
+3. N 开头新股是否只允许进入高风险复盘池或直接回避；
+4. 是否有清晰原因提示；
+5. 是否只按股票代码判断而漏掉名称判断。
+
+---
+
+## 七、检查 N字异动 / 二次起爆高位限制
+
+请搜索：
+
+```bash
+grep -R "N字\|二次起爆\|pct_20d\|20d\|涨幅" -n analysis
+```
+
+检查点：
+
+1. 是否存在 N字异动策略；
+2. 是否存在二次起爆策略；
+3. 是否已经限制 `pct_20d <= 60`；
+4. 如果没有限制，是否可能把高位股放入普通观察池；
+5. 是否应该在下一轮只加安全上限，不改策略本身。
+
+本轮目标不是优化策略，只判断是否需要补安全边界。
+
+---
+
+## 八、检查缺 MA / 缺 volume_ratio 的处理
+
+请搜索：
+
+```bash
+grep -R "ma5\|ma10\|ma20\|volume_ratio\|量比\|均线" -n analysis/selector.py analysis/risk_engine.py 2>/dev/null
+```
+
+检查点：
+
+1. 缺少 MA 数据时是否默认通过；
+2. 缺少 `volume_ratio` 时是否默认通过；
+3. 是否有降级提示；
+4. 是否有“数据不足，不进入可观察池”的处理；
+5. 是否会因为字段缺失导致异常；
+6. 是否会因为字段缺失反而放宽条件。
+
+---
+
+## 九、检查低价值板块是否作为联动理由
+
+请搜索：
+
+```bash
+grep -R "低价值\|弱板块\|板块联动\|board\|theme" -n analysis/selector.py analysis/theme_detector.py analysis/report_renderer.py 2>/dev/null
+```
+
+检查点：
+
+1. 是否有低价值板块定义；
+2. 低价值板块是否会作为推荐理由；
+3. 是否存在“个股被低质量板块误增强”的情况；
+4. 是否需要在下一轮把低价值板块从 board-linkage reason 中排除；
+5. 是否只在报告提示中保留，不作为加分逻辑。
+
+---
+
+## 十、检查高风险票分层
+
+请搜索：
+
+```bash
+grep -R "高风险\|谨慎观察\|可观察\|回避\|不可交易\|watchlist_layer\|risk" -n analysis
+```
+
+检查点：
+
+1. 是否存在高风险池；
+2. 高风险票是否可能同时进入可观察池；
+3. 高风险票是否可能进入谨慎观察池；
+4. 是否有去重逻辑；
+5. 小白版是否重复展示高风险票；
+6. 高风险票是否只进入高风险复盘池；
+7. 是否有明确 reason 标注。
+
+---
+
+## 十一、检查报告层是否有二次放大风险
+
+请查看 `report_renderer.py` 相关逻辑：
+
+```bash
+grep -n "可观察\|谨慎观察\|高风险\|回避\|不可交易" analysis/report_renderer.py
+```
+
+检查点：
+
+1. selector 已经分层后，renderer 是否又重新拼池；
+2. renderer 是否会把高风险票重复展示到小白版主观察池；
+3. renderer 是否会遗漏“不可交易”提示；
+4. renderer 是否会把账户不可买股票写成可观察。
+
+---
+
+## 十二、Review 输出格式
+
+请按以下格式输出：
+
+```markdown
+# V3-Stabilization 第 3 轮 Review：selector 安全边界
+
+## 1. 总体结论
+
+通过 / 暂缓通过 / 不通过
+
+## 2. 当前 selector 相关文件
+
+- selector.py:
+- risk_engine.py:
+- stock_board_mapper.py:
+- report_renderer.py:
+
+## 3. 账户权限过滤
+
+- ALLOW_CHINEXT:
+- ALLOW_STAR:
+- ALLOW_BSE:
+- 创业板过滤：
+- 科创板过滤：
+- 北交所过滤：
+- 是否存在小白版不可买股票风险：
+
+## 4. N 开头新股
+
+- 是否识别：
+- 是否进入普通观察池：
+- 当前处理：
+- 风险判断：
+
+## 5. N字异动 / 二次起爆
+
+- 是否存在策略：
+- 是否有 pct_20d <= 60：
+- 是否存在高位入池风险：
+
+## 6. 缺 MA / 缺 volume_ratio
+
+- 缺 MA 是否默认通过：
+- 缺 volume_ratio 是否默认通过：
+- 是否有降级提示：
+- 风险判断：
+
+## 7. 低价值板块联动
+
+- 是否定义低价值板块：
+- 是否作为推荐理由：
+- 是否存在误增强风险：
+
+## 8. 高风险票分层
+
+- 是否有高风险池：
+- 是否会进入可观察：
+- 是否会进入谨慎观察：
+- 是否重复展示：
+- 当前风险：
+
+## 9. 报告层二次风险
+
+- renderer 是否重新拼池：
+- 是否可能放大风险：
+- 小白版展示是否安全：
+
+## 10. 缺口列表
+
+按优先级列出：
+
+- P0:
+- P1:
+- P2:
+
+## 11. 最小改造建议
+
+下一轮如果改代码，只允许做安全边界，不新增策略。
+
+## 12. 是否建议进入代码修改
+
+是 / 否
+```
+
+---
+
+## 十三、本轮通过标准
+
+本轮 review 通过标准：
+
+1. 明确 selector 当前风险边界；
+2. 找出是否存在 P0 安全缺口；
+3. 不直接修改代码；
+4. 不新增策略；
+5. 不扩大到 report_context / pipeline / email；
+6. 下一轮代码修改范围清楚；
+7. 如果发现高风险票进入普通观察池，应标记为 P0；
+8. 如果发现账户不可买股票进入小白版可观察池，应标记为 P0。
+
+
+# V3-Stabilization 第 3 轮代码修改：selector 安全边界 P0 修复
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已完成：
+
+1. 第 0 轮：结构占位 ✅
+2. 第 1 轮：`report_context` 最小接入 ✅
+3. 第 2 轮：`pipeline_check + email` 联动 ✅
+4. 第 3 轮 review：selector 安全边界检查完成，结论为“暂缓通过”
+
+本轮进入代码修改，但只修 P0 安全边界，不新增策略，不重构 selector。
+
+---
+
+## 一、本轮目标
+
+只修两个 P0 问题：
+
+### P0-1：N字异动 / 二次起爆缺少 `pct_20d` 高位上限
+
+当前问题：
+
+```text
+N字异动：pct_20d >= 8，但无上限；
+二次起爆：pct_20d >= 10，但无上限；
+```
+
+风险：
+
+```text
+pct_20d = 100%、200% 的高位股也可能进入普通观察池。
+```
+
+本轮目标：
+
+```text
+N字异动 / 二次起爆都增加 pct_20d <= 60 的安全上限。
+```
+
+---
+
+### P0-2：缺 volume_ratio 时静默通过
+
+当前问题：
+
+```text
+_vr_ge(df, threshold) 在缺 volume_ratio 时返回 pd.Series(True)
+_vr_val(df) 在缺 volume_ratio 时返回 pd.Series(1.0)
+```
+
+风险：
+
+```text
+无 volume_ratio 数据时，所有股票默认通过量比筛选。
+```
+
+本轮目标：
+
+```text
+缺 volume_ratio 时不能默认通过。
+```
+
+最小修复：
+
+```text
+_vr_ge(df, threshold) 缺 volume_ratio 时返回 False；
+_vr_val(df) 可以继续返回 1.0 作为展示降级值，但不能影响筛选通过。
+```
+
+---
+
+## 二、本轮允许修改的文件
+
+本轮只允许修改：
+
+```text
+analysis/selector.py
+```
+
+如确实需要补充文档，可追加：
+
+```text
+PRDs/V3-Stabilization.md
+```
+
+但优先不改文档。
+
+---
+
+## 三、本轮禁止事项
+
+禁止修改：
+
+```text
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+analysis/board_history.py
+analysis/board_mapping_quality.py
+analysis/board_trend_tracker.py
+entrypoint.sh
+```
+
+禁止做：
+
+```text
+新增策略
+删除策略
+重构 selector
+改观察池分层规则
+改报告渲染逻辑
+改邮件逻辑
+改 pipeline 逻辑
+移动文件
+修改主链路
+提交 reports 产物
+提交 __pycache__
+提交 .claude 本地配置
+```
+
+---
+
+## 四、修改要求 1：N字异动 / 二次起爆增加 pct_20d 上限
+
+请在 `analysis/selector.py` 中定位：
+
+```text
+select_n_latent
+select_n_breakout
+```
+
+或者对应的：
+
+```text
+N字异动
+二次起爆
+```
+
+当前逻辑大概率类似：
+
+```python
+df["pct_20d"].fillna(0) >= 8
+```
+
+和：
+
+```python
+df["pct_20d"].fillna(0) >= 10
+```
+
+请改为：
+
+```python
+(df["pct_20d"].fillna(0) >= 8) & (df["pct_20d"].fillna(0) <= 60)
+```
+
+以及：
+
+```python
+(df["pct_20d"].fillna(0) >= 10) & (df["pct_20d"].fillna(0) <= 60)
+```
+
+注意：
+
+1. 只加上限；
+2. 不改其他条件；
+3. 不调参数；
+4. 不新增策略；
+5. 不改变策略名称；
+6. 不改变输出字段结构。
+
+---
+
+## 五、修改要求 2：缺 volume_ratio 不默认通过
+
+请定位：
+
+```text
+_vr_ge(df, threshold)
+_vr_val(df)
+```
+
+当前问题是：
+
+```python
+_vr_ge(...) 缺 volume_ratio 时返回 True
+```
+
+请改成：
+
+```python
+_vr_ge(...) 缺 volume_ratio 时返回 False
+```
+
+建议逻辑：
+
+```python
+def _vr_ge(df, threshold):
+    if "volume_ratio" not in df.columns:
+        return pd.Series(False, index=df.index)
+    return df["volume_ratio"].fillna(0) >= threshold
+```
+
+如果当前代码还兼容其他字段名，例如：
+
+```text
+volume_ratio
+量比
+```
+
+请保持原有兼容逻辑，但最终原则必须是：
+
+```text
+没有可用量比字段时，不允许默认通过筛选。
+```
+
+`_vr_val(df)` 可以继续用于展示降级，例如缺失时返回 1.0，但不能用于让筛选通过。
+
+---
+
+## 六、MA 缺失问题本轮处理原则
+
+review 中也指出 MA 缺失时存在：
+
+```text
+fillna(df["close"])
+fillna(0)
+```
+
+这可能存在风险，但 MA 逻辑可能分散在多个策略里。
+
+本轮不要大改 MA 逻辑。
+
+本轮只要求：
+
+1. 不扩大 MA 改动；
+2. 不重写所有均线条件；
+3. 如果发现某一处 MA 缺失明显导致默认通过，可以加注释或轻量修复；
+4. 更完整的 MA 缺失处理放到后续 `report_regression_check` 或 selector 第二轮安全收敛。
+
+也就是说，本轮必须修 volume_ratio，不强制全面修 MA。
+
+---
+
+## 七、运行检查
+
+修改完成后执行：
+
+```bash
+python -m compileall analysis
+```
+
+然后执行：
+
+```bash
+git diff --stat
+git diff -- analysis/selector.py
+git status --short
+```
+
+如本地有数据，可以执行：
+
+```bash
+python -m analysis.daily_report --mode both --date 20260528
+```
+
+如果数据不完整导致失败，请说明是数据缺失还是代码错误。
+
+---
+
+## 八、重点检查
+
+请确认：
+
+1. `select_n_latent` 已增加 `pct_20d <= 60`；
+2. `select_n_breakout` 已增加 `pct_20d <= 60`；
+3. `_vr_ge` 缺 `volume_ratio` 时不再返回全 True；
+4. 没有修改其他策略逻辑；
+5. 没有修改观察池分层；
+6. 没有修改报告渲染；
+7. 没有修改邮件和 pipeline；
+8. 没有引入 pycache / reports 产物。
+
+---
+
+## 九、预期 diff
+
+理想 diff 只包含：
+
+```text
+analysis/selector.py
+```
+
+可选包含：
+
+```text
+PRDs/V3-Stabilization.md
+```
+
+不应该出现：
+
+```text
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+entrypoint.sh
+reports/
+analysis/__pycache__/
+data/__pycache__/
+.claude/
+```
+
+---
+
+## 十、提交要求
+
+如果验收通过，提交：
+
+```bash
+git add analysis/selector.py
+git commit -m "fix: tighten selector safety boundaries"
+```
+
+如果也更新了 PRD，则单独提交：
+
+```bash
+git add PRDs/V3-Stabilization.md
+git commit -m "docs: update selector safety notes"
+```
+
+不要 push。
+
+提交后发回：
+
+```bash
+git log -2 --oneline
+git status --short
+git diff HEAD~1 --stat
+```
+
+---
+
+## 十一、本轮通过标准
+
+本轮通过标准：
+
+1. 只改 `analysis/selector.py`；
+2. `compileall` 通过；
+3. N字异动增加 `pct_20d <= 60`；
+4. 二次起爆增加 `pct_20d <= 60`；
+5. 缺 volume_ratio 时不再默认通过；
+6. 没有新增策略；
+7. 没有改报告渲染；
+8. 没有改 email / pipeline；
+9. 没有 pycache / reports / local config 污染。
+
+
 ---
 
 ## 十一、本轮通过标准
