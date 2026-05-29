@@ -202,6 +202,22 @@ def _check_high_risk_duplicate(trade_date):
     return "ok", []
 
 
+def _check_summary_context(trade_date):
+    """检查 daily_summary 中是否有 report_context"""
+    path = REPORTS_DIR / f"daily_summary_{trade_date}.json"
+    if not path.exists():
+        return "warning", ["daily_summary JSON 不存在"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ctx = data.get("report_context") or {}
+        missing = [k for k in ["market", "sentiment", "quality"] if not ctx.get(k)]
+        if missing:
+            return "warning", [f"report_context 缺少: {', '.join(missing)}"]
+        return "ok", []
+    except Exception as e:
+        return "warning", [str(e)]
+
+
 CHECK_FUNCTIONS = {
     "file_date": _check_file_date,
     "old_terms": _check_old_terms,
@@ -211,6 +227,7 @@ CHECK_FUNCTIONS = {
     "duplicate_layer": _check_duplicate_layer,
     "permission_filter": _check_permission_filter,
     "high_risk_duplicate": _check_high_risk_duplicate,
+    "summary_context": _check_summary_context,
 }
 
 

@@ -181,13 +181,16 @@ def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
     """从 JSON 摘要组装邮件正文"""
     parts = []
 
-    m = summary.get("market", {})
+    # 优先从 report_context 读取（兼容旧 summary）
+    ctx = summary.get("report_context", {}) or {}
+    m = ctx.get("market", {}) or summary.get("market", {})
+    s = ctx.get("sentiment", {}) or summary.get("sentiment", {})
+
     if m:
         parts.append("## 今日市场一句话结论\n")
         parts.append(m.get("summary", ""))
         parts.append("\n")
 
-    s = summary.get("sentiment", {})
     if s:
         parts.append("## 市场状态\n")
         parts.append(f"- 市场综合评分：{m.get('score', '-')} / 100，状态：{m.get('status', '-')}")
