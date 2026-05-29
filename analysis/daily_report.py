@@ -35,6 +35,7 @@ from analysis.data_fetcher import (
 from analysis.account_filter import filter_tradeable_stocks
 from analysis.trade_plan import generate_trade_plan, save_trade_plan
 from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
+from analysis.context.report_context import build_report_context
 
 
 def load_board_trend_summary(trade_date):
@@ -401,6 +402,9 @@ def main():
     modes = ["beginner", "pro"] if mode == "both" else [mode]
 
     trade_date = args.date if args.date else get_trade_date()
+
+    # 旁路构建 report_context（暂不影响日报输出）
+    report_context = build_report_context(trade_date=trade_date)
 
     if not force and not is_trade_day(trade_date):
         print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")
