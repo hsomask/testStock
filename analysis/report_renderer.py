@@ -46,7 +46,7 @@ def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors)
         "",
         f"## 市场数据",
         f"- 市场状态：{market['status']}",
-        f"- 市场宽度评分：{market['score']}/100",
+        f"- 市场综合评分：{market['score']}/100",
         f"- 成交额：{market['total_amount']:.0f}亿",
         f"- 上涨：{market['up_count']}只，下跌：{market['down_count']}只",
         f"- 涨停：{market['limit_up']}只，跌停：{market['limit_down']}只",
@@ -87,7 +87,7 @@ def build_one_line_prompt(trade_date, market, sentiment, industry, concept):
 def build_strategy_prompt(trade_date, market, sentiment, selectors):
     prompt = (
         f"日期：{trade_date}\n"
-        f"市场宽度评分：{market['score']}/100，状态：{market['status']}\n"
+        f"市场综合评分：{market['score']}/100，状态：{market['status']}\n"
         f"情绪阶段：{sentiment['stage']}\n\n"
         f"请按以下三个场景给出明日应对建议（简洁，每个场景2-3句话，适合新手阅读）：\n"
         f"1. 市场放量上涨 → 应对方式\n"
