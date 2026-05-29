@@ -56,7 +56,12 @@ def main():
             if fname in [p.format(trade_date) for p in CRITICAL]:
                 critical_missing = True
 
-    status = "ok" if not critical_missing else ("warning" if missing_files else "ok")
+    if critical_missing:
+        status = "critical"
+    elif missing_files:
+        status = "warning"
+    else:
+        status = "ok"
     warnings = [f"非关键缺失: {f}" for f in missing_files if f not in [p.format(trade_date) for p in CRITICAL]]
     if critical_missing:
         warnings.insert(0, f"关键缺失: {len([f for f in missing_files if f in [p.format(trade_date) for p in CRITICAL]])} 个文件")
