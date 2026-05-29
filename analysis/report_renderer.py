@@ -465,12 +465,21 @@ def render_beginner_report(
     lines.append("---")
     lines.append("")
 
+    # context 优先取值
+    market_context = _get_context_section(report_context, "market")
+    sentiment_context = _get_context_section(report_context, "sentiment")
+    m_score = market_context.get("score", market.get("score"))
+    m_status = market_context.get("status", market.get("status"))
+    m_summary = market_context.get("summary", market.get("summary", ""))
+    s_score = sentiment_context.get("score", sentiment.get("score"))
+    s_stage = sentiment_context.get("stage", sentiment.get("stage"))
+
     # 3. 市场情绪
     lines.append("## 市场情绪")
     lines.append("")
-    lines.append(f"- 市场综合评分：**{market['score']} / 100**（状态：{market['status']}）")
-    lines.append(f"- 短线情绪周期评分：**{sentiment['score']} / 100**（阶段：{sentiment['stage']}）")
-    lines.append(f"- 小白解释：{explain_market_status(sentiment['score'])}")
+    lines.append(f"- 市场综合评分：**{m_score} / 100**（状态：{m_status}）")
+    lines.append(f"- 短线情绪周期评分：**{s_score} / 100**（阶段：{s_stage}）")
+    lines.append(f"- 小白解释：{explain_market_status(s_score)}")
     lines.append("")
 
     # 关键数据
@@ -959,6 +968,7 @@ def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
     quality=None, themes=None, trade_plan=None, board_trend_summary=None,
+    report_context=None,
 ):
     """统一入口，根据 mode 分发到 beginner 或 pro 渲染"""
     if mode == "pro":
@@ -966,12 +976,14 @@ def render_daily_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, board_ratio_changes,
             trade_plan=trade_plan, board_trend_summary=board_trend_summary,
+            report_context=report_context,
         )
     else:
         return render_beginner_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, themes, board_ratio_changes,
             trade_plan=trade_plan, board_trend_summary=board_trend_summary,
+            report_context=report_context,
         )
 
 
