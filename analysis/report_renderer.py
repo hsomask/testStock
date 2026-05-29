@@ -404,7 +404,7 @@ def render_themes(themes):
 def render_beginner_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, themes, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
 
@@ -712,7 +712,7 @@ def render_beginner_report(
 def render_pro_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
