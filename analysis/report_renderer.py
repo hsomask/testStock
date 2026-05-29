@@ -53,7 +53,7 @@ def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors)
         "",
         f"## 情绪周期",
         f"- 情绪阶段：{sentiment['stage']}",
-        f"- 情绪评分：{sentiment['score']}/100",
+        f"- 短线情绪周期评分：{sentiment['score']}/100",
         "",
     ]
     active_inds = industry.get("active_boards", [])
@@ -829,7 +829,7 @@ def render_pro_report(
     lines.append(f"## 情绪周期分析 | {date_display}")
     lines.append("")
     lines.append("### 市场情绪温度计")
-    lines.append(f"- 情绪评分：{sentiment['score']} / 100")
+    lines.append(f"- 短线情绪周期评分：{sentiment['score']} / 100")
     lines.append(f"- 当前阶段：{sentiment['stage']}")
     lines.append(f"- 解读：{sentiment['comment']}")
     lines.append("")

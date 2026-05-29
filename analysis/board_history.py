@@ -158,6 +158,7 @@ def save_board_amount_ratio(df, trade_date):
     if not DATABASE_DSN:
         logger.warning("DATABASE_DSN 未设置，跳过数据库写入")
         return
+    db_trade_date = to_date_display(trade_date)
     conn = psycopg2.connect(DATABASE_DSN)
     cur = conn.cursor()
 
@@ -183,7 +184,7 @@ def save_board_amount_ratio(df, trade_date):
 
     for _, row in df.iterrows():
         cur.execute(sql, (
-            trade_date,
+            db_trade_date,
             row["board_type"],
             row["board_code"],
             row["board_name"],

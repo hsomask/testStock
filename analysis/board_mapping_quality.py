@@ -67,8 +67,11 @@ def run(trade_date=None):
 
     lines = [f"# 板块映射质量报告 | {date_display}", ""]
 
-    if actual_board_date != requested_date:
-        lines.append(f"> 注意：指定日期无 board_amount_ratio 数据，已使用最近可用日期：{actual_board_date}。")
+    if ba_df.empty:
+        lines.append("> 注意：指定日期无 board_amount_ratio 数据，本报告仅基于 stock_board_map 做映射检查，未使用当天板块成交数据。")
+        lines.append("")
+    elif actual_board_date != requested_date:
+        lines.append(f"> 注意：数据日期与请求日期不一致：{actual_board_date}。")
         lines.append("")
 
     # ── 一、基本统计 ──
