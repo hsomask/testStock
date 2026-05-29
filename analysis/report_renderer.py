@@ -9,6 +9,13 @@ from analysis.board_alias import normalize_board_name
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
+def _get_context_section(report_context, name):
+    if not isinstance(report_context, dict):
+        return {}
+    s = report_context.get(name) or {}
+    return s if isinstance(s, dict) else {}
+
+
 # ── MiniMax AI ──
 
 def call_minimax(prompt):
