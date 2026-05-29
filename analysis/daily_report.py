@@ -403,9 +403,6 @@ def main():
 
     trade_date = args.date if args.date else get_trade_date()
 
-    # 旁路构建 report_context（暂不影响日报输出）
-    report_context = build_report_context(trade_date=trade_date)
-
     if not force and not is_trade_day(trade_date):
         print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")
         return
@@ -481,6 +478,14 @@ def main():
         )
 
         quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn, selector_result)
+
+        # 旁路构建 report_context，填入已有数据（暂不影响日报输出）
+        report_context = build_report_context(
+            trade_date=trade_date,
+            market=market_result,
+            sentiment=sentiment_result,
+            quality=quality,
+        )
 
         save_data_quality_log(trade_date, quality, data_status, db_conn)
 
