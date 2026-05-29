@@ -892,7 +892,7 @@ def render_pro_report(
     lines.append(f"## 风险与机会 | {date_display}")
     lines.append("")
     lines.append("### 风险提示")
-    lines.append("- 若市场情绪评分低于45，应降低仓位，避免追高。")
+    lines.append("- 若市场综合评分低于45，应降低仓位，避免追高。")
     lines.append("- 若跌停数量明显增加，说明亏钱效应扩散。")
     lines.append("- 若热点板块连续高潮，次日应警惕分歧。")
     lines.append("")
