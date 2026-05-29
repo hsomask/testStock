@@ -100,6 +100,21 @@ def build_summary_json(trade_date, market_result, sentiment_result, themes,
     summary = {
         "trade_date": trade_date,
         "generated_at": datetime.now().isoformat(),
+        "report_context": {
+            "market": {
+                "score": market_result.get("score"),
+                "status": market_result.get("status"),
+                "summary": market_result.get("summary", ""),
+            },
+            "sentiment": {
+                "score": sentiment_result.get("score"),
+                "stage": sentiment_result.get("stage"),
+            },
+            "quality": {
+                "confidence_score": quality.get("confidence_score"),
+                "issues": quality.get("issues", []),
+            },
+        },
         "market": {
             "score": market_result.get("score"),
             "status": market_result.get("status"),
