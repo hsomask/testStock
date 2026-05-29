@@ -334,6 +334,26 @@ def main():
         for f in missing_hint:
             body += f"- {f}\n"
 
+    # 流程检查结果（读取同日期 pipeline_check JSON）
+    pipeline_path = REPORTS_DIR / f"pipeline_check_{date_str}.json"
+    if pipeline_path.exists():
+        try:
+            pc = json.loads(pipeline_path.read_text(encoding="utf-8"))
+            body += "\n\n---\n流程检查：\n"
+            if pc.get("critical_missing"):
+                body += "- 关键缺失：" + "、".join([f for f in pc.get("missing_files", [])
+                    if f in [p.format(pc.get("trade_date","")) for p in ["daily_report_{}.md","daily_summary_{}.json"]]]) + "\n"
+            else:
+                body += "- 关键缺失：无\n"
+            non_crit = [f for f in pc.get("missing_files", []) if f not in ["daily_report_{}.md".format(pc.get("trade_date","")),"daily_summary_{}.json".format(pc.get("trade_date",""))]]
+            body += f"- 非关键缺失：{'无' if not non_crit else '、'.join(non_crit)}\n"
+        except Exception:
+            body += "\n\n---\n流程检查：pipeline_check JSON 读取失败\n"
+    elif not args.date:
+        pass  # 非 --date 模式不提示
+    else:
+        body += "\n\n---\n流程检查：pipeline_check JSON 未生成\n"
+
     send_email(subject, body, attachments)
 
 
