@@ -38,13 +38,14 @@ from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
 
 
 def load_board_trend_summary(trade_date):
+    """读取当天趋势摘要，不存在返回 None（不 fallback）"""
     path = REPORTS_DIR / f"board_trend_summary_{trade_date}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
@@ -391,13 +392,15 @@ def main():
                         help="报告模式：beginner / pro / both")
     parser.add_argument("--force", action="store_true",
                         help="强制执行（非交易日也运行）")
+    parser.add_argument("--date", type=str, default=None,
+                        help="日期 YYYYMMDD，默认今天")
     args = parser.parse_args()
 
     force = args.force
     mode = args.mode
     modes = ["beginner", "pro"] if mode == "both" else [mode]
 
-    trade_date = get_trade_date()
+    trade_date = args.date if args.date else get_trade_date()
 
     if not force and not is_trade_day(trade_date):
         print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")

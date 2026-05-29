@@ -131,17 +131,39 @@ def detect_main_themes(
         else:
             continue  # 不满足最低门槛，排除
 
+        # 主线类型
+        pct_val = pct if pd.notna(pct) else 0
+        if pct_val < 0 and (ratio_3d_up or ratio_5d_up):
+            theme_type = "分歧主线"
+            # 修正文案：不写"涨幅靠前"
+            reasons = [r.replace("涨幅靠前", "资金关注度提升但板块分歧较大")
+                        .replace("出现在涨幅榜前列", "成交占比提升但当日下跌")
+                        for r in reasons]
+        elif pct_val < 0:
+            theme_type = "分歧主线"
+            reasons = [r.replace("涨幅靠前", "资金关注度提升但板块分歧较大")
+                        .replace("出现在涨幅榜前列", "成交占比提升但当日下跌")
+                        for r in reasons]
+        elif score >= 55 and (ratio_3d_up or ratio_5d_up):
+            theme_type = "上涨主线"
+        elif hit_count >= 1 and pct_val < 2:
+            theme_type = "回流主线"
+            reasons.append("前期资金回流，关注持续性")
+        else:
+            theme_type = "上涨主线"
+
         # 小白解释
         beginner_explain = _generate_beginner_explain(name, level, score, reasons)
 
         # 持续性风险
-        sustainability_risk = _assess_sustainability(name, ratio_3d_up, ratio_5d_up, pct)
+        sustainability_risk = _assess_sustainability(name, ratio_3d_up, ratio_5d_up, pct_val)
 
         themes.append({
             "name": name,
             "board_type": board_type,
             "score": score,
             "level": level,
+            "theme_type": theme_type,
             "reasons": reasons,
             "beginner_explain": beginner_explain,
             "sustainability_risk": sustainability_risk,

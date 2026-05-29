@@ -67,25 +67,36 @@ def analyze_market(stock_df, index_df):
     limit_up_ratio = limit_up / max(len(df), 1)
     down_ratio = down_count / max(len(df), 1)
 
+    # 市场综合评分（宽度+涨停+成交额综合）
     score = (
-        up_ratio * 45
-        + min(limit_up / 80, 1) * 25
+        up_ratio * 30
+        + min(limit_up / 80, 1) * 30
         + min(total_amount / 12000, 1) * 20
         - min(limit_down / 50, 1) * 15
-        + 25
+        + 20
     )
     score = max(0, min(100, score))
 
     status = classify_market_status(score)
 
+    # 高度分化判断：上涨少但涨停不少 → 局部热点活跃
+    if up_ratio < 0.30 and limit_up >= 50:
+        status = "分化"
+    elif up_ratio < 0.50 and down_count > up_count:
+        status = "宽度偏弱"
+
     indices = get_main_indices(index_df)
 
-    if score >= 60:
-        summary = "市场情绪偏强，赚钱效应相对活跃，适合关注主线方向的分歧低吸。"
+    if status == "分化":
+        summary = "市场宽度偏弱但局部热点活跃，注意区分方向，不要普买。"
+    elif status == "宽度偏弱":
+        summary = "市场宽度偏弱，下跌多于上涨，操作上应精选方向，控制仓位。"
+    elif score >= 60:
+        summary = "市场宽度偏强，赚钱效应相对活跃，适合关注主线方向的分歧低吸。"
     elif score >= 45:
         summary = "市场处于震荡平衡状态，板块轮动较快，操作上应控制追高。"
     else:
-        summary = "市场情绪偏弱，亏钱效应较明显，应降低仓位并等待情绪修复。"
+        summary = "市场宽度偏弱，亏钱效应较明显，应降低仓位并等待情绪修复。"
 
     return {
         "indices": indices,

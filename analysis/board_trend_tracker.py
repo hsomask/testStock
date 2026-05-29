@@ -17,6 +17,7 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
 from data.config import DATABASE_DSN
+from analysis.utils import to_date_display
 from analysis.board_alias import aggregate_by_display_name, KEY_BOARDS
 from analysis.board_alias_config import LOW_VALUE_BOARDS
 
@@ -359,7 +360,7 @@ def _score_to_label(score):
 
 def _generate_markdown(df, trade_date, windows_available):
     """生成 Markdown 报告"""
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    date_display = to_date_display(trade_date)
     lines = [f"# 板块资金趋势追踪报告 | {date_display}", ""]
 
     # 一、总体结论

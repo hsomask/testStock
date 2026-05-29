@@ -13,6 +13,7 @@ import pandas as pd
 import psycopg2
 
 from data.config import DATABASE_DSN
+from analysis.utils import to_date_display, to_ymd
 from analysis.board_alias import normalize_board_name, explain_alias, KEY_BOARDS
 from analysis.board_alias_config import LOW_VALUE_BOARDS, KEY_BOARD_ALIASES
 
@@ -39,7 +40,7 @@ def _count_dist(df, col):
 def run(trade_date=None):
     if trade_date is None:
         trade_date = datetime.now().strftime("%Y%m%d")
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    date_display = to_date_display(trade_date)
 
     conn = _get_conn()
     if conn is None:
@@ -52,20 +53,13 @@ def run(trade_date=None):
         conn.close()
         return
 
-    # 读取最新 board_amount_ratio
+    # 读取指定日期 board_amount_ratio（不 fallback）
     requested_date = date_display
     ba_df = pd.read_sql(
         "SELECT * FROM board_amount_ratio WHERE trade_date=%s",
         conn, params=(date_display,)
     )
-    actual_board_date = date_display
-    if ba_df.empty:
-        ba_df = pd.read_sql(
-            "SELECT * FROM board_amount_ratio WHERE trade_date=(SELECT MAX(trade_date) FROM board_amount_ratio)",
-            conn
-        )
-        if not ba_df.empty:
-            actual_board_date = str(ba_df["trade_date"].max())[:10]
+    actual_board_date = date_display if not ba_df.empty else None
 
     conn.close()
 
@@ -73,8 +67,11 @@ def run(trade_date=None):
 
     lines = [f"# 板块映射质量报告 | {date_display}", ""]
 
-    if actual_board_date != requested_date:
-        lines.append(f"> 注意：指定日期无 board_amount_ratio 数据，已使用最近可用日期：{actual_board_date}。")
+    if ba_df.empty:
+        lines.append("> 注意：指定日期无 board_amount_ratio 数据，本报告仅基于 stock_board_map 做映射检查，未使用当天板块成交数据。")
+        lines.append("")
+    elif actual_board_date != requested_date:
+        lines.append(f"> 注意：数据日期与请求日期不一致：{actual_board_date}。")
         lines.append("")
 
     # ── 一、基本统计 ──
@@ -191,6 +188,14 @@ def run(trade_date=None):
     lines.append("")
 
     # ── JSON 输出 ──
+    key_check = {}
+    key_matched = {}
+    for kb in KEY_BOARDS:
+        aliases = KEY_BOARD_ALIASES.get(kb, [kb])
+        matched = [a for a in aliases if a in all_display]
+        key_check[kb] = bool(matched)
+        key_matched[kb] = matched
+
     quality_json = {
         "trade_date": trade_date,
         "requested_date": requested_date,
@@ -203,7 +208,8 @@ def run(trade_date=None):
         "too_few_boards": len(too_few),
         "too_many_boards": len(too_many),
         "over_mapped_stocks": len(over_mapped),
-        "key_boards_check": {kb: kb in board_counts["display_name"].values for kb in KEY_BOARDS},
+        "key_boards_check": key_check,
+        "key_boards_matched": key_matched,
     }
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)

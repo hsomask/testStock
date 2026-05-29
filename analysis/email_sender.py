@@ -189,9 +189,9 @@ def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
 
     s = summary.get("sentiment", {})
     if s:
-        parts.append("## 市场情绪\n")
-        parts.append(f"- 评分：{s.get('score')} / 100")
-        parts.append(f"- 阶段：{s.get('stage')}")
+        parts.append("## 市场状态\n")
+        parts.append(f"- 市场综合评分：{m.get('score', '-')} / 100，状态：{m.get('status', '-')}")
+        parts.append(f"- 短线情绪周期评分：{s.get('score', '-')} / 100，阶段：{s.get('stage', '-')}")
         parts.append("\n")
 
     themes = summary.get("themes", [])
@@ -245,16 +245,34 @@ def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
 
 
 def main():
+    import argparse
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
+    args = parser.parse_args()
 
-    beginner_path = find_latest_report(pro=False)
-    pro_path = find_latest_report(pro=True)
+    if args.date:
+        from analysis.utils import to_ymd
+        date_str = to_ymd(args.date)
+        beginner_path = REPORTS_DIR / f"daily_report_{date_str}.md"
+        pro_path = REPORTS_DIR / f"daily_report_{date_str}_pro.md"
+        beginner_path = beginner_path if beginner_path.exists() else None
+        pro_path = pro_path if pro_path.exists() else None
+    else:
+        beginner_path = find_latest_report(pro=False)
+        pro_path = find_latest_report(pro=True)
 
-    summary = find_latest_summary()
-    date_str = "今日"
+    if args.date:
+        summary_path = REPORTS_DIR / f"daily_summary_{date_str}.json"
+        summary = summary_path if summary_path.exists() else None
+        trade_plan_path = REPORTS_DIR / f"trade_plan_{date_str}.json"
+        tp_path = trade_plan_path if trade_plan_path.exists() else None
+    else:
+        summary = find_latest_summary()
+    date_display = "今日"
     subject = "A股每日复盘"
 
     if summary is not None:
@@ -268,8 +286,12 @@ def main():
         subject = f"A股每日复盘 · {date_str}"
         body = build_email_body_from_json(data, beginner_path, pro_path)
 
-        # 交易计划摘要（优先展示）
-        tp_path = find_latest_trade_plan()
+        # 交易计划摘要（--date 模式只取当天，否则取最新）
+        if args.date:
+            tp_path = REPORTS_DIR / f"trade_plan_{date_str}.json"
+            tp_path = tp_path if tp_path.exists() else None
+        else:
+            tp_path = find_latest_trade_plan()
         if tp_path:
             tp = json.loads(tp_path.read_text(encoding="utf-8"))
             tp_section = build_trade_plan_section(tp)
@@ -294,17 +316,23 @@ def main():
     if pro_path:
         attachments.append(pro_path)
 
-    # 附件：Excel 趋势追踪表
-    xlsx_path = find_latest_file("board_trend_tracker_*.xlsx")
-    if xlsx_path:
-        attachments.append(xlsx_path)
+    # 附件：当天文件（按 trade_date 精确匹配，不混旧日期）
+    date_str = date_str.replace("-", "") if len(date_str) > 8 else date_str
+    missing_hint = []
+    for fname in [f"board_trend_tracker_{date_str}.xlsx",
+                  f"board_mapping_quality_{date_str}.md",
+                  f"board_mapping_quality_{date_str}.json",
+                  f"board_alias_report_{date_str}.md"]:
+        fpath = REPORTS_DIR / fname
+        if fpath.exists():
+            attachments.append(fpath)
+        else:
+            missing_hint.append(fname)
 
-    # 附件：V3.1 质量报告
-    for pattern in ["board_mapping_quality_*.md", "board_mapping_quality_*.json",
-                    "board_alias_report_*.md"]:
-        qpath = find_latest_file(pattern)
-        if qpath:
-            attachments.append(qpath)
+    if missing_hint:
+        body += "\n\n---\n以下当天文件未生成：\n"
+        for f in missing_hint:
+            body += f"- {f}\n"
 
     send_email(subject, body, attachments)
 

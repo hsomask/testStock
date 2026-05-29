@@ -10,6 +10,7 @@ from datetime import datetime
 
 import akshare as ak
 from data.config import DATABASE_DSN
+from analysis.utils import to_date_display
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ def save_board_amount_ratio(df, trade_date):
     if not DATABASE_DSN:
         logger.warning("DATABASE_DSN 未设置，跳过数据库写入")
         return
+    db_trade_date = to_date_display(trade_date)
     conn = psycopg2.connect(DATABASE_DSN)
     cur = conn.cursor()
 
@@ -182,7 +184,7 @@ def save_board_amount_ratio(df, trade_date):
 
     for _, row in df.iterrows():
         cur.execute(sql, (
-            trade_date,
+            db_trade_date,
             row["board_type"],
             row["board_code"],
             row["board_name"],
@@ -201,15 +203,16 @@ def save_board_amount_ratio(df, trade_date):
     conn.close()
 
 
-def update_board_history():
-    trade_date = datetime.now().strftime("%Y-%m-%d")
+def update_board_history(trade_date=None):
+    if trade_date is None:
+        trade_date = datetime.now().strftime("%Y-%m-%d")
+    today_ymd = trade_date.replace("-", "")
 
     if not DATABASE_DSN:
         logger.warning("DATABASE_DSN 未设置，数据库功能跳过")
         return
 
     from analysis.data_fetcher import is_trade_day
-    today_ymd = datetime.now().strftime("%Y%m%d")
     if not is_trade_day(today_ymd):
         print(f"{today_ymd} 非交易日，跳过板块成交占比更新")
         return
@@ -317,8 +320,10 @@ def get_all_ratio_changes():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    )
-    update_board_history()
+    import argparse
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
+    args = parser.parse_args()
+    date = to_date_display(args.date) if args.date else None
+    update_board_history(trade_date=date)

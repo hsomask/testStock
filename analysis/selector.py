@@ -3,6 +3,8 @@ import numpy as np
 import argparse
 
 from analysis.utils import fmt_pct
+from analysis.board_alias import normalize_board_name
+from analysis.board_alias_config import LOW_VALUE_BOARDS
 
 
 def _has_volume_ratio(df):
@@ -175,6 +177,16 @@ def filter_common_stock_pool(stock_df):
     df = df[df["close"] > 2]
     df = df[df["amount"] > 100000000]
 
+    # 账户权限过滤
+    from data.config import ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE
+    code_str = df["code"].astype(str)
+    if not ALLOW_CHINEXT:
+        df = df[~code_str.str.startswith(("300", "301"))]
+    if not ALLOW_STAR:
+        df = df[~code_str.str.startswith("688")]
+    if not ALLOW_BSE:
+        df = df[~code_str.str.startswith("920")]
+
     return df
 
 
@@ -260,11 +272,17 @@ def select_short_strong(stock_df, limit=5, market_score=None):
     """短线强势：今日涨幅强、量比高、成交额充足、均线多头排列"""
     df = filter_common_stock_pool(stock_df)
 
+    # 排除 N 开头新股
+    df = df[~df["name"].astype(str).str.startswith("N")]
+
     cond = (
         (df["pct_chg"] >= 5)
+        & (df["pct_chg"] <= 15)
         & _vr_ge(df, 1.5)
+        & (df["volume_ratio"].notna())
         & (df["amount"] >= 300000000)
         & (df["close"] >= df["ma5"].fillna(df["close"]))
+        & (df["ma5"].notna()) & (df["ma10"].notna())
         & (df["ma5"].fillna(0) >= df["ma10"].fillna(0))
     )
 
@@ -319,7 +337,7 @@ def _select_board_linkage_db(stock_df, limit=5, market_score=None):
         hot_df = pd.read_sql(sql_hot, conn)
         hot_df["board_score"] = hot_df["pct_chg"].fillna(0) * 0.5 + hot_df["amount_ratio"].fillna(0) * 100 * 0.5
         hot_df = hot_df.sort_values("board_score", ascending=False).head(30)
-        hot_board_names = set(hot_df["board_name"].tolist())
+        hot_board_names = set(hot_df["board_name"].tolist()) - LOW_VALUE_BOARDS
 
         # 读取个股-板块映射
         mp_df = pd.read_sql("SELECT code, board_type, board_name FROM stock_board_map", conn)
