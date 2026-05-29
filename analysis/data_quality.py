@@ -258,6 +258,13 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
             items.append({"item": "观察池均线", "status": "大量缺失", "detail": f"观察池均线覆盖率 {obs_ma_coverage:.0%}（{obs_has_ma}/{obs_total}）"})
             issues.append(f"观察池均线覆盖率仅 {obs_ma_coverage:.0%}，报告可读性下降。")
 
+    # 数据质量说明
+    items.append({
+        "item": "数据说明",
+        "status": "提示",
+        "detail": "报告可信度主要反映基础行情和板块数据可用性；由于全市场均线缺失比例较高，依赖均线的选股结果需降低权重。"
+    })
+
     # 确保分数在 0-100（所有检查完成后再计算）
     confidence_score = max(0, min(100, score))
 

@@ -67,7 +67,7 @@ def analyze_market(stock_df, index_df):
     limit_up_ratio = limit_up / max(len(df), 1)
     down_ratio = down_count / max(len(df), 1)
 
-    # 市场宽度评分（权重调低 up_ratio，平衡涨停/成交额贡献）
+    # 市场综合评分（宽度+涨停+成交额综合）
     score = (
         up_ratio * 30
         + min(limit_up / 80, 1) * 30
