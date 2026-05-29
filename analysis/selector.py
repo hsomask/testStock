@@ -17,11 +17,11 @@ def _has_volume_ratio(df):
 def _vr_ge(df, threshold):
     """
     量比条件：量比 >= threshold。
-    若量比字段缺失或全NaN（Sina数据源），视为条件通过。
+    若量比字段缺失或全NaN，不通过筛选（不再默认放行）。
     """
     if not _has_volume_ratio(df):
-        return pd.Series(True, index=df.index)
-    return df["volume_ratio"].fillna(threshold) >= threshold
+        return pd.Series(False, index=df.index)
+    return df["volume_ratio"].fillna(0) >= threshold
 
 
 def _vr_val(df, default=1.0):
@@ -221,7 +221,7 @@ def select_n_latent(stock_df, limit=5, market_score=None):
     df = filter_common_stock_pool(stock_df)
 
     cond = (
-        (df["pct_20d"].fillna(0) >= 8)
+        (df["pct_20d"].fillna(0) >= 8) & (df["pct_20d"].fillna(0) <= 60)
         & (df["pct_5d"].fillna(0) <= 12)
         & (df["pct_chg"] > -4)
         & (df["close"] >= df["ma20"].fillna(df["close"]) * 0.97)
@@ -249,7 +249,7 @@ def select_n_breakout(stock_df, limit=5, market_score=None):
     cond = (
         (df["pct_chg"] >= 2)
         & _vr_ge(df, 1.3)
-        & (df["pct_20d"].fillna(0) >= 10)
+        & (df["pct_20d"].fillna(0) >= 10) & (df["pct_20d"].fillna(0) <= 60)
         & (df["close"] >= df["ma5"].fillna(df["close"]))
         & (df["close"] >= df["ma10"].fillna(df["close"]))
     )
