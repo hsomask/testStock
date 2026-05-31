@@ -422,7 +422,8 @@ def main():
 
     if not force and not is_trade_day(trade_date):
         print(f"{trade_date} 非交易日，跳过分析（使用 --force 可强制执行）")
-        return
+        import sys
+        sys.exit(1)
 
     if force and not is_trade_day(trade_date):
         print(f"{trade_date} 非交易日，强制执行分析...")
