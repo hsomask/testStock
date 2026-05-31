@@ -466,6 +466,7 @@ def main():
             industry_df=industry_df,
             concept_df=concept_df,
             market_score=market_score,
+            trade_date=trade_date,
         )
 
         selector_result = enrich_selected_stocks_indicators(selector_result)

@@ -342,14 +342,17 @@ def main():
     if pipeline_path.exists():
         try:
             pc = json.loads(pipeline_path.read_text(encoding="utf-8"))
+            cm = pc.get("critical_missing", [])
+            nm = pc.get("non_critical_missing", [])
+            # 兼容旧结构（critical_missing 为 bool）
+            if isinstance(cm, bool):
+                cm = pc.get("missing_files", []) if cm else []
+                nm = []
+            if isinstance(nm, bool):
+                nm = []
             body += "\n\n---\n流程检查：\n"
-            if pc.get("critical_missing"):
-                body += "- 关键缺失：" + "、".join([f for f in pc.get("missing_files", [])
-                    if f in [p.format(pc.get("trade_date","")) for p in ["daily_report_{}.md","daily_summary_{}.json"]]]) + "\n"
-            else:
-                body += "- 关键缺失：无\n"
-            non_crit = [f for f in pc.get("missing_files", []) if f not in ["daily_report_{}.md".format(pc.get("trade_date","")),"daily_summary_{}.json".format(pc.get("trade_date",""))]]
-            body += f"- 非关键缺失：{'无' if not non_crit else '、'.join(non_crit)}\n"
+            body += f"- 关键缺失：{'无' if not cm else '、'.join(cm)}\n"
+            body += f"- 非关键缺失：{'无' if not nm else '、'.join(nm)}\n"
         except Exception:
             body += "\n\n---\n流程检查：pipeline_check JSON 读取失败\n"
     elif not args.date:

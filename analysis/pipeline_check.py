@@ -56,22 +56,26 @@ def main():
             if fname in [p.format(trade_date) for p in CRITICAL]:
                 critical_missing = True
 
-    if critical_missing:
+    critical_list = [f for f in missing_files if f in [p.format(trade_date) for p in CRITICAL]]
+    non_critical_list = [f for f in missing_files if f not in [p.format(trade_date) for p in CRITICAL]]
+
+    if critical_list:
         status = "critical"
-    elif missing_files:
+    elif non_critical_list:
         status = "warning"
     else:
         status = "ok"
-    warnings = [f"非关键缺失: {f}" for f in missing_files if f not in [p.format(trade_date) for p in CRITICAL]]
-    if critical_missing:
-        warnings.insert(0, f"关键缺失: {len([f for f in missing_files if f in [p.format(trade_date) for p in CRITICAL]])} 个文件")
+
     result = {
         "trade_date": trade_date,
         "status": status,
         "ok_files": ok_files,
         "missing_files": missing_files,
-        "critical_missing": critical_missing,
-        "warnings": warnings,
+        "critical_missing": critical_list,
+        "non_critical_missing": non_critical_list,
+        "has_critical_missing": bool(critical_list),
+        "warnings": [f"关键缺失: {len(critical_list)}" if critical_list else "",
+                     *(f"非关键缺失: {f}" for f in non_critical_list)],
         "generated_at": f"{trade_date}",
     }
     json_path = REPORTS_DIR / f"pipeline_check_{trade_date}.json"

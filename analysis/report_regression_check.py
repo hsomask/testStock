@@ -74,8 +74,11 @@ def _check_pipeline_critical(trade_date):
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("critical_missing"):
-            return "failed", data["missing_files"]
+        cm = data.get("critical_missing", [])
+        if isinstance(cm, bool):
+            cm = data.get("missing_files", []) if cm else []
+        if isinstance(cm, list) and cm:
+            return "failed", cm
         return "ok", []
     except Exception as e:
         return "failed", [f"pipeline_check JSON 读取失败: {e}"]
