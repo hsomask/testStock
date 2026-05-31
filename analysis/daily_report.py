@@ -35,6 +35,7 @@ from analysis.data_fetcher import (
 from analysis.account_filter import filter_tradeable_stocks
 from analysis.trade_plan import generate_trade_plan, save_trade_plan
 from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
+from analysis.context.report_context import build_report_context
 
 
 def load_board_trend_summary(trade_date):
@@ -99,6 +100,21 @@ def build_summary_json(trade_date, market_result, sentiment_result, themes,
     summary = {
         "trade_date": trade_date,
         "generated_at": datetime.now().isoformat(),
+        "report_context": {
+            "market": {
+                "score": market_result.get("score"),
+                "status": market_result.get("status"),
+                "summary": market_result.get("summary", ""),
+            },
+            "sentiment": {
+                "score": sentiment_result.get("score"),
+                "stage": sentiment_result.get("stage"),
+            },
+            "quality": {
+                "confidence_score": quality.get("confidence_score"),
+                "issues": quality.get("issues", []),
+            },
+        },
         "market": {
             "score": market_result.get("score"),
             "status": market_result.get("status"),
@@ -342,7 +358,8 @@ def log_job_end(job_id, status="success", error_message=None):
 def generate_report_mode(trade_date, mode, data_status, market_result,
                          industry_result, concept_result, sentiment_result,
                          selector_result, board_ratio_changes, quality, themes,
-                         trade_plan=None, board_trend_summary=None):
+                         trade_plan=None, board_trend_summary=None,
+                         report_context=None):
     """生成单个模式的报告并保存，返回报告文本"""
     report = render_daily_report(
         trade_date=trade_date,
@@ -358,6 +375,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         themes=themes,
         trade_plan=trade_plan,
         board_trend_summary=board_trend_summary,
+        report_context=report_context,
     )
     path = save_report(report, trade_date, mode)
     try:
@@ -448,6 +466,7 @@ def main():
             industry_df=industry_df,
             concept_df=concept_df,
             market_score=market_score,
+            trade_date=trade_date,
         )
 
         selector_result = enrich_selected_stocks_indicators(selector_result)
@@ -477,6 +496,14 @@ def main():
         )
 
         quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn, selector_result)
+
+        # 旁路构建 report_context，填入已有数据（暂不影响日报输出）
+        report_context = build_report_context(
+            trade_date=trade_date,
+            market=market_result,
+            sentiment=sentiment_result,
+            quality=quality,
+        )
 
         save_data_quality_log(trade_date, quality, data_status, db_conn)
 
@@ -510,6 +537,7 @@ def main():
                 quality, themes,
                 trade_plan=trade_plan,
                 board_trend_summary=board_trend_summary,
+                report_context=report_context,
             )
 
         log_job_end(job_id, "success")

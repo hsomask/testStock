@@ -22,7 +22,15 @@ EXPECTED_FILES = [
     "board_alias_report_{}.md",
 ]
 
-CRITICAL = ["daily_report_{}.md", "daily_summary_{}.json"]
+CRITICAL = [
+    "daily_report_{}.md",
+    "daily_report_{}_pro.md",
+    "daily_summary_{}.json",
+    "trade_plan_{}.md",
+    "trade_plan_{}.json",
+    "board_trend_summary_{}.json",
+    "board_mapping_quality_{}.json",
+]
 
 
 def main():
@@ -48,11 +56,29 @@ def main():
             if fname in [p.format(trade_date) for p in CRITICAL]:
                 critical_missing = True
 
+    critical_list = [f for f in missing_files if f in [p.format(trade_date) for p in CRITICAL]]
+    non_critical_list = [f for f in missing_files if f not in [p.format(trade_date) for p in CRITICAL]]
+
+    if critical_list:
+        status = "critical"
+    elif non_critical_list:
+        status = "warning"
+    else:
+        status = "ok"
+
     result = {
         "trade_date": trade_date,
+        "status": status,
         "ok_files": ok_files,
         "missing_files": missing_files,
-        "critical_missing": critical_missing,
+        "critical_missing": critical_list,
+        "non_critical_missing": non_critical_list,
+        "has_critical_missing": bool(critical_list),
+        "warnings": [w for w in [
+            f"关键缺失: {len(critical_list)}" if critical_list else "",
+            *(f"非关键缺失: {f}" for f in non_critical_list)
+        ] if w],
+        "generated_at": f"{trade_date}",
     }
     json_path = REPORTS_DIR / f"pipeline_check_{trade_date}.json"
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

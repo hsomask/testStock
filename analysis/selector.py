@@ -17,11 +17,11 @@ def _has_volume_ratio(df):
 def _vr_ge(df, threshold):
     """
     量比条件：量比 >= threshold。
-    若量比字段缺失或全NaN（Sina数据源），视为条件通过。
+    若量比字段缺失或全NaN，不通过筛选（不再默认放行）。
     """
     if not _has_volume_ratio(df):
-        return pd.Series(True, index=df.index)
-    return df["volume_ratio"].fillna(threshold) >= threshold
+        return pd.Series(False, index=df.index)
+    return df["volume_ratio"].fillna(0) >= threshold
 
 
 def _vr_val(df, default=1.0):
@@ -221,7 +221,7 @@ def select_n_latent(stock_df, limit=5, market_score=None):
     df = filter_common_stock_pool(stock_df)
 
     cond = (
-        (df["pct_20d"].fillna(0) >= 8)
+        (df["pct_20d"].fillna(0) >= 8) & (df["pct_20d"].fillna(0) <= 60)
         & (df["pct_5d"].fillna(0) <= 12)
         & (df["pct_chg"] > -4)
         & (df["close"] >= df["ma20"].fillna(df["close"]) * 0.97)
@@ -249,7 +249,7 @@ def select_n_breakout(stock_df, limit=5, market_score=None):
     cond = (
         (df["pct_chg"] >= 2)
         & _vr_ge(df, 1.3)
-        & (df["pct_20d"].fillna(0) >= 10)
+        & (df["pct_20d"].fillna(0) >= 10) & (df["pct_20d"].fillna(0) <= 60)
         & (df["close"] >= df["ma5"].fillna(df["close"]))
         & (df["close"] >= df["ma10"].fillna(df["close"]))
     )
@@ -299,21 +299,22 @@ def select_short_strong(stock_df, limit=5, market_score=None):
     return add_common_fields(result, "短线强势", style="aggressive", market_score=market_score)
 
 
-def select_board_linkage(stock_df, industry_df=None, concept_df=None, limit=5, market_score=None):
+def select_board_linkage(stock_df, industry_df=None, concept_df=None, limit=5, market_score=None, trade_date=None):
     """板块联动：优先使用数据库 stock_board_map 获取个股-板块映射；
     若不可用则降级为基于强势个股的近似筛选"""
-    df = _select_board_linkage_db(stock_df, limit, market_score=market_score)
+    df = _select_board_linkage_db(stock_df, limit, market_score=market_score, trade_date=trade_date)
     if df is not None and not df.empty:
         return df
 
     return _select_board_linkage_fallback(stock_df, limit, market_score=market_score)
 
 
-def _select_board_linkage_db(stock_df, limit=5, market_score=None):
+def _select_board_linkage_db(stock_df, limit=5, market_score=None, trade_date=None):
     """基于数据库 stock_board_map 和 board_amount_ratio 的真实板块联动选股"""
     try:
         import psycopg2
         from data.config import DATABASE_DSN
+        from analysis.utils import to_date_display
 
         conn = psycopg2.connect(DATABASE_DSN)
         cur = conn.cursor()
@@ -328,13 +329,26 @@ def _select_board_linkage_db(stock_df, limit=5, market_score=None):
             conn.close()
             return None
 
-        # 读取当日强势板块
-        sql_hot = """
-        SELECT board_type, board_name, pct_chg, amount_ratio
-        FROM board_amount_ratio
-        WHERE trade_date = (SELECT MAX(trade_date) FROM board_amount_ratio)
-        """
-        hot_df = pd.read_sql(sql_hot, conn)
+        # 读取强势板块：优先使用传入 trade_date，否则取最新
+        if trade_date:
+            db_date = to_date_display(trade_date)
+            sql_hot = """
+            SELECT board_type, board_name, pct_chg, amount_ratio
+            FROM board_amount_ratio
+            WHERE trade_date = %s
+            """
+            hot_df = pd.read_sql(sql_hot, conn, params=(db_date,))
+            if hot_df.empty:
+                conn.close()
+                return None
+        else:
+            sql_hot = """
+            SELECT board_type, board_name, pct_chg, amount_ratio
+            FROM board_amount_ratio
+            WHERE trade_date = (SELECT MAX(trade_date) FROM board_amount_ratio)
+            """
+            hot_df = pd.read_sql(sql_hot, conn)
+        # 若 trade_date 指定且无数据，上面已 return None；到这里 hot_df 已有有效数据
         hot_df["board_score"] = hot_df["pct_chg"].fillna(0) * 0.5 + hot_df["amount_ratio"].fillna(0) * 100 * 0.5
         hot_df = hot_df.sort_values("board_score", ascending=False).head(30)
         hot_board_names = set(hot_df["board_name"].tolist()) - LOW_VALUE_BOARDS
@@ -565,11 +579,11 @@ def select_snowball_trend(stock_df, limit=5, market_score=None):
     return result
 
 
-def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=None):
+def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=None, trade_date=None):
     first = select_first_breakout(stock_df, limit=5, market_score=market_score)
     n_latent = select_n_latent(stock_df, limit=5, market_score=market_score)
     n_breakout = select_n_breakout(stock_df, limit=5, market_score=market_score)
-    board_linkage = select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score)
+    board_linkage = select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score, trade_date=trade_date)
     short_strong = select_short_strong(stock_df, limit=5, market_score=market_score)
     try:
         snowball = select_snowball_trend(stock_df, limit=5, market_score=market_score)

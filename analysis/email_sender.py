@@ -181,13 +181,16 @@ def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
     """从 JSON 摘要组装邮件正文"""
     parts = []
 
-    m = summary.get("market", {})
+    # 优先从 report_context 读取（兼容旧 summary）
+    ctx = summary.get("report_context", {}) or {}
+    m = ctx.get("market", {}) or summary.get("market", {})
+    s = ctx.get("sentiment", {}) or summary.get("sentiment", {})
+
     if m:
         parts.append("## 今日市场一句话结论\n")
         parts.append(m.get("summary", ""))
         parts.append("\n")
 
-    s = summary.get("sentiment", {})
     if s:
         parts.append("## 市场状态\n")
         parts.append(f"- 市场综合评分：{m.get('score', '-')} / 100，状态：{m.get('status', '-')}")
@@ -333,6 +336,29 @@ def main():
         body += "\n\n---\n以下当天文件未生成：\n"
         for f in missing_hint:
             body += f"- {f}\n"
+
+    # 流程检查结果（读取同日期 pipeline_check JSON）
+    pipeline_path = REPORTS_DIR / f"pipeline_check_{date_str}.json"
+    if pipeline_path.exists():
+        try:
+            pc = json.loads(pipeline_path.read_text(encoding="utf-8"))
+            cm = pc.get("critical_missing", [])
+            nm = pc.get("non_critical_missing", [])
+            # 兼容旧结构（critical_missing 为 bool）
+            if isinstance(cm, bool):
+                cm = pc.get("missing_files", []) if cm else []
+                nm = []
+            if isinstance(nm, bool):
+                nm = []
+            body += "\n\n---\n流程检查：\n"
+            body += f"- 关键缺失：{'无' if not cm else '、'.join(cm)}\n"
+            body += f"- 非关键缺失：{'无' if not nm else '、'.join(nm)}\n"
+        except Exception:
+            body += "\n\n---\n流程检查：pipeline_check JSON 读取失败\n"
+    elif not args.date:
+        pass  # 非 --date 模式不提示
+    else:
+        body += "\n\n---\n流程检查：pipeline_check JSON 未生成\n"
 
     send_email(subject, body, attachments)
 

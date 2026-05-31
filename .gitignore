@@ -15,3 +15,11 @@ reports/daily/
 # IDE
 .idea/
 .vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated reports
+reports/backtest/

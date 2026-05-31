@@ -9,6 +9,13 @@ from analysis.board_alias import normalize_board_name
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
+def _get_context_section(report_context, name):
+    if not isinstance(report_context, dict):
+        return {}
+    s = report_context.get(name) or {}
+    return s if isinstance(s, dict) else {}
+
+
 # ── MiniMax AI ──
 
 def call_minimax(prompt):
@@ -46,7 +53,7 @@ def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors)
         "",
         f"## 市场数据",
         f"- 市场状态：{market['status']}",
-        f"- 市场宽度评分：{market['score']}/100",
+        f"- 市场综合评分：{market['score']}/100",
         f"- 成交额：{market['total_amount']:.0f}亿",
         f"- 上涨：{market['up_count']}只，下跌：{market['down_count']}只",
         f"- 涨停：{market['limit_up']}只，跌停：{market['limit_down']}只",
@@ -87,7 +94,7 @@ def build_one_line_prompt(trade_date, market, sentiment, industry, concept):
 def build_strategy_prompt(trade_date, market, sentiment, selectors):
     prompt = (
         f"日期：{trade_date}\n"
-        f"市场宽度评分：{market['score']}/100，状态：{market['status']}\n"
+        f"市场综合评分：{market['score']}/100，状态：{market['status']}\n"
         f"情绪阶段：{sentiment['stage']}\n\n"
         f"请按以下三个场景给出明日应对建议（简洁，每个场景2-3句话，适合新手阅读）：\n"
         f"1. 市场放量上涨 → 应对方式\n"
@@ -397,7 +404,7 @@ def render_themes(themes):
 def render_beginner_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, themes, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
 
@@ -458,12 +465,21 @@ def render_beginner_report(
     lines.append("---")
     lines.append("")
 
+    # context 优先取值
+    market_context = _get_context_section(report_context, "market")
+    sentiment_context = _get_context_section(report_context, "sentiment")
+    m_score = market_context.get("score", market.get("score"))
+    m_status = market_context.get("status", market.get("status"))
+    m_summary = market_context.get("summary", market.get("summary", ""))
+    s_score = sentiment_context.get("score", sentiment.get("score"))
+    s_stage = sentiment_context.get("stage", sentiment.get("stage"))
+
     # 3. 市场情绪
     lines.append("## 市场情绪")
     lines.append("")
-    lines.append(f"- 市场综合评分：**{market['score']} / 100**（状态：{market['status']}）")
-    lines.append(f"- 短线情绪周期评分：**{sentiment['score']} / 100**（阶段：{sentiment['stage']}）")
-    lines.append(f"- 小白解释：{explain_market_status(sentiment['score'])}")
+    lines.append(f"- 市场综合评分：**{m_score} / 100**（状态：{m_status}）")
+    lines.append(f"- 短线情绪周期评分：**{s_score} / 100**（阶段：{s_stage}）")
+    lines.append(f"- 小白解释：{explain_market_status(s_score)}")
     lines.append("")
 
     # 关键数据
@@ -696,7 +712,7 @@ def render_beginner_report(
 def render_pro_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
@@ -892,7 +908,7 @@ def render_pro_report(
     lines.append(f"## 风险与机会 | {date_display}")
     lines.append("")
     lines.append("### 风险提示")
-    lines.append("- 若市场情绪评分低于45，应降低仓位，避免追高。")
+    lines.append("- 若市场综合评分低于45，应降低仓位，避免追高。")
     lines.append("- 若跌停数量明显增加，说明亏钱效应扩散。")
     lines.append("- 若热点板块连续高潮，次日应警惕分歧。")
     lines.append("")
@@ -952,6 +968,7 @@ def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
     quality=None, themes=None, trade_plan=None, board_trend_summary=None,
+    report_context=None,
 ):
     """统一入口，根据 mode 分发到 beginner 或 pro 渲染"""
     if mode == "pro":
@@ -959,12 +976,14 @@ def render_daily_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, board_ratio_changes,
             trade_plan=trade_plan, board_trend_summary=board_trend_summary,
+            report_context=report_context,
         )
     else:
         return render_beginner_report(
             trade_date, data_status, quality, market, industry,
             concept, sentiment, selectors, themes, board_ratio_changes,
             trade_plan=trade_plan, board_trend_summary=board_trend_summary,
+            report_context=report_context,
         )
 
 
