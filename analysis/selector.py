@@ -348,7 +348,7 @@ def _select_board_linkage_db(stock_df, limit=5, market_score=None, trade_date=No
             WHERE trade_date = (SELECT MAX(trade_date) FROM board_amount_ratio)
             """
             hot_df = pd.read_sql(sql_hot, conn)
-        hot_df = pd.read_sql(sql_hot, conn)
+        # 若 trade_date 指定且无数据，上面已 return None；到这里 hot_df 已有有效数据
         hot_df["board_score"] = hot_df["pct_chg"].fillna(0) * 0.5 + hot_df["amount_ratio"].fillna(0) * 100 * 0.5
         hot_df = hot_df.sort_values("board_score", ascending=False).head(30)
         hot_board_names = set(hot_df["board_name"].tolist()) - LOW_VALUE_BOARDS

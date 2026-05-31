@@ -74,8 +74,10 @@ def main():
         "critical_missing": critical_list,
         "non_critical_missing": non_critical_list,
         "has_critical_missing": bool(critical_list),
-        "warnings": [f"关键缺失: {len(critical_list)}" if critical_list else "",
-                     *(f"非关键缺失: {f}" for f in non_critical_list)],
+        "warnings": [w for w in [
+            f"关键缺失: {len(critical_list)}" if critical_list else "",
+            *(f"非关键缺失: {f}" for f in non_critical_list)
+        ] if w],
         "generated_at": f"{trade_date}",
     }
     json_path = REPORTS_DIR / f"pipeline_check_{trade_date}.json"
