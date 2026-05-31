@@ -1,8 +1,14 @@
 #!/bin/bash
 set -e
 
-TRADE_DATE=$(date +%Y%m%d)
-echo "=== 交易日：$TRADE_DATE ==="
+TRADE_DATE=${TRADE_DATE:-$(date +%Y%m%d)}
+echo "=== 日期：$TRADE_DATE ==="
+
+# 非交易日跳过全部流程
+python -c "from analysis.data_fetcher import is_trade_day; import sys; sys.exit(0 if is_trade_day('$TRADE_DATE') else 1)" || {
+    echo "$TRADE_DATE 非交易日，跳过全部任务"
+    exit 0
+}
 
 echo "=== 初始化数据库 ==="
 python -m analysis.init_db

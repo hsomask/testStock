@@ -78,7 +78,13 @@ def is_trade_day(trade_date: str) -> bool:
         cal["trade_date"] = pd.to_datetime(cal["trade_date"]).dt.strftime("%Y%m%d")
         return trade_date in set(cal["trade_date"])
     except Exception:
-        return True
+        # API 失败时用星期简单判断（周一至周五为交易日）
+        from datetime import datetime
+        try:
+            dt = datetime.strptime(str(trade_date)[:8], "%Y%m%d")
+            return dt.weekday() < 5  # 0=Mon, 4=Fri
+        except Exception:
+            return False
 
 
 def _ensure_columns(df, required_cols):
