@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-TRADE_DATE=$(date +%Y%m%d)
+TRADE_DATE=${TRADE_DATE:-$(date +%Y%m%d)}
 echo "=== 日期：$TRADE_DATE ==="
 
 # 非交易日跳过全部流程
