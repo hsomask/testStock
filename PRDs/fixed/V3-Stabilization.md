@@ -2555,3 +2555,2231 @@ git diff HEAD~1 --stat
 7. 不引入旧日期 fallback；
 8. 不改变附件收集逻辑；
 9. 没有 pycache / reports 产物进入 Git。
+
+# V3-Stabilization 第 7 轮 Review：report_context 填充结果检查
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已完成：
+
+| 轮次    | 内容                                               | 状态   |
+| ----- | ------------------------------------------------ | ---- |
+| 第 0 轮 | 结构占位                                             | done |
+| 第 1 轮 | report_context 最小接入                              | done |
+| 第 2 轮 | pipeline_check + email 联动                        | done |
+| 第 3 轮 | selector 安全边界                                    | done |
+| 第 4 轮 | 代码框架梳理                                           | done |
+| 第 5 轮 | 数据真实性与产物链一致性 review                              | done |
+| 第 6 轮 | report_context 最小填充 market / sentiment / quality | done |
+
+第 6 轮已 push 到 `origin/dev`，最新提交为：
+
+```bash
+c748d66
+```
+
+注意：
+
+`PRDs/V3-Stabilization.md` 是本地迭代日志，可以暂时保持未提交状态，不作为本轮代码污染判断。除该文件外，其他工作区应保持干净。
+
+本轮只做 review，不直接改代码。
+
+---
+
+## 一、本轮目标
+
+检查第 6 轮 `report_context` 最小填充是否合格。
+
+重点确认：
+
+1. `report_context` 是否已经填入轻量的 `market / sentiment / quality`；
+2. 是否没有改变日报输出；
+3. 是否没有改变小白版；
+4. 是否没有改变专业版；
+5. 是否没有改变 `daily_summary` 输出结构；
+6. 是否没有改变邮件正文；
+7. 是否没有改变 selector；
+8. 是否没有改变 pipeline_check；
+9. 是否没有新增 reports 产物；
+10. 是否没有引入 latest / fallback 旧日期逻辑。
+
+---
+
+## 二、本轮禁止事项
+
+本轮禁止修改任何代码。
+
+不要执行：
+
+```bash
+git add
+git commit
+git push
+```
+
+不要修改：
+
+```text
+analysis/daily_report.py
+analysis/context/report_context.py
+analysis/report_renderer.py
+analysis/selector.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+entrypoint.sh
+```
+
+本轮只做检查和输出 review 结果。
+
+---
+
+## 三、先确认当前状态
+
+执行：
+
+```bash
+git checkout dev
+git pull origin dev
+git status --short
+git log -5 --oneline
+```
+
+说明：
+
+如果 `git status --short` 只显示：
+
+```text
+M PRDs/V3-Stabilization.md
+```
+
+可以继续 review，因为该文件是本地迭代日志。
+
+如果出现其他文件，例如：
+
+```text
+analysis/*.py
+reports/
+__pycache__/
+.claude/
+```
+
+则停止 review，先说明污染项。
+
+---
+
+## 四、确认第 6 轮 commit 范围
+
+执行：
+
+```bash
+git show --stat c748d66
+git show --name-only c748d66
+```
+
+预期只涉及：
+
+```text
+analysis/daily_report.py
+```
+
+或：
+
+```text
+analysis/daily_report.py
+analysis/context/report_context.py
+```
+
+不应该出现：
+
+```text
+analysis/report_renderer.py
+analysis/selector.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+entrypoint.sh
+reports/
+__pycache__/
+```
+
+---
+
+## 五、检查 daily_report.py 的 report_context 接入
+
+执行：
+
+```bash
+git show c748d66 -- analysis/daily_report.py
+grep -n "build_report_context\|report_context\|market_context\|sentiment_context\|quality_context" analysis/daily_report.py
+```
+
+重点检查：
+
+1. 是否只是在已有数据计算完成后构建 `report_context`；
+2. 是否只传入已有的 `market / sentiment / quality` 数据；
+3. 是否没有新增数据读取；
+4. 是否没有新增文件写入；
+5. 是否没有改变原有 markdown 渲染调用；
+6. 是否没有改变 `daily_summary` 生成逻辑；
+7. 是否没有改变 `trade_plan` 生成逻辑；
+8. 是否没有改变 selector 调用逻辑；
+9. 是否没有把 `report_context` 传给 renderer；
+10. 是否没有保存 `report_context_YYYYMMDD.json`。
+
+---
+
+## 六、检查 report_context.py
+
+执行：
+
+```bash
+sed -n '1,220p' analysis/context/report_context.py
+```
+
+检查：
+
+1. `build_empty_report_context(trade_date)` 是否保留；
+2. `build_report_context(...)` 是否保留；
+3. 是否仍然只负责组装 dict；
+4. 是否没有读取文件；
+5. 是否没有写文件；
+6. 是否没有调用业务模块；
+7. 是否没有引入 pandas / 数据源 / selector / renderer；
+8. 是否兼容空值；
+9. 是否保留基础结构：
+
+```python
+{
+    "trade_date": trade_date,
+    "market": ...,
+    "sentiment": ...,
+    "boards": ...,
+    "themes": ...,
+    "watchlists": ...,
+    "trade_plan": ...,
+    "quality": ...,
+    "pipeline": ...,
+}
+```
+
+---
+
+## 七、检查是否影响输出
+
+执行搜索：
+
+```bash
+grep -R "report_context" -n analysis
+```
+
+判断：
+
+1. `report_context` 是否只在 `daily_report.py` 中构建；
+2. 是否没有被 `report_renderer.py` 消费；
+3. 是否没有被 `email_sender.py` 消费；
+4. 是否没有被 `pipeline_check.py` 消费；
+5. 是否没有被 selector 消费；
+6. 是否仍然是旁路对象。
+
+如果发现 renderer/email/pipeline 已经消费 `report_context`，本轮判定为暂缓通过。
+
+---
+
+## 八、运行基础检查
+
+执行：
+
+```bash
+python -m compileall analysis
+```
+
+如果本地有 20260528 数据，执行：
+
+```bash
+python -m analysis.daily_report --mode both --date 20260528
+```
+
+然后检查：
+
+```bash
+git status --short --untracked-files=all
+```
+
+如果运行生成 reports 产物，不要提交。只需说明是否生成了预期报告。
+
+---
+
+## 九、可选：比较输出文件是否异常变化
+
+如果本地已有第 6 轮之前的 20260528 报告备份，可以对比：
+
+```bash
+diff reports/daily/daily_report_20260528.md <旧备份文件>
+diff reports/daily/daily_report_20260528_pro.md <旧备份文件>
+```
+
+如果没有备份，不强制执行。
+
+本轮重点不是逐字比较，而是确认代码路径没有把 `report_context` 用于渲染。
+
+---
+
+## 十、检查 Git 污染
+
+执行：
+
+```bash
+git status --short --untracked-files=all
+```
+
+允许存在：
+
+```text
+M PRDs/V3-Stabilization.md
+```
+
+不允许出现：
+
+```text
+analysis/__pycache__/
+data/__pycache__/
+reports/
+.claude/
+*.pyc
+analysis/*.py
+```
+
+如果出现 reports 产物，确认未被 Git 跟踪即可。
+
+---
+
+## 十一、Review 输出格式
+
+请按以下格式输出：
+
+```markdown
+# V3-Stabilization 第 7 轮 Review：report_context 填充结果检查
+
+## 1. 总体结论
+
+通过 / 暂缓通过 / 不通过
+
+## 2. commit 范围检查
+
+- c748d66 修改文件：
+- 是否越界：
+
+## 3. daily_report.py 检查
+
+- 是否只旁路构建 report_context：
+- 是否只填充 market / sentiment / quality：
+- 是否新增文件读取：
+- 是否新增文件写入：
+- 是否影响 markdown 渲染：
+- 是否影响 daily_summary：
+- 是否影响 trade_plan：
+
+## 4. report_context.py 检查
+
+- build_empty_report_context：
+- build_report_context：
+- 是否只组装 dict：
+- 是否有业务依赖：
+- 是否兼容空值：
+
+## 5. report_context 消费检查
+
+- report_renderer 是否消费：
+- email_sender 是否消费：
+- pipeline_check 是否消费：
+- selector 是否消费：
+- 是否仍是旁路：
+
+## 6. 运行检查
+
+- compileall：
+- daily_report --date：
+- 失败原因，如有：
+
+## 7. Git 污染检查
+
+- pycache：
+- reports：
+- local config：
+- PRD 本地日志：
+- git status：
+
+## 8. 风险点
+
+列出需要后续注意但本轮不阻断的问题。
+
+## 9. 下一步建议
+
+是否可以进入下一轮。
+```
+
+---
+
+## 十二、本轮通过标准
+
+本轮通过标准：
+
+1. commit 范围只包含允许文件；
+2. `compileall` 通过；
+3. `report_context` 已填充轻量 `market / sentiment / quality`；
+4. `report_context` 仍然是旁路；
+5. renderer 没有消费 `report_context`；
+6. email_sender 没有消费 `report_context`；
+7. pipeline_check 没有消费 `report_context`；
+8. selector 没有消费 `report_context`；
+9. 没有改变输出逻辑；
+10. 没有新增 reports 产物进入 Git；
+11. 除本地 PRD 日志外，工作区干净。
+
+# V3-Stabilization 第 8 轮 Review：report_regression_check 方案设计
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已完成：
+
+| 轮次    | 内容                         | 状态   |
+| ----- | -------------------------- | ---- |
+| 第 0 轮 | 结构占位                       | done |
+| 第 1 轮 | report_context 最小接入        | done |
+| 第 2 轮 | pipeline_check + email 联动  | done |
+| 第 3 轮 | selector 安全边界              | done |
+| 第 4 轮 | 代码框架梳理                     | done |
+| 第 5 轮 | 数据真实性与产物链一致性 review        | done |
+| 第 6 轮 | report_context 最小填充        | done |
+| 第 7 轮 | report_context 填充结果 review | done |
+
+当前系统已经完成多个稳定性收敛点，下一步需要设计固定回归检查脚本：
+
+```bash
+python -m analysis.report_regression_check --date YYYYMMDD
+```
+
+本轮只做方案 review，不直接改代码。
+
+---
+
+## 一、本轮目标
+
+设计 `report_regression_check.py` 的检查范围、输出结构和失败等级。
+
+目标是：
+
+1. 固定检查每日关键产物；
+2. 固定检查旧日期混入风险；
+3. 固定检查字段口径错误；
+4. 固定检查 pipeline_check 是否有 critical 缺失；
+5. 固定检查账户不可买股票是否进入小白版可观察 / 谨慎池；
+6. 固定检查高风险票是否重复展示；
+7. 固定检查 email 附件是否只包含当天文件；
+8. 输出一份可读 JSON 或 Markdown；
+9. 不改变现有日报生成逻辑；
+10. 不新增策略。
+
+---
+
+## 二、本轮禁止事项
+
+本轮禁止修改任何文件。
+
+不要执行：
+
+```bash
+git add
+git commit
+git push
+```
+
+不要修改：
+
+```text
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/selector.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/context/report_context.py
+entrypoint.sh
+```
+
+本轮只做 review 和方案设计。
+
+---
+
+## 三、先确认当前状态
+
+执行：
+
+```bash
+git checkout dev
+git pull origin dev
+git status --short
+git log -5 --oneline
+```
+
+说明：
+
+如果 `git status --short` 只显示：
+
+```text
+M PRDs/V3-Stabilization.md
+```
+
+可以继续，因为这是本地迭代日志。
+
+如果出现其他文件，请停止 review，说明污染项。
+
+---
+
+## 四、检查当前已有检查能力
+
+请查看：
+
+```bash
+sed -n '1,260p' analysis/pipeline_check.py
+sed -n '1,320p' analysis/email_sender.py
+sed -n '1,260p' analysis/report_renderer.py
+sed -n '1,260p' analysis/selector.py
+```
+
+重点判断：
+
+1. 哪些检查已经由 `pipeline_check.py` 覆盖；
+2. 哪些检查应该放入新的 `report_regression_check.py`；
+3. 哪些检查不应该重复做；
+4. 哪些检查需要读取 Markdown；
+5. 哪些检查需要读取 JSON；
+6. 哪些检查只需要看文件名；
+7. 哪些检查可能误报。
+
+---
+
+## 五、建议检查项
+
+请评估以下检查是否适合加入 `report_regression_check.py`。
+
+### 1. 文件日期一致性
+
+检查 `reports/daily/` 中当天报告是否混入旧日期文件。
+
+重点文件：
+
+```text
+daily_report_YYYYMMDD.md
+daily_report_YYYYMMDD_pro.md
+daily_summary_YYYYMMDD.json
+trade_plan_YYYYMMDD.md
+trade_plan_YYYYMMDD.json
+board_trend_summary_YYYYMMDD.json
+board_mapping_quality_YYYYMMDD.json
+pipeline_check_YYYYMMDD.json
+```
+
+---
+
+### 2. 旧词检查
+
+检查报告中是否出现旧口径：
+
+```text
+市场情绪评分
+```
+
+要求：
+
+```text
+market_score 应统一叫“市场综合评分”
+sentiment_score 才叫“短线情绪周期评分”
+```
+
+---
+
+### 3. pipeline_check critical 检查
+
+读取：
+
+```text
+reports/daily/pipeline_check_YYYYMMDD.json
+```
+
+检查：
+
+```text
+critical_missing 是否为空
+status 是否为 ok 或 warning
+```
+
+如果 `critical_missing` 非空，应判定为失败。
+
+---
+
+### 4. board_mapping_quality 日期检查
+
+读取：
+
+```text
+reports/daily/board_mapping_quality_YYYYMMDD.json
+```
+
+检查：
+
+```text
+actual_board_date 是否等于 YYYY-MM-DD
+```
+
+如果不等于当天，应判定为失败。
+
+---
+
+### 5. trend_summary 缺失提示检查
+
+如果：
+
+```text
+board_trend_summary_YYYYMMDD.json
+```
+
+不存在，则日报中应该有明确提示，而不是静默隐藏。
+
+检查目标：
+
+```text
+daily_report_YYYYMMDD.md
+daily_report_YYYYMMDD_pro.md
+```
+
+---
+
+### 6. 板块层级重复检查
+
+检查报告中是否出现类似重复层级：
+
+```text
+白酒Ⅱ / 白酒Ⅲ
+证券Ⅱ / 证券Ⅲ
+```
+
+如果同一主板块重复出现多个层级，需要给 warning。
+
+---
+
+### 7. 小白版不可买市场检查
+
+检查小白版可观察 / 谨慎观察池中是否出现账户不可买市场：
+
+```text
+创业板
+科创板
+北交所
+```
+
+该项需要结合当前账户权限：
+
+```text
+ALLOW_CHINEXT
+ALLOW_STAR
+ALLOW_BSE
+```
+
+如果不可买股票进入可观察 / 谨慎池，应判定为失败。
+
+---
+
+### 8. 高风险票重复展示检查
+
+检查小白版中高风险票是否重复出现在：
+
+```text
+可观察
+谨慎观察
+高风险复盘
+```
+
+如果同一股票同时出现在普通观察池和高风险复盘池，应判定为失败。
+
+---
+
+### 9. email 附件日期检查
+
+如果 email_sender 有附件清单或 zip 生成逻辑，请设计检查方式：
+
+```text
+附件必须只包含 YYYYMMDD 当天文件
+```
+
+如果暂时无法自动检查，请列为后续 P2。
+
+---
+
+## 六、输出结构设计
+
+请设计 `report_regression_check.py` 的输出结构。
+
+建议 JSON：
+
+```json
+{
+  "trade_date": "20260528",
+  "status": "ok",
+  "errors": [],
+  "warnings": [],
+  "checks": {
+    "file_date_consistency": {
+      "status": "ok",
+      "details": []
+    },
+    "old_terms": {
+      "status": "ok",
+      "details": []
+    },
+    "pipeline_critical": {
+      "status": "ok",
+      "details": []
+    },
+    "board_mapping_date": {
+      "status": "ok",
+      "details": []
+    },
+    "trend_summary_notice": {
+      "status": "ok",
+      "details": []
+    },
+    "duplicate_board_layers": {
+      "status": "warning",
+      "details": []
+    },
+    "permission_filter": {
+      "status": "ok",
+      "details": []
+    },
+    "high_risk_duplicate": {
+      "status": "ok",
+      "details": []
+    }
+  }
+}
+```
+
+请评估这个结构是否合适。
+
+---
+
+## 七、失败等级设计
+
+请设计三类状态：
+
+```text
+ok
+warning
+failed
+```
+
+建议规则：
+
+```text
+errors 非空：failed
+errors 为空但 warnings 非空：warning
+errors 和 warnings 都为空：ok
+```
+
+请评估哪些检查属于 error，哪些属于 warning。
+
+---
+
+## 八、是否生成文件
+
+请评估是否需要生成：
+
+```text
+reports/daily/report_regression_check_YYYYMMDD.json
+reports/daily/report_regression_check_YYYYMMDD.md
+```
+
+建议：
+
+第一版只生成 JSON，不生成 Markdown，避免新增太多产物。
+
+---
+
+## 九、下一轮最小代码范围
+
+如果进入代码修改，建议只新增：
+
+```text
+analysis/report_regression_check.py
+```
+
+不要修改：
+
+```text
+daily_report.py
+email_sender.py
+pipeline_check.py
+selector.py
+report_renderer.py
+entrypoint.sh
+```
+
+第一版不接入 entrypoint，先手动运行：
+
+```bash
+python -m analysis.report_regression_check --date 20260528
+```
+
+---
+
+## 十、Review 输出格式
+
+请按以下格式输出：
+
+```markdown
+# V3-Stabilization 第 8 轮 Review：report_regression_check 方案设计
+
+## 1. 总体结论
+
+是否建议新增 report_regression_check：
+是否需要接入 entrypoint：
+是否需要生成 JSON：
+是否需要生成 Markdown：
+
+## 2. 检查项清单
+
+| 检查项 | 输入文件 | 检查内容 | error/warning | 是否建议第一版加入 |
+|---|---|---|---|---|
+
+## 3. 输出结构建议
+
+给出 JSON 结构。
+
+## 4. 失败等级设计
+
+说明 ok / warning / failed 规则。
+
+## 5. 第一版代码范围
+
+说明下一轮只允许新增哪些文件。
+
+## 6. 不建议第一版做的事情
+
+列出不进入第一版的内容。
+
+## 7. 风险点
+
+说明哪些检查容易误报。
+
+## 8. 下一轮建议
+
+是否进入代码修改。
+```
+
+---
+
+## 十一、本轮通过标准
+
+本轮通过标准：
+
+1. 没有修改任何文件；
+2. 明确 report_regression_check 第一版检查项；
+3. 明确 error / warning 分级；
+4. 明确输出 JSON 结构；
+5. 明确第一版只新增一个文件；
+6. 不建议立刻接入 entrypoint；
+7. 不建议修改现有主链路；
+8. 下一轮代码范围足够小。
+
+# V3-Stabilization 第 9 轮代码修改：新增 report_regression_check.py
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已完成：
+
+| 轮次    | 内容                           | 状态   |
+| ----- | ---------------------------- | ---- |
+| 第 0 轮 | 结构占位                         | done |
+| 第 1 轮 | report_context 最小接入          | done |
+| 第 2 轮 | pipeline_check + email 联动    | done |
+| 第 3 轮 | selector 安全边界                | done |
+| 第 4 轮 | 代码框架梳理                       | done |
+| 第 5 轮 | 数据真实性与产物链一致性 review          | done |
+| 第 6 轮 | report_context 最小填充          | done |
+| 第 7 轮 | report_context 填充结果 review   | done |
+| 第 8 轮 | report_regression_check 方案设计 | done |
+
+第 8 轮结论：
+
+* 方案可行；
+* 建议新增 `analysis/report_regression_check.py`；
+* 第一版只生成 JSON；
+* 不生成 Markdown；
+* 不接入 `entrypoint.sh`；
+* 不修改任何现有主链路文件。
+
+---
+
+## 一、本轮目标
+
+新增一个回归检查脚本：
+
+```bash
+python -m analysis.report_regression_check --date YYYYMMDD
+```
+
+目标是检查日报系统是否存在：
+
+1. 文件日期不一致；
+2. 报告中出现旧词；
+3. `pipeline_check` 有 critical 缺失；
+4. `board_mapping_quality` 的 actual_board_date 不是当天；
+5. trend_summary 缺失但日报没有明确提示；
+6. 板块层级重复；
+7. 小白版可观察 / 谨慎池出现账户不可买市场；
+8. 高风险票重复展示；
+9. 输出 JSON 结果。
+
+---
+
+## 二、本轮允许修改的文件
+
+本轮只允许新增：
+
+```text
+analysis/report_regression_check.py
+```
+
+不要修改任何现有 `.py` 文件。
+
+如果确实需要补充文档，可以继续在本地更新：
+
+```text
+PRDs/V3-Stabilization.md
+```
+
+但不要提交 PRD，PRD 是用户本地迭代日志，阶段结束后再统一提交。
+
+---
+
+## 三、本轮禁止事项
+
+禁止修改：
+
+```text
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/selector.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+analysis/context/report_context.py
+analysis/market.py
+analysis/theme_detector.py
+analysis/board_history.py
+analysis/board_mapping_quality.py
+analysis/board_trend_tracker.py
+entrypoint.sh
+```
+
+禁止做：
+
+```text
+接入 entrypoint
+修改日报生成逻辑
+修改邮件发送逻辑
+修改 pipeline_check
+修改 selector
+新增策略
+重构 report_renderer
+生成 Markdown 回归报告
+提交 reports 产物
+提交 __pycache__
+提交 .claude 本地配置
+```
+
+---
+
+## 四、脚本入口要求
+
+新增文件：
+
+```text
+analysis/report_regression_check.py
+```
+
+支持命令：
+
+```bash
+python -m analysis.report_regression_check --date 20260528
+```
+
+参数要求：
+
+```text
+--date YYYYMMDD
+```
+
+如果没有传 `--date`，可以默认使用当天日期，但建议输出 warning。第一版优先支持显式 `--date`。
+
+---
+
+## 五、输出文件要求
+
+运行后生成：
+
+```text
+reports/daily/report_regression_check_YYYYMMDD.json
+```
+
+第一版只生成 JSON，不生成 Markdown。
+
+JSON 基本结构：
+
+```json
+{
+  "trade_date": "20260528",
+  "status": "ok",
+  "errors": [],
+  "warnings": [],
+  "checks": {
+    "file_date": {
+      "status": "ok",
+      "details": []
+    },
+    "old_terms": {
+      "status": "ok",
+      "details": []
+    },
+    "pipeline_critical": {
+      "status": "ok",
+      "details": []
+    },
+    "board_mapping_date": {
+      "status": "ok",
+      "details": []
+    },
+    "trend_summary_missing": {
+      "status": "ok",
+      "details": []
+    },
+    "duplicate_layer": {
+      "status": "ok",
+      "details": []
+    },
+    "permission_filter": {
+      "status": "ok",
+      "details": []
+    },
+    "high_risk_duplicate": {
+      "status": "ok",
+      "details": []
+    }
+  }
+}
+```
+
+整体状态规则：
+
+```text
+errors 非空：status = "failed"
+errors 为空但 warnings 非空：status = "warning"
+errors 和 warnings 都为空：status = "ok"
+```
+
+---
+
+## 六、检查项 1：文件日期一致性
+
+检查当天关键文件是否存在，且文件名是否包含指定日期。
+
+关键文件：
+
+```text
+daily_report_YYYYMMDD.md
+daily_report_YYYYMMDD_pro.md
+daily_summary_YYYYMMDD.json
+trade_plan_YYYYMMDD.md
+trade_plan_YYYYMMDD.json
+board_trend_summary_YYYYMMDD.json
+board_mapping_quality_YYYYMMDD.json
+pipeline_check_YYYYMMDD.json
+```
+
+如果关键文件缺失，加入 `errors`。
+
+检查名：
+
+```text
+file_date
+```
+
+注意：
+
+1. 只检查指定日期；
+2. 不使用 latest；
+3. 不 fallback 到旧日期；
+4. 不扫描旧日期替代。
+
+---
+
+## 七、检查项 2：旧词检查
+
+读取：
+
+```text
+reports/daily/daily_report_YYYYMMDD.md
+reports/daily/daily_report_YYYYMMDD_pro.md
+```
+
+检查是否出现旧词：
+
+```text
+市场情绪评分
+```
+
+如果出现，加入 `errors`。
+
+原因：
+
+```text
+market_score 应统一叫“市场综合评分”
+sentiment_score 才叫“短线情绪周期评分”
+```
+
+检查名：
+
+```text
+old_terms
+```
+
+---
+
+## 八、检查项 3：pipeline critical
+
+读取：
+
+```text
+reports/daily/pipeline_check_YYYYMMDD.json
+```
+
+检查：
+
+```text
+critical_missing 是否为空
+```
+
+如果文件不存在，加入 `errors`。
+
+如果 `critical_missing` 非空，加入 `errors`。
+
+检查名：
+
+```text
+pipeline_critical
+```
+
+---
+
+## 九、检查项 4：board_mapping_quality 日期
+
+读取：
+
+```text
+reports/daily/board_mapping_quality_YYYYMMDD.json
+```
+
+检查：
+
+```text
+actual_board_date 是否等于 YYYY-MM-DD
+```
+
+例如：
+
+```text
+--date 20260528
+actual_board_date 应等于 2026-05-28
+```
+
+如果不一致，加入 `errors`。
+
+检查名：
+
+```text
+board_mapping_date
+```
+
+如果 JSON 文件缺失，加入 `errors`。
+
+---
+
+## 十、检查项 5：trend_summary 缺失提示
+
+如果：
+
+```text
+reports/daily/board_trend_summary_YYYYMMDD.json
+```
+
+不存在，则检查日报中是否有明确提示。
+
+检查文件：
+
+```text
+daily_report_YYYYMMDD.md
+daily_report_YYYYMMDD_pro.md
+```
+
+提示关键词可以第一版简单判断：
+
+```text
+趋势摘要缺失
+board_trend_summary
+未生成
+缺失
+```
+
+如果 trend_summary 缺失且日报没有提示，加入 `warnings`。
+
+检查名：
+
+```text
+trend_summary_missing
+```
+
+注意：这是 warning，不是 error。
+
+---
+
+## 十一、检查项 6：板块层级重复
+
+检查日报中是否出现类似重复层级：
+
+```text
+白酒Ⅱ
+白酒Ⅲ
+证券Ⅱ
+证券Ⅲ
+```
+
+第一版可以用简单规则：
+
+1. 读取小白版和专业版日报；
+2. 如果同时出现 `白酒Ⅱ` 和 `白酒Ⅲ`，加入 warning；
+3. 如果同时出现 `证券Ⅱ` 和 `证券Ⅲ`，加入 warning。
+
+检查名：
+
+```text
+duplicate_layer
+```
+
+这是 warning，不是 error。
+
+---
+
+## 十二、检查项 7：小白版不可买市场
+
+读取小白版：
+
+```text
+daily_report_YYYYMMDD.md
+```
+
+检查“可观察 / 谨慎观察”部分是否出现账户不可买市场。
+
+账户权限从环境变量读取：
+
+```text
+ALLOW_CHINEXT
+ALLOW_STAR
+ALLOW_BSE
+```
+
+如果环境变量不存在，默认按当前系统逻辑：
+
+```text
+ALLOW_CHINEXT=false
+ALLOW_STAR=false
+ALLOW_BSE=false
+```
+
+第一版可以用简化规则：
+
+```text
+创业板：股票代码 300 / 301 开头
+科创板：股票代码 688 / 689 开头
+北交所：股票代码 8 开头
+```
+
+如果不可买股票出现在“可观察”或“谨慎观察”段落，加入 `errors`。
+
+检查名：
+
+```text
+permission_filter
+```
+
+注意：
+
+1. 高风险复盘池里出现不可买股票不算 error；
+2. 只检查小白版普通观察区域；
+3. 如果无法可靠解析段落，先给 warning，不要误报 error。
+
+---
+
+## 十三、检查项 8：高风险票重复展示
+
+读取小白版：
+
+```text
+daily_report_YYYYMMDD.md
+```
+
+检查同一股票是否同时出现在：
+
+```text
+可观察 / 谨慎观察
+高风险复盘
+```
+
+如果出现，加入 `errors`。
+
+检查名：
+
+```text
+high_risk_duplicate
+```
+
+第一版可以用简单股票代码正则：
+
+```text
+6位数字股票代码
+```
+
+如果无法可靠区分段落，先给 warning，不要误报 error。
+
+---
+
+## 十四、第一版暂缓项
+
+第一版不做：
+
+```text
+email 附件日期检查
+Markdown 回归报告
+接入 entrypoint
+自动发送回归结果
+复杂自然语言解析
+完整观察池结构化解析
+```
+
+这些后续再做。
+
+---
+
+## 十五、建议代码结构
+
+建议在 `analysis/report_regression_check.py` 中实现：
+
+```python
+def parse_args():
+    ...
+
+def ymd_to_display(date_str: str) -> str:
+    ...
+
+def read_text(path: Path) -> str:
+    ...
+
+def read_json(path: Path) -> dict:
+    ...
+
+def make_check(status: str = "ok", details: list[str] | None = None) -> dict:
+    ...
+
+def add_error(result: dict, check_name: str, message: str):
+    ...
+
+def add_warning(result: dict, check_name: str, message: str):
+    ...
+
+def check_file_date(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_old_terms(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_pipeline_critical(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_board_mapping_date(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_trend_summary_missing(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_duplicate_layer(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_permission_filter(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def check_high_risk_duplicate(trade_date: str, base_dir: Path, result: dict):
+    ...
+
+def finalize_status(result: dict):
+    ...
+
+def main():
+    ...
+```
+
+保持简单，不要引入复杂依赖。
+
+---
+
+## 十六、运行检查
+
+完成后执行：
+
+```bash
+python -m compileall analysis
+python -m analysis.report_regression_check --date 20260528
+cat reports/daily/report_regression_check_20260528.json
+git diff --stat
+git status --short --untracked-files=all
+```
+
+注意：
+
+`reports/daily/report_regression_check_20260528.json` 是运行产物，不要提交。
+
+---
+
+## 十七、预期 diff
+
+理想 diff 只包含：
+
+```text
+analysis/report_regression_check.py
+```
+
+允许本地存在：
+
+```text
+M PRDs/V3-Stabilization.md
+```
+
+但不要提交。
+
+不应该出现：
+
+```text
+analysis/daily_report.py
+analysis/report_renderer.py
+analysis/selector.py
+analysis/email_sender.py
+analysis/pipeline_check.py
+entrypoint.sh
+reports/
+analysis/__pycache__/
+data/__pycache__/
+.claude/
+```
+
+---
+
+## 十八、提交要求
+
+如果验收通过，提交：
+
+```bash
+git add analysis/report_regression_check.py
+git commit -m "feat: add report regression check"
+```
+
+不要提交：
+
+```text
+PRDs/V3-Stabilization.md
+reports/
+__pycache__/
+.claude/
+```
+
+不要 push。
+
+提交后发回：
+
+```bash
+git log -1 --oneline
+git status --short
+git diff HEAD~1 --stat
+```
+
+---
+
+## 十九、本轮通过标准
+
+本轮通过标准：
+
+1. 只新增 `analysis/report_regression_check.py`；
+2. 不修改现有主链路；
+3. 不接入 entrypoint；
+4. `compileall` 通过；
+5. `python -m analysis.report_regression_check --date 20260528` 可运行；
+6. 输出 JSON；
+7. JSON 包含 `status / errors / warnings / checks`；
+8. 无 pycache / reports / local config 进入 Git；
+9. PRD 本地日志可以保留但不提交。
+
+# V3-Stabilization 第 9 轮收尾：校准 report_regression_check failed 项
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前已新增：
+
+```bash
+commit 78509c2
+新增 analysis/report_regression_check.py
+```
+
+新增脚本第一版包含 8 项检查，未修改现有主链路文件。
+
+运行结果：
+
+```text
+status = failed
+2 errors:
+- old_terms: 旧词仍在某处
+- high_risk_duplicate: 高风险票重复展示
+```
+
+本轮任务不是继续新增功能，而是定位这两个 failed 项是：
+
+1. 真实业务/文案问题；
+2. 还是 `report_regression_check.py` 第一版规则误报。
+
+本轮可以修改代码，但范围必须非常小。
+
+---
+
+## 一、本轮目标
+
+定位并处理两个失败项：
+
+```text
+old_terms
+high_risk_duplicate
+```
+
+要求：
+
+1. 先查看 `report_regression_check_YYYYMMDD.json` 的 details；
+2. 明确每个 failed 项的命中文件、命中内容、命中股票；
+3. 判断是真问题还是误报；
+4. 真问题则修源头；
+5. 误报则修 `report_regression_check.py` 的解析逻辑；
+6. 不扩大到其他功能。
+
+---
+
+## 二、允许修改的文件
+
+优先允许修改：
+
+```text
+analysis/report_regression_check.py
+```
+
+如果确认 `old_terms` 是日报文案真实问题，可以修改：
+
+```text
+analysis/report_renderer.py
+analysis/daily_report.py
+analysis/email_sender.py
+```
+
+但只能替换旧词：
+
+```text
+市场情绪评分 -> 市场综合评分
+```
+
+如果确认 `high_risk_duplicate` 是真实展示问题，可以修改：
+
+```text
+analysis/report_renderer.py
+```
+
+但只允许修小白版分层展示，不允许改 selector 策略逻辑。
+
+---
+
+## 三、禁止事项
+
+禁止修改：
+
+```text
+analysis/selector.py
+analysis/pipeline_check.py
+analysis/market.py
+analysis/theme_detector.py
+analysis/board_history.py
+analysis/board_trend_tracker.py
+analysis/board_mapping_quality.py
+entrypoint.sh
+```
+
+禁止做：
+
+```text
+新增策略
+改变观察池筛选
+改变高风险判定
+改变 pipeline_check
+接入 entrypoint
+重构 renderer
+重构 daily_report
+提交 reports 产物
+提交 __pycache__
+提交 .claude 本地配置
+```
+
+---
+
+## 四、先查看 failed details
+
+请执行：
+
+```bash
+cat reports/daily/report_regression_check_20260528.json
+```
+
+如果不是 20260528，请替换为实际日期。
+
+重点看：
+
+```json
+"errors": [],
+"checks": {
+  "old_terms": {
+    "status": "...",
+    "details": [...]
+  },
+  "high_risk_duplicate": {
+    "status": "...",
+    "details": [...]
+  }
+}
+```
+
+请输出：
+
+```text
+old_terms 命中文件：
+old_terms 命中行/片段：
+high_risk_duplicate 命中股票：
+high_risk_duplicate 命中分区：
+```
+
+---
+
+## 五、old_terms 处理规则
+
+### 情况 A：真问题
+
+如果旧词出现在：
+
+```text
+reports/daily/daily_report_YYYYMMDD.md
+reports/daily/daily_report_YYYYMMDD_pro.md
+邮件正文模板
+日报渲染模板
+```
+
+并且确实是把 `market_score` 叫成了：
+
+```text
+市场情绪评分
+```
+
+则修源头，把它改成：
+
+```text
+市场综合评分
+```
+
+只做文案替换，不改逻辑。
+
+---
+
+### 情况 B：误报
+
+如果命中来自：
+
+```text
+PRDs/
+注释
+历史说明
+report_regression_check.py 自己的说明
+非当日日报文件
+```
+
+则不要改业务代码，只修 `report_regression_check.py`：
+
+```text
+old_terms 只扫描 daily_report_YYYYMMDD.md 和 daily_report_YYYYMMDD_pro.md
+```
+
+不要扫描整个仓库。
+
+---
+
+## 六、high_risk_duplicate 处理规则
+
+### 情况 A：真问题
+
+如果同一股票同时出现在小白版：
+
+```text
+可观察
+谨慎观察
+高风险复盘
+```
+
+例如：
+
+```text
+股票 A 出现在可观察池，同时又出现在高风险复盘池
+```
+
+则修 `report_renderer.py` 的小白版分层展示：
+
+```text
+高风险票不得进入可观察 / 谨慎观察展示
+```
+
+只修展示去重，不改 selector。
+
+---
+
+### 情况 B：误报
+
+如果重复来自以下情况：
+
+```text
+专业版策略明细重复提及
+高风险复盘池内部多次解释
+同一股票在风险原因里再次出现
+同一股票在标题和正文各出现一次
+```
+
+则修 `report_regression_check.py`：
+
+```text
+high_risk_duplicate 只比较小白版“可观察/谨慎观察”分区与“高风险复盘”分区的股票代码交集
+```
+
+不要简单全文件 grep。
+
+建议实现思路：
+
+1. 读取小白版 `daily_report_YYYYMMDD.md`；
+2. 提取“可观察”段；
+3. 提取“谨慎观察”段；
+4. 提取“高风险复盘”段；
+5. 分别用 6 位股票代码正则提取；
+6. 只判断：
+
+```python
+(observable_codes | cautious_codes) & high_risk_codes
+```
+
+7. 如果交集非空才 error。
+
+如果无法稳定识别段落，则降级为 warning，不要 error。
+
+---
+
+## 七、运行检查
+
+处理后执行：
+
+```bash
+python -m compileall analysis
+python -m analysis.report_regression_check --date 20260528
+cat reports/daily/report_regression_check_20260528.json
+git diff --stat
+git status --short --untracked-files=all
+```
+
+注意：
+
+```text
+reports/daily/report_regression_check_20260528.json
+```
+
+是运行产物，不要提交。
+
+---
+
+## 八、预期结果
+
+理想结果：
+
+```json
+"status": "ok"
+```
+
+如果仍有 warning 可以接受。
+
+不应再有：
+
+```text
+old_terms error
+high_risk_duplicate error
+```
+
+除非确认为真实未修复问题。
+
+---
+
+## 九、提交要求
+
+如果只是校准回归脚本，提交：
+
+```bash
+git add analysis/report_regression_check.py
+git commit -m "fix: refine report regression checks"
+```
+
+如果修了旧词文案，提交：
+
+```bash
+git add analysis/report_renderer.py analysis/daily_report.py analysis/email_sender.py
+git commit -m "fix: align market score wording"
+```
+
+如果修了小白版高风险重复展示，提交：
+
+```bash
+git add analysis/report_renderer.py
+git commit -m "fix: avoid duplicate high-risk display"
+```
+
+不要提交：
+
+```text
+PRDs/V3-Stabilization.md
+reports/
+__pycache__/
+.claude/
+```
+
+不要 push。
+
+提交后发回：
+
+```bash
+git log -3 --oneline
+git status --short
+git diff HEAD~1 --stat
+```
+
+---
+
+## 十、本轮通过标准
+
+本轮通过标准：
+
+1. 明确 old_terms 是真问题还是误报；
+2. 明确 high_risk_duplicate 是真问题还是误报；
+3. 如果误报，只修回归脚本；
+4. 如果真问题，只修对应源头；
+5. 不改 selector；
+6. 不改 pipeline；
+7. 不接 entrypoint；
+8. 回归检查不再出现这两个 error；
+9. 无 reports / pycache / local config 进入 Git。
+
+
+# V3-Stabilization 第 9 轮修复：处理 report_regression_check 发现的真实问题
+
+## 当前项目背景
+
+项目：`testStock`
+
+当前阶段：
+
+> V3-Stabilization：日报系统口径统一与稳定性收敛
+
+当前已新增：
+
+```bash
+commit 78509c2
+新增 analysis/report_regression_check.py
+```
+
+运行：
+
+```bash
+python -m analysis.report_regression_check --date 20260528
+```
+
+发现 2 个真实 error：
+
+```text
+1. old_terms：报告和 AI 文案中仍有“市场情绪评分”
+2. high_risk_duplicate：同一股票同时出现在可观察池和高风险池
+```
+
+本轮任务是修复这两个真实问题。
+
+---
+
+## 一、本轮目标
+
+只修两个真实问题：
+
+### 问题 1：旧词残留
+
+把报告和 AI 文案中的：
+
+```text
+市场情绪评分
+```
+
+改为：
+
+```text
+市场综合评分
+```
+
+注意：
+
+```text
+sentiment_score 仍然应该叫“短线情绪周期评分”
+market_score 不能再叫“市场情绪评分”
+```
+
+---
+
+### 问题 2：高风险票重复展示
+
+同一股票不能同时出现在：
+
+```text
+可观察池 / 谨慎观察池
+高风险复盘池
+```
+
+如果某股票被判定为高风险，应只进入：
+
+```text
+高风险复盘池
+```
+
+不得再进入：
+
+```text
+可观察池
+谨慎观察池
+```
+
+---
+
+## 二、本轮允许修改的文件
+
+优先允许修改：
+
+```text
+analysis/report_renderer.py
+```
+
+如果旧词存在于其他明确模板或 AI prompt 中，可以修改：
+
+```text
+analysis/daily_report.py
+analysis/email_sender.py
+analysis/market.py
+analysis/theme_detector.py
+```
+
+但只允许做文案替换，不改计算逻辑。
+
+如果高风险重复展示是 selector 输出层导致的，可修改：
+
+```text
+analysis/selector.py
+```
+
+但只允许做最终分层去重，不允许改策略本身。
+
+---
+
+## 三、本轮禁止事项
+
+禁止修改：
+
+```text
+analysis/pipeline_check.py
+analysis/report_regression_check.py
+analysis/context/report_context.py
+analysis/board_history.py
+analysis/board_trend_tracker.py
+analysis/board_mapping_quality.py
+entrypoint.sh
+```
+
+禁止做：
+
+```text
+新增策略
+删除策略
+修改策略阈值
+修改 market_score 计算
+修改 sentiment_score 计算
+重构 renderer
+重构 selector
+接入 entrypoint
+提交 reports 产物
+提交 __pycache__
+提交 .claude 本地配置
+提交 PRDs/V3-Stabilization.md
+```
+
+---
+
+## 四、修复旧词
+
+先定位：
+
+```bash
+grep -R "市场情绪评分" -n analysis
+```
+
+然后只修改真实输出源头。
+
+要求：
+
+1. 如果是 `market_score` 的显示名，改成：
+
+```text
+市场综合评分
+```
+
+2. 如果上下文实际是 `sentiment_score`，改成：
+
+```text
+短线情绪周期评分
+```
+
+3. 不要把所有“情绪”相关词都机械替换；
+4. 不要改历史 PRD；
+5. 不要改 reports 产物；
+6. 不要改回归脚本本身来绕过检查。
+
+修复后执行：
+
+```bash
+grep -R "市场情绪评分" -n analysis
+```
+
+预期不再出现，除非是注释中明确说明旧词检查规则。如果回归脚本中包含该词用于检查，可以保留。
+
+---
+
+## 五、修复高风险重复展示
+
+先定位高风险分层逻辑：
+
+```bash
+grep -R "高风险\|可观察\|谨慎观察\|high_risk\|watchlist" -n analysis/selector.py analysis/report_renderer.py analysis/daily_report.py
+```
+
+要求：
+
+1. 找出同一股票为什么会同时进入普通池和高风险池；
+2. 优先在最终分层处去重；
+3. 不改策略打分；
+4. 不改策略阈值；
+5. 不删除高风险池；
+6. 不隐藏高风险票；
+7. 只保证高风险票不再进入可观察 / 谨慎观察展示。
+
+建议修复逻辑：
+
+```python
+high_risk_codes = {stock["code"] for stock in high_risk_pool}
+
+observable_pool = [
+    stock for stock in observable_pool
+    if stock.get("code") not in high_risk_codes
+]
+
+cautious_pool = [
+    stock for stock in cautious_pool
+    if stock.get("code") not in high_risk_codes
+]
+```
+
+如果当前股票字段不是 `code`，请按实际字段名处理。
+
+修复位置优先级：
+
+```text
+1. selector 最终分层输出处
+2. daily_report 组装观察池处
+3. report_renderer 小白版展示前
+```
+
+优先在业务分层结果处修，不要只在 Markdown 字符串里隐藏。
+
+---
+
+## 六、运行检查
+
+修复后执行：
+
+```bash
+python -m compileall analysis
+python -m analysis.report_regression_check --date 20260528
+cat reports/daily/report_regression_check_20260528.json
+```
+
+预期：
+
+```json
+"status": "ok"
+```
+
+或最多：
+
+```json
+"status": "warning"
+```
+
+不应再有：
+
+```text
+old_terms
+high_risk_duplicate
+```
+
+作为 error。
+
+然后执行：
+
+```bash
+git diff --stat
+git status --short --untracked-files=all
+```
+
+---
+
+## 七、预期 diff
+
+理想 diff 可能包含：
+
+```text
+analysis/report_renderer.py
+analysis/selector.py
+```
+
+也可能包含：
+
+```text
+analysis/daily_report.py
+analysis/email_sender.py
+analysis/market.py
+analysis/theme_detector.py
+```
+
+但每个文件的改动必须非常小。
+
+不应该出现：
+
+```text
+analysis/report_regression_check.py
+analysis/pipeline_check.py
+analysis/context/report_context.py
+entrypoint.sh
+reports/
+__pycache__/
+.claude/
+PRDs/V3-Stabilization.md
+```
+
+---
+
+## 八、提交要求
+
+如果修复通过，提交：
+
+```bash
+git add analysis/report_renderer.py analysis/selector.py analysis/daily_report.py analysis/email_sender.py analysis/market.py analysis/theme_detector.py
+git commit -m "fix: align report wording and high-risk display"
+```
+
+如果某些文件没有改，git 会自动忽略。
+
+不要提交：
+
+```text
+PRDs/V3-Stabilization.md
+reports/
+__pycache__/
+.claude/
+```
+
+不要 push。
+
+提交后发回：
+
+```bash
+git log -3 --oneline
+git status --short
+git diff HEAD~1 --stat
+python -m analysis.report_regression_check --date 20260528
+```
+
+---
+
+## 九、本轮通过标准
+
+本轮通过标准：
+
+1. 报告和 AI 文案不再出现错误的“市场情绪评分”；
+2. `market_score` 统一展示为“市场综合评分”；
+3. `sentiment_score` 仍展示为“短线情绪周期评分”；
+4. 高风险票不再同时出现在普通观察池；
+5. 不改策略阈值；
+6. 不新增策略；
+7. 不修改回归脚本来掩盖问题；
+8. 回归检查不再出现这两个 error；
+9. 无 reports / pycache / local config 进入 Git。

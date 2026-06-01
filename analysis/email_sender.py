@@ -257,9 +257,20 @@ def main():
     parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
     args = parser.parse_args()
 
+    # 确定发送日期并检查交易日
+    from analysis.utils import to_ymd
+    from analysis.data_fetcher import get_trade_date, is_trade_day
+
     if args.date:
-        from analysis.utils import to_ymd
         date_str = to_ymd(args.date)
+    else:
+        date_str = get_trade_date()
+
+    if not is_trade_day(date_str):
+        print(f"[邮件] {date_str} 非交易日，跳过邮件推送")
+        return
+
+    if args.date:
         beginner_path = REPORTS_DIR / f"daily_report_{date_str}.md"
         pro_path = REPORTS_DIR / f"daily_report_{date_str}_pro.md"
         beginner_path = beginner_path if beginner_path.exists() else None
