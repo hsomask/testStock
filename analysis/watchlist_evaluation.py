@@ -976,6 +976,155 @@ def build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, 
     return result
 
 
+def save_evaluation_to_db(result):
+    """将评价结果写入 evaluation 专用表（upsert）"""
+    if not DATABASE_DSN:
+        print("[WARN] DATABASE_DSN 未配置，跳过落库")
+        return
+
+    try:
+        conn = psycopg2.connect(DATABASE_DSN)
+    except Exception as e:
+        print(f"[WARN] 数据库连接失败，跳过落库: {e}")
+        return
+
+    summary = result["summary"]
+    overall = result["overall"].get("__all__", {})
+    diag = result.get("diagnostics", {})
+    mode = result.get("mode", "range")
+    start_date = result.get("start_date") or ""
+    end_date = result.get("end_date") or ""
+    signal_date = result.get("signal_date") or ""
+    as_of_date = result.get("as_of_date", "") or ""
+
+    try:
+        cur = conn.cursor()
+
+        # ── summary ──
+        cur.execute("""
+            INSERT INTO watchlist_evaluation_summary (
+                eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date,
+                total_signals, eligible_1d, evaluated_1d, eligible_3d, evaluated_3d,
+                coverage_1d, coverage_3d, price_fetch_failed,
+                avg_next_1d_return, win_rate_1d, avg_next_3d_return, win_rate_3d,
+                avg_max_3d_return, avg_max_3d_drawdown,
+                confidence_level, conclusion_level,
+                layer_inversion_warning, risk_warning,
+                diagnostics_json, summary_json
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s
+            )
+            ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
+            DO UPDATE SET
+                total_signals = EXCLUDED.total_signals,
+                eligible_1d = EXCLUDED.eligible_1d,
+                evaluated_1d = EXCLUDED.evaluated_1d,
+                eligible_3d = EXCLUDED.eligible_3d,
+                evaluated_3d = EXCLUDED.evaluated_3d,
+                coverage_1d = EXCLUDED.coverage_1d,
+                coverage_3d = EXCLUDED.coverage_3d,
+                price_fetch_failed = EXCLUDED.price_fetch_failed,
+                avg_next_1d_return = EXCLUDED.avg_next_1d_return,
+                win_rate_1d = EXCLUDED.win_rate_1d,
+                avg_next_3d_return = EXCLUDED.avg_next_3d_return,
+                win_rate_3d = EXCLUDED.win_rate_3d,
+                avg_max_3d_return = EXCLUDED.avg_max_3d_return,
+                avg_max_3d_drawdown = EXCLUDED.avg_max_3d_drawdown,
+                confidence_level = EXCLUDED.confidence_level,
+                conclusion_level = EXCLUDED.conclusion_level,
+                layer_inversion_warning = EXCLUDED.layer_inversion_warning,
+                risk_warning = EXCLUDED.risk_warning,
+                diagnostics_json = EXCLUDED.diagnostics_json,
+                summary_json = EXCLUDED.summary_json,
+                generated_at = NOW()
+        """, (
+            mode, start_date, end_date, signal_date, as_of_date,
+            summary["total_signals"], summary["eligible_1d"], summary["evaluated_1d"],
+            summary["eligible_3d"], summary["evaluated_3d"],
+            summary["coverage_1d"], summary["coverage_3d"],
+            summary.get("missing_reasons", {}).get("price_fetch_failed", 0),
+            overall.get("avg_next_1d_return"), overall.get("win_rate_1d"),
+            overall.get("avg_next_3d_return"), overall.get("win_rate_3d"),
+            overall.get("avg_max_3d_return"), overall.get("avg_max_3d_drawdown"),
+            diag.get("confidence_level"), diag.get("conclusion_level"),
+            diag.get("layer_diagnostics", {}).get("layer_inversion_warning", False),
+            diag.get("risk_diagnostics", {}).get("risk_warning", False),
+            json.dumps(diag, ensure_ascii=False),
+            json.dumps(summary, ensure_ascii=False),
+        ))
+
+        # ── details ──
+        for detail in result.get("details", []):
+            status = detail.get("status", {})
+            metrics = detail.get("metrics") or {}
+            missing_reasons = status.get("missing_reasons", [])
+            missing_reason = missing_reasons[0] if missing_reasons else None
+
+            cur.execute("""
+                INSERT INTO watchlist_evaluation_result (
+                    eval_mode, eval_start_date, eval_end_date, signal_trade_date, as_of_date,
+                    signal_key, code, name, strategy, watchlist_layer, risk_level,
+                    action_signal, entry_close,
+                    next_1d_return, next_3d_return, max_3d_return, max_3d_drawdown,
+                    is_mature_1d, is_mature_3d, price_status, missing_reason, verification_tag,
+                    confidence_level, conclusion_level
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s
+                )
+                ON CONFLICT (eval_mode, signal_key, as_of_date)
+                DO UPDATE SET
+                    entry_close = EXCLUDED.entry_close,
+                    next_1d_return = EXCLUDED.next_1d_return,
+                    next_3d_return = EXCLUDED.next_3d_return,
+                    max_3d_return = EXCLUDED.max_3d_return,
+                    max_3d_drawdown = EXCLUDED.max_3d_drawdown,
+                    is_mature_1d = EXCLUDED.is_mature_1d,
+                    is_mature_3d = EXCLUDED.is_mature_3d,
+                    price_status = EXCLUDED.price_status,
+                    missing_reason = EXCLUDED.missing_reason,
+                    verification_tag = EXCLUDED.verification_tag,
+                    confidence_level = EXCLUDED.confidence_level,
+                    conclusion_level = EXCLUDED.conclusion_level,
+                    evaluated_at = NOW()
+            """, (
+                mode, start_date, end_date, detail["trade_date"], as_of_date,
+                detail["signal_key"], detail["code"], detail["name"],
+                detail["strategy"], detail["watchlist_layer"], detail["risk_level"],
+                detail.get("action_signal") or detail.get("watchlist_layer"),
+                metrics.get("entry_close"),
+                metrics.get("next_1d_return"), metrics.get("next_3d_return"),
+                metrics.get("max_3d_return"), metrics.get("max_3d_drawdown"),
+                status.get("evaluated_1d", False), status.get("evaluated_3d", False),
+                "ok" if detail.get("metrics") else "missing",
+                missing_reason,
+                detail.get("verification_tag"),
+                diag.get("confidence_level"), diag.get("conclusion_level"),
+            ))
+
+        conn.commit()
+        n_details = len(result.get("details", []))
+        print(f"\n[DB] 已写入 summary + {n_details} 条 detail 到 evaluation 表")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[WARN] 落库失败，已回滚: {e}")
+    finally:
+        cur.close()
+        conn.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="观察池有效性评估（唯一评价入口）")
     parser.add_argument("--mode", type=str, default="range", choices=["range", "daily"],
@@ -985,6 +1134,7 @@ def main():
     parser.add_argument("--days", type=int, default=None, help="range: 最近 N 天")
     parser.add_argument("--signal-date", type=str, default=None, help="daily: 信号日期 YYYYMMDD")
     parser.add_argument("--as-of", type=str, default=None, help="评价基准日 YYYYMMDD（默认今天）")
+    parser.add_argument("--save-db", action="store_true", default=False, help="落库到 evaluation 专用表")
     args = parser.parse_args()
 
     as_of_date = args.as_of if args.as_of else datetime.now().strftime("%Y%m%d")
@@ -1075,6 +1225,9 @@ def main():
 
     print(f"\nJSON: {json_path}")
     print(f"MD:   {md_path}")
+
+    if args.save_db:
+        save_evaluation_to_db(result)
 
 
 if __name__ == "__main__":

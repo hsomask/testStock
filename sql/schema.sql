@@ -176,3 +176,86 @@ CREATE TABLE IF NOT EXISTS signal_performance (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (trade_date, code, strategy)
 );
+
+
+-- 观察池评价明细表
+-- 保存每条 signal 的评价结果，通过 upsert 可重复运行
+CREATE TABLE IF NOT EXISTS watchlist_evaluation_result (
+    id SERIAL PRIMARY KEY,
+
+    eval_mode TEXT NOT NULL,
+    eval_start_date TEXT,
+    eval_end_date TEXT,
+    signal_trade_date TEXT NOT NULL,
+    as_of_date TEXT,
+
+    signal_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    strategy TEXT,
+    watchlist_layer TEXT,
+    risk_level TEXT,
+    action_signal TEXT,
+
+    entry_close NUMERIC,
+    next_1d_return NUMERIC,
+    next_3d_return NUMERIC,
+    max_3d_return NUMERIC,
+    max_3d_drawdown NUMERIC,
+
+    is_mature_1d BOOLEAN,
+    is_mature_3d BOOLEAN,
+    price_status TEXT,
+    missing_reason TEXT,
+    verification_tag TEXT,
+
+    confidence_level TEXT,
+    conclusion_level TEXT,
+
+    data_source TEXT DEFAULT 'get_stock_history',
+    evaluated_at TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE (eval_mode, signal_key, as_of_date)
+);
+
+
+-- 观察池评价汇总表
+-- 保存每次评价任务的 summary 和 diagnostics
+CREATE TABLE IF NOT EXISTS watchlist_evaluation_summary (
+    id SERIAL PRIMARY KEY,
+
+    eval_mode TEXT NOT NULL,
+    eval_start_date TEXT,
+    eval_end_date TEXT,
+    signal_date TEXT,
+    as_of_date TEXT NOT NULL,
+
+    total_signals INTEGER,
+    eligible_1d INTEGER,
+    evaluated_1d INTEGER,
+    eligible_3d INTEGER,
+    evaluated_3d INTEGER,
+    coverage_1d NUMERIC,
+    coverage_3d NUMERIC,
+    price_fetch_failed INTEGER,
+
+    avg_next_1d_return NUMERIC,
+    win_rate_1d NUMERIC,
+    avg_next_3d_return NUMERIC,
+    win_rate_3d NUMERIC,
+    avg_max_3d_return NUMERIC,
+    avg_max_3d_drawdown NUMERIC,
+
+    confidence_level TEXT,
+    conclusion_level TEXT,
+
+    layer_inversion_warning BOOLEAN,
+    risk_warning BOOLEAN,
+
+    diagnostics_json JSONB,
+    summary_json JSONB,
+
+    generated_at TIMESTAMP DEFAULT NOW(),
+
+    UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
+);
