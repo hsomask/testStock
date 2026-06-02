@@ -23,6 +23,34 @@ import psycopg2
 from data.config import DATABASE_DSN, REPORT_DIR
 from analysis.data_fetcher import get_stock_history
 
+# ── 进程内行情缓存：同一只股票同一次运行只调一次 API ──
+_HIST_CACHE = {}
+
+
+def _cached_get_history(code, days=80):
+    """带缓存的 get_stock_history，同一 code+days 在一次运行中只获取一次。
+    用更大 days 获取的数据会覆盖小 days 的缓存。
+    """
+    cache_key = f"{code}"
+    existing = _HIST_CACHE.get(cache_key)
+    if existing is not None:
+        existing_days = existing[0]
+        existing_hist = existing[1]
+        # 已有缓存且请求的 days 不大于缓存时直接返回
+        if days <= existing_days:
+            return existing_hist
+        # 请求更大 days，但已有 500 天缓存则不再重复获取
+        if existing_days >= 500 and days <= 500:
+            return existing_hist
+    hist = get_stock_history(code, days=days)
+    _HIST_CACHE[cache_key] = (days, hist)
+    return hist
+
+
+def _cache_update(code, hist):
+    """手动用 days=500 结果覆盖缓存"""
+    _HIST_CACHE[str(code)] = (500, hist)
+
 logger = logging.getLogger(__name__)
 
 LAYER_FALLBACK_FIELDS = ["watchlist_layer", "action_signal", "signal_type"]
@@ -195,7 +223,7 @@ def compute_verification_tag(next_1d_return, max_3d_drawdown, layer):
     return tag
 
 
-def evaluate_signal_performance(signal):
+def evaluate_signal_performance(signal, as_of_date=None):
     """
     统一单条信号评价函数（range 和 daily 共用）。
     返回 (metrics_dict, status_dict)
@@ -203,6 +231,9 @@ def evaluate_signal_performance(signal):
     先用 days=80 走 DB 缓存快速路径；如果缓存无后续交易日数据，
     再用 days=500 触发 API 刷新（绕过 get_stock_history 的
     len(db_dates) >= days-3 缓存命中条件）。
+
+    如果传入 as_of_date（YYYYMMDD），未来行情窗口会被截断到
+    trade_date < date <= as_of_date，防止未来函数。
     """
     code = str(signal.get("code", "")).strip()
     trade_date = signal["trade_date"]
@@ -234,7 +265,7 @@ def evaluate_signal_performance(signal):
         return None, status
 
     try:
-        hist = get_stock_history(code, days=80)
+        hist = _cached_get_history(code, days=80)
     except Exception:
         status["missing_reasons"].append("price_fetch_failed")
         return None, status
@@ -249,20 +280,26 @@ def evaluate_signal_performance(signal):
     if trade_date in set(all_dates):
         status["entry_close_found"] = True
 
+    # 构建未来行情窗口：trade_date < date <= as_of_date
     future_mask = all_dates > trade_date
+    if as_of_date:
+        future_mask = future_mask & (all_dates <= as_of_date)
     future = hist[future_mask].sort_values("date")
 
     # 如果缓存无后续数据，可能缓存过期，尝试强制 API 刷新一次
     if future.empty:
         try:
-            hist = get_stock_history(code, days=500)
+            hist = _cached_get_history(code, days=500)
             if hist is not None and not hist.empty and "date" in hist.columns:
                 all_dates = hist["date"].astype(str).str.replace("-", "").str[:8]
                 status["price_dates"] = sorted(all_dates.unique().tolist())
                 if trade_date in set(all_dates):
                     status["entry_close_found"] = True
                 future_mask = all_dates > trade_date
+                if as_of_date:
+                    future_mask = future_mask & (all_dates <= as_of_date)
                 future = hist[future_mask].sort_values("date")
+                _cache_update(code, hist)
         except Exception:
             pass
 
@@ -383,6 +420,167 @@ def aggregate_metrics(records, group_key=None):
     return result
 
 
+def compute_diagnostics(summary, overall, by_layer, by_strategy, by_risk, records, mode):
+    """生成评价诊断"""
+    s = summary
+    o = overall.get("__all__", {})
+    total = s["total_signals"]
+    evaluated_1d = s["evaluated_1d"]
+    evaluated_3d = s["evaluated_3d"]
+    cov_1d = s["coverage_1d"]
+    cov_3d = s["coverage_3d"]
+    messages = []
+
+    # ── confidence_level ──
+    if evaluated_1d < 20 or cov_1d < 0.3:
+        confidence_level = "insufficient_data"
+    elif mode == "daily":
+        confidence_level = "daily_observation"
+    elif evaluated_3d >= 100 and cov_3d >= 0.6:
+        confidence_level = "actionable_review"
+    elif evaluated_3d >= 30 and cov_3d >= 0.3:
+        confidence_level = "preliminary_pattern"
+    else:
+        confidence_level = "insufficient_data"
+
+    conclusion_map = {
+        "insufficient_data": "observe_only",
+        "daily_observation": "observe_only",
+        "preliminary_pattern": "preliminary",
+        "actionable_review": "review_required",
+    }
+    conclusion_level = conclusion_map.get(confidence_level, "observe_only")
+
+    # ── data_quality ──
+    data_quality = {
+        "coverage_1d": cov_1d,
+        "coverage_3d": cov_3d,
+        "evaluated_1d": evaluated_1d,
+        "evaluated_3d": evaluated_3d,
+        "price_fetch_failed": s.get("missing_reasons", {}).get("price_fetch_failed", 0),
+        "missing_reasons": s.get("missing_reasons", {}),
+    }
+    if cov_1d < 0.8:
+        messages.append("1 日覆盖率不足，T+1 结果不稳定。")
+    if data_quality["price_fetch_failed"] > 0:
+        messages.append("仍有行情获取失败样本，需关注数据源稳定性。")
+
+    # ── layer_diagnostics ──
+    def _match_layer(key, candidates):
+        for c in candidates:
+            if c in key:
+                return True
+        return False
+
+    watch_groups = [k for k in by_layer if _match_layer(k, ["观察", "可观察"])]
+    caution_groups = [k for k in by_layer if _match_layer(k, ["谨慎"])]
+    high_risk_groups = [k for k in by_layer if _match_layer(k, ["回避", "高", "高风险"])]
+
+    watch_data = by_layer.get(watch_groups[0], {}) if watch_groups else {}
+    high_risk_data = by_layer.get(high_risk_groups[0], {}) if high_risk_groups else {}
+    # fallback: if no 回避/高风险 layer, try 高 from by_risk
+    if not high_risk_data:
+        risk_high_keys = [k for k in by_risk if k in ("高", "高风险", "回避")]
+        high_risk_data = by_risk.get(risk_high_keys[0], {}) if risk_high_keys else {}
+
+    layer_diagnostics = {
+        "layer_inversion_warning": False,
+        "message": "",
+        "details": {},
+    }
+
+    if watch_data and high_risk_data:
+        w_ret = watch_data.get("avg_next_1d_return")
+        h_ret = high_risk_data.get("avg_next_1d_return")
+        w_wr = watch_data.get("win_rate_1d")
+        h_wr = high_risk_data.get("win_rate_1d")
+        w_cnt = watch_data.get("evaluated_1d_count", 0)
+        h_cnt = high_risk_data.get("evaluated_1d_count", 0)
+
+        layer_diagnostics["details"] = {
+            "watch_avg_return": w_ret, "watch_win_rate": w_wr, "watch_count": w_cnt,
+            "high_risk_avg_return": h_ret, "high_risk_win_rate": h_wr, "high_risk_count": h_cnt,
+        }
+
+        if w_cnt >= 5 and h_cnt >= 5 and h_ret is not None and w_ret is not None:
+            if h_ret > w_ret + 0.01 and (h_wr or 0) > (w_wr or 0):
+                layer_diagnostics["layer_inversion_warning"] = True
+                layer_diagnostics["message"] = (
+                    "出现分层倒挂：高风险/回避层 T+1 表现优于观察层。"
+                    "当前仅作单日/区间观察，不建议单次结果直接调参。"
+                )
+                messages.append(layer_diagnostics["message"])
+            else:
+                layer_diagnostics["message"] = "分层表现符合预期。"
+        else:
+            layer_diagnostics["message"] = "分层样本不足，暂不判断分层有效性。"
+    else:
+        layer_diagnostics["message"] = "分层数据缺失，无法判断。"
+
+    # ── risk_diagnostics ──
+    risk_diagnostics = {"high_risk_hit_rate": None, "risk_warning": False, "message": ""}
+    if high_risk_data and high_risk_data.get("evaluated_1d_count", 0) >= 5:
+        hr_records = [r for r in records
+                      if r.get("watchlist_layer") in high_risk_groups
+                      or r.get("risk_level") in ("高", "高风险", "回避")]
+        if hr_records:
+            down_count = sum(1 for r in hr_records
+                           if r.get("metrics") and r["metrics"].get("next_1d_return") is not None
+                           and r["metrics"]["next_1d_return"] < 0)
+            risk_diagnostics["high_risk_hit_rate"] = down_count / high_risk_data["evaluated_1d_count"]
+
+            if risk_diagnostics["high_risk_hit_rate"] < 0.4 and (high_risk_data.get("avg_next_1d_return") or 0) > 0:
+                risk_diagnostics["risk_warning"] = True
+                risk_diagnostics["message"] = "高风险提示当日未明显兑现，需连续观察是否过度保守。"
+                messages.append(risk_diagnostics["message"])
+            else:
+                risk_diagnostics["message"] = "高风险提示有效性正常。"
+    else:
+        risk_diagnostics["message"] = "高风险样本不足，暂不评估风险提示有效性。"
+
+    # ── strategy_diagnostics ──
+    strategy_diag = {
+        "underperforming_strategies": [],
+        "outperforming_strategies": [],
+        "warnings": [],
+    }
+    overall_ret = o.get("avg_next_1d_return")
+    if overall_ret is not None:
+        for sname, sdata in by_strategy.items():
+            s_ret = sdata.get("avg_next_1d_return")
+            s_cnt = sdata.get("evaluated_1d_count", 0)
+            if s_cnt >= 10 and s_ret is not None:
+                if s_ret < overall_ret - 0.015:
+                    entry = {
+                        "strategy": sname,
+                        "evaluated_1d_count": s_cnt,
+                        "avg_next_1d_return": s_ret,
+                        "overall_avg_next_1d_return": overall_ret,
+                        "message": f"{sname} 当日表现弱于整体，需连续观察。",
+                    }
+                    strategy_diag["underperforming_strategies"].append(entry)
+                    strategy_diag["warnings"].append(entry["message"])
+                    messages.append(entry["message"])
+                elif s_ret > overall_ret + 0.015:
+                    strategy_diag["outperforming_strategies"].append({
+                        "strategy": sname,
+                        "evaluated_1d_count": s_cnt,
+                        "avg_next_1d_return": s_ret,
+                        "overall_avg_next_1d_return": overall_ret,
+                        "message": f"{sname} 当日表现优于整体，仅作观察，不作为策略调整依据。",
+                    })
+
+    return {
+        "confidence_level": confidence_level,
+        "conclusion_level": conclusion_level,
+        "data_quality": data_quality,
+        "layer_diagnostics": layer_diagnostics,
+        "risk_diagnostics": risk_diagnostics,
+        "strategy_diagnostics": strategy_diag,
+        "diagnostic_messages": messages,
+    }
+
+
 def _build_table_rows(group_data, include_3d=True):
     """构建分组 Markdown 表格行"""
     header = ["分组", "总数", "有效1d"]
@@ -477,26 +675,16 @@ def build_range_markdown(result):
             continue
         lines.append(_build_table_rows(group_data, include_3d=True))
 
+    # ── 评价诊断 ──
+    diag = result.get("diagnostics", {})
+    lines += _build_diagnostics_md(diag, summary=s)
+
     lines += [
         "",
-        "## 7. 数据缺失与注意事项",
-        "",
-        "- 行情来源：get_stock_history 临时获取，评价结果依赖当前行情接口可用性",
-        "- price_fetch_failed 会影响覆盖率",
-        "- 入选日期距今不足 3 个交易日时，3 日指标标记为缺失",
-        "- 本评价只用于复盘观察池表现，不构成实盘交易建议",
-        "",
-        "## 8. 初步结论",
+        "## 9. 初步结论",
         "",
     ]
-    if cov_3d < 0.3:
-        lines.append("样本不足，仅做覆盖率观察，不做策略优劣判断。")
-        lines.append("")
-    lines += [
-        "本报告仅反映历史观察池样本的后验表现；",
-        "样本量较小时不做强结论；",
-        "不作为实盘买卖依据。",
-    ]
+    lines += _build_conclusion(diag, cov_3d)
     return "\n".join(lines)
 
 
@@ -554,20 +742,13 @@ def build_daily_markdown(result):
             f"| insufficient | {tag_counts.get('insufficient', 0)} | 数据不足无法判断 |",
         ]
 
-    lines += [
-        "",
-        "## 7. 缺失原因",
-        "",
-        "| 原因 | 数量 | 说明 |",
-        "|---|---:|---|",
-    ]
-    for reason, count in sorted(s.get("missing_reasons", {}).items(), key=lambda x: -x[1]):
-        label = REASON_LABELS.get(reason, reason)
-        lines.append(f"| {reason} | {count} | {label} |")
+    # ── 评价诊断 ──
+    diag = result.get("diagnostics", {})
+    lines += _build_diagnostics_md(diag, summary=s)
 
     lines += [
         "",
-        "## 8. 初步结论",
+        "## 9. 初步结论",
         "",
     ]
     if total >= 5 and overall.get("evaluated_1d_count", 0) >= 3:
@@ -581,6 +762,112 @@ def build_daily_markdown(result):
         "> 本报告用于验证昨日观察池表现，不构成实盘买卖建议。",
     ]
     return "\n".join(lines)
+
+
+def _build_diagnostics_md(diag, summary=None):
+    """构建评价诊断 Markdown 章节"""
+    if not diag:
+        return []
+
+    lines = [
+        "",
+        "## 7. 评价诊断",
+        "",
+        "### 7.1 数据质量",
+        f"  - 1 日覆盖率: {_fmt_pct(diag.get('data_quality', {}).get('coverage_1d'))}",
+        f"  - 3 日覆盖率: {_fmt_pct(diag.get('data_quality', {}).get('coverage_3d'))}",
+        f"  - 行情缺失数量: {diag.get('data_quality', {}).get('price_fetch_failed', 0)}",
+        f"  - 置信等级: {diag.get('confidence_level', 'N/A')}",
+        "",
+        "### 7.2 分层有效性",
+    ]
+
+    ld = diag.get("layer_diagnostics", {})
+    lines.append(f"  - 是否出现分层倒挂: {'**是**' if ld.get('layer_inversion_warning') else '否'}")
+    lines.append(f"  - 诊断说明: {ld.get('message', 'N/A')}")
+
+    lines += [
+        "",
+        "### 7.3 高风险提示有效性",
+    ]
+    rd = diag.get("risk_diagnostics", {})
+    lines.append(f"  - 高风险提示命中率: {_fmt_pct(rd.get('high_risk_hit_rate'))}")
+    lines.append(f"  - 诊断说明: {rd.get('message', 'N/A')}")
+
+    lines += [
+        "",
+        "### 7.4 策略表现异常",
+    ]
+    sd = diag.get("strategy_diagnostics", {})
+    under = sd.get("underperforming_strategies", [])
+    over = sd.get("outperforming_strategies", [])
+
+    if under:
+        weak_names = ", ".join(s["strategy"] for s in under)
+        lines.append(f"  - 弱表现策略: {weak_names}")
+    else:
+        lines.append("  - 弱表现策略: (无)")
+
+    if over:
+        strong_names = ", ".join(s["strategy"] for s in over)
+        lines.append(f"  - 强表现策略: {strong_names}")
+    else:
+        lines.append("  - 强表现策略: (无)")
+
+    if sd.get("warnings"):
+        lines.append("  - 说明: 单日结果不作为策略调整依据。")
+
+    # 缺失原因表
+    if summary:
+        missing = summary.get("missing_reasons", {})
+        if missing:
+            lines += [
+                "",
+                "## 8. 数据缺失与注意事项",
+                "",
+                "| 原因 | 数量 | 说明 |",
+                "|---|---:|---|",
+            ]
+            for reason, count in sorted(missing.items(), key=lambda x: -x[1]):
+                label = REASON_LABELS.get(reason, reason)
+                lines.append(f"| {reason} | {count} | {label} |")
+
+    lines += [
+        "",
+        "- 行情来源：get_stock_history 临时获取，评价结果依赖当前行情接口可用性",
+        "- price_fetch_failed 会影响覆盖率",
+        "- 入选日期距今不足 3 个交易日时，3 日指标标记为缺失",
+        "- 本评价只用于复盘观察池表现，不构成实盘交易建议",
+    ]
+
+    return lines
+
+
+def _build_conclusion(diag, cov_3d):
+    """根据 diagnostics 生成结论"""
+    conf = diag.get("confidence_level", "insufficient_data")
+    ldiag = diag.get("layer_diagnostics", {})
+
+    if conf == "insufficient_data":
+        lines = ["样本覆盖不足，仅做数据跟踪，不做策略优劣判断。"]
+    elif conf == "daily_observation":
+        lines = ["本次 T+1 验证覆盖率较高，可用于单日复盘观察。但单日结果不作为策略调整依据。"]
+        if ldiag.get("layer_inversion_warning"):
+            lines.append("本次出现分层倒挂现象，需连续观察是否为偶发市场风格切换。")
+    elif conf == "preliminary_pattern":
+        lines = ["样本已具备初步观察价值，可用于形成策略复盘线索，但仍不建议直接自动调参。"]
+    elif conf == "actionable_review":
+        lines = ["样本覆盖度和数量较高，可进入人工策略复盘阶段。"]
+    else:
+        lines = ["本报告仅反映历史观察池样本的后验表现。", "样本量较小时不做强结论。"]
+
+    lines += [
+        "",
+        "本报告仅反映历史观察池样本的后验表现；",
+        "样本量较小时不做强结论；",
+        "不作为实盘买卖依据。",
+    ]
+    return lines
 
 
 def _fmt_pct(val):
@@ -598,7 +885,7 @@ def resolve_date_range(args):
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
-def evaluate_records(signals):
+def evaluate_records(signals, as_of_date=None):
     """对信号列表逐条评价，返回 records + 汇总计数"""
     records = []
     eligible_1d = 0
@@ -608,7 +895,7 @@ def evaluate_records(signals):
     missing_reasons = Counter()
 
     for i, sig in enumerate(signals):
-        metrics, status = evaluate_signal_performance(sig)
+        metrics, status = evaluate_signal_performance(sig, as_of_date=as_of_date)
         layer = resolve_layer(sig)
         strategy = str(sig.get("strategy", "unknown") or "unknown").strip()
         risk = str(sig.get("risk_level", "unknown") or "unknown").strip()
@@ -679,6 +966,8 @@ def build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, 
     by_strategy = aggregate_metrics(records, group_key="strategy")
     by_layer = aggregate_metrics(records, group_key="watchlist_layer")
     by_risk = aggregate_metrics(records, group_key="risk_level")
+    mode = extra.get("mode", "range") if extra else "range"
+    diagnostics = compute_diagnostics(summary, overall, by_layer, by_strategy, by_risk, records, mode)
 
     result = {
         "status": "ok",
@@ -687,11 +976,161 @@ def build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, 
         "by_strategy": by_strategy,
         "by_layer": by_layer,
         "by_risk_level": by_risk,
+        "diagnostics": diagnostics,
         "details": records,
     }
     if extra:
         result.update(extra)
     return result
+
+
+def save_evaluation_to_db(result):
+    """将评价结果写入 evaluation 专用表（upsert）"""
+    if not DATABASE_DSN:
+        print("[WARN] DATABASE_DSN 未配置，跳过落库")
+        return
+
+    try:
+        conn = psycopg2.connect(DATABASE_DSN)
+    except Exception as e:
+        print(f"[WARN] 数据库连接失败，跳过落库: {e}")
+        return
+
+    summary = result["summary"]
+    overall = result["overall"].get("__all__", {})
+    diag = result.get("diagnostics", {})
+    mode = result.get("mode", "range")
+    start_date = result.get("start_date") or ""
+    end_date = result.get("end_date") or ""
+    signal_date = result.get("signal_date") or ""
+    as_of_date = result.get("as_of_date", "") or ""
+
+    try:
+        cur = conn.cursor()
+
+        # ── summary ──
+        cur.execute("""
+            INSERT INTO watchlist_evaluation_summary (
+                eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date,
+                total_signals, eligible_1d, evaluated_1d, eligible_3d, evaluated_3d,
+                coverage_1d, coverage_3d, price_fetch_failed,
+                avg_next_1d_return, win_rate_1d, avg_next_3d_return, win_rate_3d,
+                avg_max_3d_return, avg_max_3d_drawdown,
+                confidence_level, conclusion_level,
+                layer_inversion_warning, risk_warning,
+                diagnostics_json, summary_json
+            ) VALUES (
+                %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s,
+                %s, %s, %s,
+                %s, %s, %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s,
+                %s, %s
+            )
+            ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
+            DO UPDATE SET
+                total_signals = EXCLUDED.total_signals,
+                eligible_1d = EXCLUDED.eligible_1d,
+                evaluated_1d = EXCLUDED.evaluated_1d,
+                eligible_3d = EXCLUDED.eligible_3d,
+                evaluated_3d = EXCLUDED.evaluated_3d,
+                coverage_1d = EXCLUDED.coverage_1d,
+                coverage_3d = EXCLUDED.coverage_3d,
+                price_fetch_failed = EXCLUDED.price_fetch_failed,
+                avg_next_1d_return = EXCLUDED.avg_next_1d_return,
+                win_rate_1d = EXCLUDED.win_rate_1d,
+                avg_next_3d_return = EXCLUDED.avg_next_3d_return,
+                win_rate_3d = EXCLUDED.win_rate_3d,
+                avg_max_3d_return = EXCLUDED.avg_max_3d_return,
+                avg_max_3d_drawdown = EXCLUDED.avg_max_3d_drawdown,
+                confidence_level = EXCLUDED.confidence_level,
+                conclusion_level = EXCLUDED.conclusion_level,
+                layer_inversion_warning = EXCLUDED.layer_inversion_warning,
+                risk_warning = EXCLUDED.risk_warning,
+                diagnostics_json = EXCLUDED.diagnostics_json,
+                summary_json = EXCLUDED.summary_json,
+                generated_at = NOW()
+        """, (
+            mode, start_date, end_date, signal_date, as_of_date,
+            summary["total_signals"], summary["eligible_1d"], summary["evaluated_1d"],
+            summary["eligible_3d"], summary["evaluated_3d"],
+            summary["coverage_1d"], summary["coverage_3d"],
+            summary.get("missing_reasons", {}).get("price_fetch_failed", 0),
+            overall.get("avg_next_1d_return"), overall.get("win_rate_1d"),
+            overall.get("avg_next_3d_return"), overall.get("win_rate_3d"),
+            overall.get("avg_max_3d_return"), overall.get("avg_max_3d_drawdown"),
+            diag.get("confidence_level"), diag.get("conclusion_level"),
+            diag.get("layer_diagnostics", {}).get("layer_inversion_warning", False),
+            diag.get("risk_diagnostics", {}).get("risk_warning", False),
+            json.dumps(diag, ensure_ascii=False),
+            json.dumps(summary, ensure_ascii=False),
+        ))
+
+        # ── details ──
+        for detail in result.get("details", []):
+            status = detail.get("status", {})
+            metrics = detail.get("metrics") or {}
+            missing_reasons = status.get("missing_reasons", [])
+            missing_reason = missing_reasons[0] if missing_reasons else None
+
+            cur.execute("""
+                INSERT INTO watchlist_evaluation_result (
+                    eval_mode, eval_start_date, eval_end_date, signal_trade_date, as_of_date,
+                    signal_key, code, name, strategy, watchlist_layer, risk_level,
+                    action_signal, entry_close,
+                    next_1d_return, next_3d_return, max_3d_return, max_3d_drawdown,
+                    is_mature_1d, is_mature_3d, price_status, missing_reason, verification_tag,
+                    confidence_level, conclusion_level
+                ) VALUES (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s
+                )
+                ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
+                DO UPDATE SET
+                    entry_close = EXCLUDED.entry_close,
+                    next_1d_return = EXCLUDED.next_1d_return,
+                    next_3d_return = EXCLUDED.next_3d_return,
+                    max_3d_return = EXCLUDED.max_3d_return,
+                    max_3d_drawdown = EXCLUDED.max_3d_drawdown,
+                    is_mature_1d = EXCLUDED.is_mature_1d,
+                    is_mature_3d = EXCLUDED.is_mature_3d,
+                    price_status = EXCLUDED.price_status,
+                    missing_reason = EXCLUDED.missing_reason,
+                    verification_tag = EXCLUDED.verification_tag,
+                    confidence_level = EXCLUDED.confidence_level,
+                    conclusion_level = EXCLUDED.conclusion_level,
+                    evaluated_at = NOW()
+            """, (
+                mode, start_date, end_date, detail["trade_date"], as_of_date,
+                detail["signal_key"], detail["code"], detail["name"],
+                detail["strategy"], detail["watchlist_layer"], detail["risk_level"],
+                detail.get("action_signal") or detail.get("watchlist_layer"),
+                metrics.get("entry_close"),
+                metrics.get("next_1d_return"), metrics.get("next_3d_return"),
+                metrics.get("max_3d_return"), metrics.get("max_3d_drawdown"),
+                status.get("evaluated_1d", False), status.get("evaluated_3d", False),
+                "ok" if detail.get("metrics") else "missing",
+                missing_reason,
+                detail.get("verification_tag"),
+                diag.get("confidence_level"), diag.get("conclusion_level"),
+            ))
+
+        conn.commit()
+        n_details = len(result.get("details", []))
+        print(f"\n[DB] 已写入 summary + {n_details} 条 detail 到 evaluation 表")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[WARN] 落库失败，已回滚: {e}")
+    finally:
+        cur.close()
+        conn.close()
 
 
 def main():
@@ -703,6 +1142,7 @@ def main():
     parser.add_argument("--days", type=int, default=None, help="range: 最近 N 天")
     parser.add_argument("--signal-date", type=str, default=None, help="daily: 信号日期 YYYYMMDD")
     parser.add_argument("--as-of", type=str, default=None, help="评价基准日 YYYYMMDD（默认今天）")
+    parser.add_argument("--save-db", action="store_true", default=False, help="落库到 evaluation 专用表")
     args = parser.parse_args()
 
     as_of_date = args.as_of if args.as_of else datetime.now().strftime("%Y%m%d")
@@ -739,7 +1179,7 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals)
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 
@@ -771,7 +1211,7 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals)
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 
@@ -793,6 +1233,9 @@ def main():
 
     print(f"\nJSON: {json_path}")
     print(f"MD:   {md_path}")
+
+    if args.save_db:
+        save_evaluation_to_db(result)
 
 
 if __name__ == "__main__":

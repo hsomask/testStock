@@ -21,6 +21,8 @@ TABLES = [
     "job_run_log",
     "stock_hist_kline",
     "signal_performance",
+    "watchlist_evaluation_result",
+    "watchlist_evaluation_summary",
 ]
 
 
