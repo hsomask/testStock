@@ -223,7 +223,7 @@ def compute_verification_tag(next_1d_return, max_3d_drawdown, layer):
     return tag
 
 
-def evaluate_signal_performance(signal):
+def evaluate_signal_performance(signal, as_of_date=None):
     """
     统一单条信号评价函数（range 和 daily 共用）。
     返回 (metrics_dict, status_dict)
@@ -231,6 +231,9 @@ def evaluate_signal_performance(signal):
     先用 days=80 走 DB 缓存快速路径；如果缓存无后续交易日数据，
     再用 days=500 触发 API 刷新（绕过 get_stock_history 的
     len(db_dates) >= days-3 缓存命中条件）。
+
+    如果传入 as_of_date（YYYYMMDD），未来行情窗口会被截断到
+    trade_date < date <= as_of_date，防止未来函数。
     """
     code = str(signal.get("code", "")).strip()
     trade_date = signal["trade_date"]
@@ -277,7 +280,10 @@ def evaluate_signal_performance(signal):
     if trade_date in set(all_dates):
         status["entry_close_found"] = True
 
+    # 构建未来行情窗口：trade_date < date <= as_of_date
     future_mask = all_dates > trade_date
+    if as_of_date:
+        future_mask = future_mask & (all_dates <= as_of_date)
     future = hist[future_mask].sort_values("date")
 
     # 如果缓存无后续数据，可能缓存过期，尝试强制 API 刷新一次
@@ -290,6 +296,8 @@ def evaluate_signal_performance(signal):
                 if trade_date in set(all_dates):
                     status["entry_close_found"] = True
                 future_mask = all_dates > trade_date
+                if as_of_date:
+                    future_mask = future_mask & (all_dates <= as_of_date)
                 future = hist[future_mask].sort_values("date")
                 _cache_update(code, hist)
         except Exception:
@@ -877,7 +885,7 @@ def resolve_date_range(args):
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
-def evaluate_records(signals):
+def evaluate_records(signals, as_of_date=None):
     """对信号列表逐条评价，返回 records + 汇总计数"""
     records = []
     eligible_1d = 0
@@ -887,7 +895,7 @@ def evaluate_records(signals):
     missing_reasons = Counter()
 
     for i, sig in enumerate(signals):
-        metrics, status = evaluate_signal_performance(sig)
+        metrics, status = evaluate_signal_performance(sig, as_of_date=as_of_date)
         layer = resolve_layer(sig)
         strategy = str(sig.get("strategy", "unknown") or "unknown").strip()
         risk = str(sig.get("risk_level", "unknown") or "unknown").strip()
@@ -1083,7 +1091,7 @@ def save_evaluation_to_db(result):
                     %s, %s, %s, %s, %s,
                     %s, %s
                 )
-                ON CONFLICT (eval_mode, signal_key, as_of_date)
+                ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
                 DO UPDATE SET
                     entry_close = EXCLUDED.entry_close,
                     next_1d_return = EXCLUDED.next_1d_return,
@@ -1171,7 +1179,7 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals)
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 
@@ -1203,7 +1211,7 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals)
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 

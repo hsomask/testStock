@@ -215,8 +215,30 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_result (
     data_source TEXT DEFAULT 'get_stock_history',
     evaluated_at TIMESTAMP DEFAULT NOW(),
 
-    UNIQUE (eval_mode, signal_key, as_of_date)
+    UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
 );
+
+
+-- 迁移旧唯一键（幂等）
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'watchlist_evaluation_result_eval_mode_signal_key_as_of_date_key'
+    ) THEN
+        ALTER TABLE watchlist_evaluation_result
+        DROP CONSTRAINT watchlist_evaluation_result_eval_mode_signal_key_as_of_date_key;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_watchlist_eval_result_scope_signal'
+    ) THEN
+        ALTER TABLE watchlist_evaluation_result
+        ADD CONSTRAINT uq_watchlist_eval_result_scope_signal
+        UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date);
+    END IF;
+END $$;
 
 
 -- 观察池评价汇总表
