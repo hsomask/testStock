@@ -182,21 +182,26 @@ def main():
 
     # ── 行情缓存覆盖率 ──
     sig_cnt, cached_cnt, cache_cov = check_price_cache(cur, signal_date, as_of_date)
-    if cache_cov < 0.8 and sig_cnt > 0:
-        warnings.append(f"as_of 行情缓存覆盖率 {cache_cov:.1%} 较低，watchlist_evaluation 可能触发大量 API 刷新")
+    defer_evaluation = (cache_cov < 0.8 and sig_cnt > 0)
 
     cur.close()
     conn.close()
 
     # ── 推荐命令 ──
-    recommended = [
-        f"python -m analysis.watchlist_evaluation --mode daily --signal-date {signal_date} --as-of {as_of_date} --save-db",
-        "python -m analysis.evaluation_query --latest",
-    ]
+    if defer_evaluation:
+        recommended = []
+    else:
+        recommended = [
+            f"python -m analysis.watchlist_evaluation --mode daily --signal-date {signal_date} --as-of {as_of_date} --save-db",
+            "python -m analysis.evaluation_query --latest",
+        ]
 
     # ── 状态判定 ──
     if signal_count == 0 or not trade_day_ok:
         status = "skip"
+    elif defer_evaluation:
+        status = "defer"
+        warnings.append(f"as_of 行情缓存覆盖率 {cache_cov:.1%}，低于 80%，暂缓 evaluation")
     elif warnings:
         status = "warning"
     else:

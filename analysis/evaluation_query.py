@@ -150,11 +150,11 @@ def print_trend(summaries):
         print(f"  强表现策略: {', '.join(strong_all)}")
 
     if consecutive_inv >= 3:
-        print(f"\n  ⚠ 连续 {consecutive_inv} 天分层倒挂，需重点观察，但不建议自动调参。")
+        print(f"\n  [WARN] 连续 {consecutive_inv} 天分层倒挂，需重点观察，但不建议自动调参。")
     if consecutive_risk >= 3:
-        print(f"  ⚠ 连续 {consecutive_risk} 天高风险提示未兑现，需后续复盘风险分层逻辑。")
+        print(f"  [WARN] 连续 {consecutive_risk} 天高风险提示未兑现，需后续复盘风险分层逻辑。")
     if avg_cov1d < 0.8:
-        print(f"  ⚠ 1 日覆盖率 {_pct(avg_cov1d)} 不足 80%，评价数据仍不稳定。")
+        print(f"  [WARN] 1 日覆盖率 {_pct(avg_cov1d)} 不足 80%，评价数据仍不稳定。")
 
 
 def build_markdown(summaries):
