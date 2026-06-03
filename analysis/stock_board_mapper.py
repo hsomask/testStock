@@ -1,7 +1,7 @@
 """
 个股所属行业/概念映射模块
-每周运行一次，将板块成分股数据写入 stock_board_map 表
-支持断点续跑：已存在的 board 跳过，每板块即时落表
+每周运行一次，按板块刷新成分股数据写入 stock_board_map 表
+刷新策略：delete old + insert latest（空数据时保留旧映射）
 """
 import time
 import pandas as pd
@@ -56,89 +56,125 @@ def _get_board_cons(board_code):
     return [(str(row["f12"]).zfill(6), row.get("f14", "")) for _, row in df.iterrows()]
 
 
-def _board_already_mapped(cur, board_type, board_name):
-    """检查该板块是否已写入过"""
-    cur.execute(
-        "SELECT COUNT(*) FROM stock_board_map WHERE board_type=%s AND board_name=%s",
-        (board_type, board_name)
-    )
-    return cur.fetchone()[0] > 0
-
-
-def _flush_batch(cur, batch, conn):
-    """写入一批记录"""
-    sql = """
-    INSERT INTO stock_board_map (
-        code, name, board_type, board_name, source
-    )
-    VALUES (%s, %s, %s, %s, %s)
-    ON CONFLICT (code, board_type, board_name)
-    DO UPDATE SET
-        name = EXCLUDED.name,
-        source = EXCLUDED.source,
-        updated_at = CURRENT_TIMESTAMP;
+def _refresh_board(conn, board_type_label, board_name, constituents):
+    """刷新单个板块映射：delete old + insert latest。
+    如果成分股为空，保留旧数据不删除。
+    返回 (status, deleted, inserted, elapsed)
     """
-    for row in batch:
-        cur.execute(sql, (
-            row["code"], row["name"], row["board_type"],
-            row["board_name"], row["source"],
-        ))
-    conn.commit()
+    if constituents is None or len(constituents) == 0:
+        return ("empty_skipped", 0, 0, 0)
+
+    cur = conn.cursor()
+    deleted = 0
+    inserted = 0
+    t0 = time.time()
+
+    try:
+        cur.execute(
+            "DELETE FROM stock_board_map WHERE board_type = %s AND board_name = %s",
+            (board_type_label, board_name),
+        )
+        deleted = cur.rowcount
+
+        for code, name in constituents:
+            cur.execute(
+                """INSERT INTO stock_board_map
+                   (code, name, board_type, board_name, source, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (code, board_type, board_name)
+                   DO UPDATE SET
+                       name = EXCLUDED.name,
+                       source = EXCLUDED.source,
+                       updated_at = NOW()""",
+                (code, name, board_type_label, board_name, "push2delay"),
+            )
+            inserted += 1
+
+        conn.commit()
+        elapsed = time.time() - t0
+        return ("refreshed", deleted, inserted, elapsed)
+
+    except Exception as e:
+        conn.rollback()
+        elapsed = time.time() - t0
+        print(f"  [ERROR] {board_name} 刷新失败：{e}，已回滚该板块")
+        return ("failed", 0, 0, elapsed)
+
+    finally:
+        cur.close()
 
 
 def _map_boards(boards, board_type_label, cur, conn):
-    """遍历板块列表，逐个获取成分股并即时落表"""
-    total_written = 0
-    batch = []
+    """遍历板块列表，逐个刷新成分股"""
+    total_board_count = len(boards)
+    refreshed = 0
+    empty_skipped = 0
+    failed = 0
+    total_deleted = 0
+    total_inserted = 0
+    start_time = time.time()
 
     for idx, (board_code, board_name) in enumerate(boards):
-        if _board_already_mapped(cur, board_type_label, board_name):
-            if idx % 50 == 0:
-                print(f"  [{idx+1}/{len(boards)}] {board_name} — 已存在，跳过")
-            continue
+        board_start = time.time()
 
         try:
             cons = _get_board_cons(board_code)
-            for code, name in cons:
-                batch.append({
-                    "code": code, "name": name,
-                    "board_type": board_type_label,
-                    "board_name": board_name,
-                    "source": "push2delay",
-                })
-
-            # 每收集约 50 条就落表
-            if len(batch) >= 50:
-                _flush_batch(cur, batch, conn)
-                total_written += len(batch)
-                batch = []
-
-            print(f"  [{idx+1}/{len(boards)}] {board_name} — {len(cons)}只")
-            time.sleep(0.15)
-
         except Exception as e:
-            print(f"  [{idx+1}/{len(boards)}] {board_name} — 失败：{e}")
+            print(f"  [{idx+1}/{total_board_count}] {board_name} — 获取成分股失败：{e}")
+            failed += 1
+            continue
 
-    # 剩余批次落表
-    if batch:
-        _flush_batch(cur, batch, conn)
-        total_written += len(batch)
+        if not cons:
+            empty_skipped += 1
+            if idx % 50 == 0:
+                print(f"  [{idx+1}/{total_board_count}] {board_name} — 空数据，保留旧映射，跳过")
+            continue
 
-    return total_written
+        status, deleted, inserted, elapsed = _refresh_board(
+            conn, board_type_label, board_name, cons
+        )
+
+        if status == "refreshed":
+            refreshed += 1
+            total_deleted += deleted
+            total_inserted += inserted
+            if idx % 50 == 0:
+                print(f"  [{idx+1}/{total_board_count}] {board_name} — 刷新完成，删除 {deleted} 条，写入 {inserted} 条，用时 {elapsed:.1f}s")
+        elif status == "empty_skipped":
+            empty_skipped += 1
+            print(f"  [{idx+1}/{total_board_count}] {board_name} — 空数据，保留旧映射，跳过")
+        else:
+            failed += 1
+            print(f"  [{idx+1}/{total_board_count}] {board_name} — 刷新失败，已回滚")
+
+        time.sleep(0.15)
+
+    elapsed = time.time() - start_time
+    mins = int(elapsed // 60)
+    secs = int(elapsed % 60)
+
+    print(f"\n{board_type_label}映射完成：")
+    print(f"  - 板块数：{total_board_count}")
+    print(f"  - 成功刷新板块数：{refreshed}")
+    print(f"  - 空数据跳过板块数：{empty_skipped}")
+    print(f"  - 失败板块数：{failed}")
+    print(f"  - 删除旧记录数：{total_deleted}")
+    print(f"  - 写入新记录数：{total_inserted}")
+    print(f"  - 耗时：{mins} 分 {secs} 秒")
+
+    return refreshed, empty_skipped, failed, total_deleted, total_inserted, elapsed
 
 
 def update_industry_stock_map(cur, conn):
     boards = _get_board_list("行业")
     print(f"行业板块列表：{len(boards)} 个")
-    written = _map_boards(boards, "行业", cur, conn)
-    print(f"行业映射完成，本次写入 {written} 条")
+    return _map_boards(boards, "行业", cur, conn)
 
 
 def update_concept_stock_map(cur, conn):
     boards = _get_board_list("概念")
     print(f"概念板块列表：{len(boards)} 个")
-    written = _map_boards(boards, "概念", cur, conn)
-    print(f"概念映射完成，本次写入 {written} 条")
+    return _map_boards(boards, "概念", cur, conn)
 
 
 def update_all_stock_board_map():
@@ -149,18 +185,47 @@ def update_all_stock_board_map():
     conn = psycopg2.connect(DATABASE_DSN)
     cur = conn.cursor()
 
+    overall_start = time.time()
+
+    # 行业映射
+    ind_result = None
     try:
-        update_industry_stock_map(cur, conn)
+        ind_result = update_industry_stock_map(cur, conn)
     except Exception as e:
         print(f"行业映射异常：{e}")
+        ind_result = (0, 0, 0, 0, 0, 0)
 
+    # 概念映射
+    con_result = None
     try:
-        update_concept_stock_map(cur, conn)
+        con_result = update_concept_stock_map(cur, conn)
     except Exception as e:
         print(f"概念映射异常：{e}")
+        con_result = (0, 0, 0, 0, 0, 0)
 
     cur.close()
     conn.close()
+
+    # 汇总统计
+    if ind_result and con_result:
+        total_refreshed = ind_result[0] + con_result[0]
+        total_empty = ind_result[1] + con_result[1]
+        total_failed = ind_result[2] + con_result[2]
+        total_deleted = ind_result[3] + con_result[3]
+        total_inserted = ind_result[4] + con_result[4]
+        total_time = time.time() - overall_start
+        mins = int(total_time // 60)
+        secs = int(total_time % 60)
+
+        print(f"\n{'='*50}")
+        print("全部映射完成：")
+        print(f"  - 总板块数：{ind_result[0] + ind_result[1] + ind_result[2] + con_result[0] + con_result[1] + con_result[2]}")
+        print(f"  - 成功刷新总数：{total_refreshed}")
+        print(f"  - 空数据跳过总数：{total_empty}")
+        print(f"  - 失败总数：{total_failed}")
+        print(f"  - 删除旧记录总数：{total_deleted}")
+        print(f"  - 写入新记录总数：{total_inserted}")
+        print(f"  - 总耗时：{mins} 分 {secs} 秒")
 
 
 if __name__ == "__main__":

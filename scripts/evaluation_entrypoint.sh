@@ -30,6 +30,11 @@ if [ "$STATUS" = "skip" ]; then
     exit 0
 fi
 
+if [ "$STATUS" = "defer" ]; then
+    echo "[DEFER] Scheduler check returned defer, price cache not ready. Exiting without evaluation."
+    exit 0
+fi
+
 if [ "$STATUS" = "error" ]; then
     echo "[ERROR] Scheduler check returned error, exiting."
     exit 1
