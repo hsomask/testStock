@@ -4,9 +4,7 @@
 """
 import pandas as pd
 import numpy as np
-import psycopg2
-
-from data.config import DATABASE_DSN
+from data.config import DATABASE_DSN, get_db_conn
 
 
 def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=None, selector_result=None):
@@ -105,7 +103,7 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
     if DATABASE_DSN:
         if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
             try:
-                db_conn = psycopg2.connect(DATABASE_DSN)
+                db_conn = get_db_conn()
             except Exception:
                 db_conn = None
 

@@ -20,9 +20,28 @@ def _getproxies_no_proxy():
 
 _requests.utils.getproxies = _getproxies_no_proxy
 
+import time
+import psycopg2
+
 REPORT_DIR = BASE_DIR / "reports"
 
 DATABASE_DSN = os.getenv("DATABASE_DSN", "")
+
+
+def get_db_conn(retries=3, delay=2):
+    """获取数据库连接，失败自动重试"""
+    if not DATABASE_DSN:
+        return None
+    last_err = None
+    for i in range(retries):
+        try:
+            conn = psycopg2.connect(DATABASE_DSN)
+            return conn
+        except Exception as e:
+            last_err = e
+            if i < retries - 1:
+                time.sleep(delay)
+    raise last_err
 
 PUSH_CHANNEL = os.getenv("PUSH_CHANNEL", "email")
 

@@ -4,12 +4,11 @@
 """
 import pandas as pd
 import numpy as np
-import psycopg2
 import logging
 from datetime import datetime
 
 import akshare as ak
-from data.config import DATABASE_DSN
+from data.config import DATABASE_DSN, get_db_conn
 from analysis.utils import to_date_display
 
 logger = logging.getLogger(__name__)
@@ -159,7 +158,7 @@ def save_board_amount_ratio(df, trade_date):
         logger.warning("DATABASE_DSN 未设置，跳过数据库写入")
         return
     db_trade_date = to_date_display(trade_date)
-    conn = psycopg2.connect(DATABASE_DSN)
+    conn = get_db_conn()
     cur = conn.cursor()
 
     sql = """
@@ -217,7 +216,7 @@ def update_board_history(trade_date=None):
         print(f"{today_ymd} 非交易日，跳过板块成交占比更新")
         return
 
-    conn = psycopg2.connect(DATABASE_DSN)
+    conn = get_db_conn()
 
     from analysis.data_fetcher import fetch_stock_spot
     stock_df = fetch_stock_spot()
@@ -247,7 +246,7 @@ def calc_board_ratio_change(board_type="行业", window=3):
     if not DATABASE_DSN:
         logger.warning("DATABASE_DSN 未设置")
         return pd.DataFrame()
-    conn = psycopg2.connect(DATABASE_DSN)
+    conn = get_db_conn()
 
     sql = """
     SELECT trade_date, board_type, board_name, amount_ratio, pct_chg, amount
