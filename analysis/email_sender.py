@@ -61,17 +61,11 @@ def build_trade_plan_section(tp):
     return "\n".join(parts)
 
 
-def find_latest_report(pro=False):
+def find_latest_report():
     files = sorted(REPORTS_DIR.glob("daily_report_*.md"))
-
-    if pro:
-        files = [f for f in files if "_pro" in f.name]
-    else:
-        files = [f for f in files if "_pro" not in f.name]
-
+    files = [f for f in files if "_pro" not in f.name]
     if not files:
         return None
-
     return files[-1]
 
 
@@ -102,7 +96,7 @@ def extract_date(report_text):
     return ""
 
 
-def build_email_body(sections, beginner_path=None, pro_path=None):
+def build_email_body(sections, report_path=None):
     parts = []
 
     def add_section(title, max_lines=20):
@@ -124,10 +118,8 @@ def build_email_body(sections, beginner_path=None, pro_path=None):
     add_section("免责声明", 8)
 
     parts.append("\n---\n")
-    if beginner_path:
-        parts.append(f"小白版报告路径：{beginner_path}")
-    if pro_path:
-        parts.append(f"专业版报告路径：{pro_path}")
+    if report_path:
+        parts.append(f"报告路径：{report_path}")
 
     return "\n\n".join(parts)
 
@@ -177,7 +169,7 @@ def send_email(subject, body, attachments=None):
         print(f"[邮件] 推送失败：{e}")
 
 
-def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
+def build_email_body_from_json(summary, report_path=None):
     """从 JSON 摘要组装邮件正文"""
     parts = []
 
@@ -239,10 +231,8 @@ def build_email_body_from_json(summary, beginner_path=None, pro_path=None):
     parts.append("本报告仅用于数据复盘和学习，不构成任何投资建议。")
     parts.append("")
 
-    if beginner_path:
-        parts.append(f"小白版报告：{beginner_path}")
-    if pro_path:
-        parts.append(f"专业版报告：{pro_path}")
+    if report_path:
+        parts.append(f"主日报：{report_path}")
 
     return "\n".join(parts)
 
@@ -271,13 +261,10 @@ def main():
         return
 
     if args.date:
-        beginner_path = REPORTS_DIR / f"daily_report_{date_str}.md"
-        pro_path = REPORTS_DIR / f"daily_report_{date_str}_pro.md"
-        beginner_path = beginner_path if beginner_path.exists() else None
-        pro_path = pro_path if pro_path.exists() else None
+        report_path = REPORTS_DIR / f"daily_report_{date_str}.md"
+        report_path = report_path if report_path.exists() else None
     else:
-        beginner_path = find_latest_report(pro=False)
-        pro_path = find_latest_report(pro=True)
+        report_path = find_latest_report()
 
     if args.date:
         summary_path = REPORTS_DIR / f"daily_summary_{date_str}.json"
@@ -297,8 +284,8 @@ def main():
         if len(date_str) == 8:
             date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
 
-        subject = f"A股每日复盘 · {date_str}"
-        body = build_email_body_from_json(data, beginner_path, pro_path)
+        subject = f"【A股每日复盘】{date_str}"
+        body = build_email_body_from_json(data, report_path)
 
         # 交易计划摘要（--date 模式只取当天，否则取最新）
         if args.date:
@@ -312,31 +299,28 @@ def main():
             body = tp_section + "\n\n---\n\n" + body
 
         print(f"[邮件] 使用 summary JSON：{summary}")
-    elif beginner_path is not None:
+    elif report_path is not None:
         # 降级：解析 Markdown
-        report_text = beginner_path.read_text(encoding="utf-8")
+        report_text = report_path.read_text(encoding="utf-8")
         sections = parse_report_sections(report_text)
         date_str = extract_date(report_text) or "今日"
-        subject = f"A股每日复盘 · {date_str}"
-        body = build_email_body(sections, beginner_path, pro_path)
-        print(f"[邮件] JSON 不存在，降级解析 Markdown：{beginner_path}")
+        subject = f"【A股每日复盘】{date_str}"
+        body = build_email_body(sections, report_path)
+        print(f"[邮件] JSON 不存在，降级解析 Markdown：{report_path}")
     else:
         print("[邮件] 未找到任何报告，跳过推送")
         return
 
     attachments = []
-    if beginner_path:
-        attachments.append(beginner_path)
-    if pro_path:
-        attachments.append(pro_path)
+    if report_path:
+        attachments.append(report_path)
+    # pro 报告不再默认发送
 
     # 附件：当天文件（按 trade_date 精确匹配，不混旧日期）
     date_str = date_str.replace("-", "") if len(date_str) > 8 else date_str
     missing_hint = []
     for fname in [f"board_trend_tracker_{date_str}.xlsx",
-                  f"board_mapping_quality_{date_str}.md",
-                  f"board_mapping_quality_{date_str}.json",
-                  f"board_alias_report_{date_str}.md"]:
+                  f"board_mapping_quality_{date_str}.md"]:
         fpath = REPORTS_DIR / fname
         if fpath.exists():
             attachments.append(fpath)

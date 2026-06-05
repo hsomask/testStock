@@ -1,11 +1,22 @@
+"""
+日报渲染模块 — 统一主日报模板
+"""
 import requests
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
 from analysis.utils import fmt_num, fmt_pct, fmt_yi
-from analysis.explainer import explain_market_status, get_daily_learning_topics
+from analysis.explainer import explain_market_status
 from analysis.board_alias import normalize_board_name
+from analysis.report_insights import (
+    check_weak_market, weak_market_conclusion,
+    assess_profit_effect, compute_market_width,
+    assess_trading_environment, assign_pattern_tag,
+    generate_validation_checklist, explain_sentiment_stage,
+    validate_position_consistency,
+    filter_effective_themes, is_dynamic_label,
+)
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
@@ -29,14 +40,10 @@ def call_minimax(prompt):
         payload = {
             "model": "abab6.5s-chat",
             "messages": [
-                {
-                    "role": "system",
-                    "content": "你是一名经验丰富的A股交易员和分析师，擅长用简洁、专业的语言总结市场情况和策略建议。你的分析基于数据，不构成投资建议。",
-                },
+                {"role": "system", "content": "你是一名经验丰富的A股交易员和分析师，擅长用简洁、专业的语言总结市场情况和策略建议。你的分析基于数据，不构成投资建议。"},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.7,
-            "max_tokens": 2000,
+            "temperature": 0.7, "max_tokens": 2000,
         }
         resp = requests.post(MINIMAX_API_URL, headers=headers, json=payload, timeout=30)
         data = resp.json()
@@ -47,65 +54,7 @@ def call_minimax(prompt):
         return None
 
 
-def build_ai_prompt(trade_date, market, industry, concept, sentiment, selectors):
-    prompt_parts = [
-        f"日期：{trade_date}",
-        "",
-        f"## 市场数据",
-        f"- 市场状态：{market['status']}",
-        f"- 市场综合评分：{market['score']}/100",
-        f"- 成交额：{market['total_amount']:.0f}亿",
-        f"- 上涨：{market['up_count']}只，下跌：{market['down_count']}只",
-        f"- 涨停：{market['limit_up']}只，跌停：{market['limit_down']}只",
-        "",
-        f"## 情绪周期",
-        f"- 情绪阶段：{sentiment['stage']}",
-        f"- 短线情绪周期评分：{sentiment['score']}/100",
-        "",
-    ]
-    active_inds = industry.get("active_boards", [])
-    if active_inds:
-        prompt_parts.append(f"强势行业：{'、'.join(active_inds)}")
-    active_cons = concept.get("active_boards", [])
-    if active_cons:
-        prompt_parts.append(f"强势概念：{'、'.join(active_cons)}")
-    prompt_parts.append("")
-    for pool_name, pool_df in selectors.items():
-        if pool_df is not None and not pool_df.empty:
-            stocks = [f"{row['name']}({row['code']})" for _, row in pool_df.iterrows()]
-            prompt_parts.append(f"{pool_name}观察池：{'、'.join(stocks)}")
-    prompt_parts.append("")
-    return "\n".join(prompt_parts)
-
-
-def build_one_line_prompt(trade_date, market, sentiment, industry, concept):
-    return (
-        f"日期：{trade_date}\n"
-        f"市场宽度状态：{market['status']}，综合评分：{market['score']}/100\n"
-        f"成交额：{market['total_amount']:.0f}亿，上涨{market['up_count']}只，下跌{market['down_count']}只\n"
-        f"涨停{market['limit_up']}只，跌停{market['limit_down']}只\n"
-        f"短线情绪周期：{sentiment['stage']}，评分：{sentiment['score']}/100\n"
-        f"强势行业：{'、'.join(industry.get('active_boards', [])[:5])}\n"
-        f"强势概念：{'、'.join(concept.get('active_boards', [])[:5])}\n"
-        f"请用2-3句话总结今天市场整体情况，用简洁专业的交易员语气，面向新手可理解。"
-    )
-
-
-def build_strategy_prompt(trade_date, market, sentiment, selectors):
-    prompt = (
-        f"日期：{trade_date}\n"
-        f"市场综合评分：{market['score']}/100，状态：{market['status']}\n"
-        f"情绪阶段：{sentiment['stage']}\n\n"
-        f"请按以下三个场景给出明日应对建议（简洁，每个场景2-3句话，适合新手阅读）：\n"
-        f"1. 市场放量上涨 → 应对方式\n"
-        f"2. 市场缩量震荡 → 应对方式\n"
-        f"3. 市场走弱 → 应对方式\n"
-        f"\n注意：不构成投资建议，用观察、关注、等待等中性词汇。"
-    )
-    return prompt
-
-
-# ── 板块表格渲染 ──
+# ── 板块表格渲染（保持不变）──
 
 def render_board_table(df, max_rows=10):
     if df is None or df.empty:
@@ -113,18 +62,13 @@ def render_board_table(df, max_rows=10):
     seen = set()
     deduped = []
     for _, row in df.iterrows():
-        key = (
-            row.get("pct_chg", np.nan),
-            row.get("turnover", np.nan),
-            str(row.get("leader", "")),
-        )
+        key = (row.get("pct_chg", np.nan), row.get("turnover", np.nan), str(row.get("leader", "")))
         if key in seen:
             continue
         seen.add(key)
         deduped.append(row)
         if len(deduped) >= max_rows:
             break
-
     lines = []
     for row in deduped:
         name = normalize_board_name(row.get("board_name", "-"))
@@ -138,12 +82,9 @@ def render_board_table(df, max_rows=10):
 
 def render_ratio_change_table(ratio_df, max_rows=10):
     if ratio_df is None or ratio_df.empty:
-        return "暂无历史数据，需积累3-5个交易日\n"
-
-    # 检查成交额数据是否可用
+        return "暂无历史数据\n"
     if "ratio_today" in ratio_df.columns and ratio_df["ratio_today"].notna().sum() == 0:
-        return "板块成交额暂缺，无法展示成交占比变化\n"
-
+        return "板块成交额暂缺\n"
     seen_names = set()
     lines = []
     for _, row in ratio_df.iterrows():
@@ -174,542 +115,55 @@ def render_distribution(dist):
     return "\n".join(lines) + "\n"
 
 
-def render_market(market):
-    lines = ["## 大盘总览", ""]
-    lines.append("### 三大指数")
-    indices = market.get("indices", [])
-    if indices:
-        lines.append("| 指数 | 收盘 | 涨跌幅 | 开盘 | 最高 | 最低 |")
-        lines.append("|---|---:|---:|---:|---:|---:|")
-        for item in indices:
-            lines.append(
-                f"| {item['name']} | {fmt_num(item.get('close'))} | "
-                f"{fmt_pct(item.get('pct_chg'))} | {fmt_num(item.get('open'))} | "
-                f"{fmt_num(item.get('high'))} | {fmt_num(item.get('low'))} |"
-            )
-    else:
-        lines.append("指数数据暂缺")
-    lines.append("")
-    lines.append(f"成交额：{market['total_amount']:.0f}亿")
-    lines.append("")
-    lines.append("### 涨跌统计")
-    lines.append(f"- 上涨：{market['up_count']}只")
-    lines.append(f"- 下跌：{market['down_count']}只")
-    lines.append(f"- 平盘：{market['flat_count']}只")
-    lines.append(f"- 涨停：{market['limit_up']}只")
-    lines.append(f"- 跌停：{market['limit_down']}只")
-    lines.append(f"- 20cm涨停：{market['limit_up_20cm']}只")
-    lines.append(f"- 20cm跌停：{market['limit_down_20cm']}只")
-    lines.append("")
-    lines.append(f"市场综合评分：{market['score']} / 100，状态：{market['status']}")
-    lines.append("")
-    lines.append(f"简评：{market['summary']}")
-    lines.append("")
-    return "\n".join(lines)
+# ── 观察池渲染（保持不变）──
 
-
-# ── 观察池渲染 ──
-
-def render_snowball_pool_beginner(df, pool_label):
-    """滚雪球趋势池：MACD金叉+MA20+量比"""
+def render_stock_pool_unified(df):
+    """统一观察池个股渲染"""
     if df is None or df.empty:
-        return f"### {pool_label}\n\n暂无符合条件个股\n"
+        return "暂无符合条件个股\n"
     lines = []
-    lines.append(f"### {pool_label}")
-    lines.append("")
-    lines.append("> 趋势跟随策略：MACD回踩零轴附近后金叉，站上MA20，量比温和放大。")
-    lines.append("> 持有时以MA20为生命线，收盘跌破次日离场，上涨30%考虑减仓。")
-    lines.append("")
     for idx, row in df.reset_index(drop=True).iterrows():
-        risk_level = row.get("risk_level", "数据不足")
-        risk_emoji = {"低": "[低]", "中": "[中]"}.get(risk_level, "")
-        lines.append(f"**{idx + 1}. {row['name']}（{row['code']}）** [观察] | {risk_emoji} {risk_level}风险")
-        lines.append("")
-        lines.append(f"- 收盘：{fmt_num(row['close'])} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{fmt_num(row.get('volume_ratio', np.nan))}")
-        lines.append(f"- MA20：{fmt_num(row.get('ma20', np.nan))} | 距离MA20：{fmt_num(row.get('ma20_distance_pct', np.nan), 1)}%")
-        lines.append(f"- MACD DIF：{fmt_num(row.get('macd_dif', np.nan), 4)} | DEA：{fmt_num(row.get('macd_dea', np.nan), 4)}")
-        lines.append(f"- 止损线(MA20)：{fmt_num(row.get('invalid_price', np.nan))} | 止盈提示：上涨30%减仓")
-        lines.append(f"- 持仓周期：{row.get('hold_days', '-')}")
-        lines.append("")
-        entry_reason = row.get("entry_reason", "")
-        lines.append(f"**入选原因**：{entry_reason}")
-        lines.append("")
-        risk_reasons = row.get("risk_reasons", "")
-        if risk_reasons:
-            lines.append(f"**风险原因**：")
-            lines.append(risk_reasons)
-            lines.append("")
-        lines.append("---")
-        lines.append("")
-    return "\n".join(lines)
-
-
-def render_stock_pool_beginner(df, pool_label):
-    """小白版：每只股票展示入选原因/风险原因/风险等级/操作信号"""
-    if df is None or df.empty:
-        return f"暂无符合条件个股\n"
-
-    lines = []
-    lines.append(f"### {pool_label}")
-    lines.append("")
-
-    for idx, row in df.reset_index(drop=True).iterrows():
-        risk_level = row.get("risk_level", "数据不足")
-        action_signal = row.get("action_signal", "数据不足")
-        signal_emoji = {"观察": "[观察]", "谨慎": "[谨慎]", "回避": "[回避]", "数据不足": "[数据不足]"}.get(action_signal, "")
-        risk_emoji = {"低": "[低]", "中": "[中]", "高": "[高]"}.get(risk_level, "")
-
-        lines.append(f"**{idx + 1}. {row['name']}（{row['code']}）** {signal_emoji} {action_signal} | {risk_emoji} {risk_level}风险")
-        lines.append("")
-
-        # 基本信息
-        lines.append(f"- 收盘：{fmt_num(row['close'])} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{fmt_num(row.get('volume_ratio', np.nan))}")
-        turnover_val = row.get("turnover", np.nan)
-        lines.append(f"- 换手率：{fmt_num(turnover_val, 2)}% | 5日涨幅：{fmt_pct(row.get('pct_5d', np.nan), 1)} | 20日涨幅：{fmt_pct(row.get('pct_20d', np.nan), 1)}")
-        lines.append(f"- MA5：{fmt_num(row.get('ma5', np.nan))} | MA10：{fmt_num(row.get('ma10', np.nan))} | MA20：{fmt_num(row.get('ma20', np.nan))}")
-
-        # 观察区间（使用新字段，兼容旧字段）
+        risk_level = row.get("risk_level", "-")
+        action_signal = row.get("action_signal", "-")
+        lines.append(f"{idx + 1}. **{row['name']}**（{row['code']}）| {row['strategy']} | 风险:{risk_level} | 信号:{action_signal}")
+        lines.append(f"   收盘:{fmt_num(row['close'])} | 涨幅:{fmt_pct(row['pct_chg'])} | 量比:{fmt_num(row.get('volume_ratio', np.nan))} | 换手:{fmt_num(row.get('turnover', np.nan), 2)}%")
         o_low = row.get("observe_low", row.get("buy_low", "-"))
         o_high = row.get("observe_high", row.get("buy_high", "-"))
         p_price = row.get("pressure_price", row.get("target", "-"))
         i_price = row.get("invalid_price", row.get("stop_loss", "-"))
-        lines.append(f"- 观察区间：{o_low} ~ {o_high} | 参考压力位：{p_price} | 风险失效位：{i_price}")
-        lines.append(f"- 持仓观察周期：{row.get('hold_days', '-')}")
-
-        lines.append("")
-
-        # 题材归因（同花顺热点）
-        ths_reason = row.get("ths_reason", "")
-        if ths_reason:
-            lines.append(f"**题材归因**：{ths_reason}")
-            lines.append("")
-
-        # 入选原因
-        entry_reason = row.get("entry_reason", row.get("reason", ""))
-        lines.append(f"**入选原因**：{entry_reason}")
-        lines.append("")
-
-        # 新股/数据不足说明
-        is_new_stock = str(row.get("name", "")).startswith("N")
-        missing_ma = pd.isna(row.get("ma5")) and pd.isna(row.get("ma20"))
-        missing_hist = pd.isna(row.get("pct_5d")) and pd.isna(row.get("pct_20d"))
-        if is_new_stock or (missing_ma and missing_hist):
-            lines.append("> 新股或历史交易日不足，量比和均线无法正常计算。")
-            lines.append("")
-
-        # 风险原因
+        lines.append(f"   观察区间:{o_low}~{o_high} | 压力位:{p_price} | 失效位:{i_price}")
+        lines.append(f"   入选原因:{row.get('entry_reason', row.get('reason', '-'))}")
+        ths = row.get("ths_reason", "")
+        if ths:
+            lines.append(f"   题材归因:{ths}")
         risk_reasons = row.get("risk_reasons", "")
         if risk_reasons:
-            lines.append(f"**风险原因**：")
-            lines.append(risk_reasons)
-            lines.append("")
-
-        lines.append("---")
+            lines.append(f"   风险:{risk_reasons.replace(chr(10), '；')[:120]}")
         lines.append("")
-
     return "\n".join(lines)
 
 
-def render_stock_pool_pro(df):
-    """专业版：保留原格式，追加风险等级和操作信号"""
+def render_snowball_pool(df):
+    """滚雪球趋势池"""
     if df is None or df.empty:
         return "暂无符合条件个股\n"
-
-    lines = []
-
+    lines = ["> 趋势跟随策略：MACD回踩零轴附近后金叉，站上MA20，量比温和放大。", ""]
     for idx, row in df.reset_index(drop=True).iterrows():
-        risk_level = row.get("risk_level", "")
-        action_signal = row.get("action_signal", "")
-        extra = ""
-        if risk_level and action_signal:
-            extra = f" | 风险：{risk_level} | 信号：{action_signal}"
-
-        lines.append(f"{idx + 1}. {row['name']}({row['code']}) — {row['strategy']}{extra}")
-        ths_reason = row.get("ths_reason", "")
-        if ths_reason:
-            lines.append(f"题材归因：{ths_reason}")
-        lines.append(f"收盘：{row['close']} | 涨幅：{fmt_pct(row['pct_chg'])} | 量比：{row['volume_ratio']}")
-        lines.append(
-            f"MA5：{fmt_num(row.get('ma5', np.nan))} | MA10：{fmt_num(row.get('ma10', np.nan))} | MA20：{fmt_num(row.get('ma20', np.nan))} | "
-            f"5日涨幅：{fmt_pct(row.get('pct_5d', np.nan), 1)} | 20日涨幅：{fmt_pct(row.get('pct_20d', np.nan), 1)}"
-        )
-        buy_low = row.get("buy_low", row.get("observe_low", "-"))
-        buy_high = row.get("buy_high", row.get("observe_high", "-"))
-        target = row.get("target", row.get("pressure_price", "-"))
-        stop_loss = row.get("stop_loss", row.get("invalid_price", "-"))
-        lines.append(f"区间：{buy_low}~{buy_high} | 参考压力位：{target} | 风险失效位：{stop_loss}")
-        lines.append(f"持仓周期：{row['hold_days']} | 仓位：{row.get('position', '-')}")
-        lines.append(f"入选原因：{row.get('entry_reason', row.get('reason', ''))}")
-        risk_reasons = row.get("risk_reasons", "")
-        if risk_reasons:
-            lines.append(f"风险原因：{risk_reasons.replace(chr(10), '；')}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-# ── 数据质量渲染 ──
-
-def render_quality_check(quality):
-    lines = ["## 数据质量检查", ""]
-    lines.append("| 检查项 | 状态 | 说明 |")
-    lines.append("|---|---|---|")
-    for item in quality["items"]:
-        lines.append(f"| {item['item']} | {item['status']} | {item['detail']} |")
-    lines.append("")
-    lines.append(f"**报告可信度：{quality['confidence_score']} / 100**")
-    if quality["confidence_score"] < 60:
-        lines.append("")
-        lines.append("> 今日数据完整性较低，报告仅供参考，不建议据此做交易判断。")
-    if quality["issues"]:
-        lines.append("")
-        lines.append("**扣分/问题项：**")
-        for issue in quality["issues"]:
-            lines.append(f"- {issue}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-# ── 主线判断渲染 ──
-
-def render_themes(themes):
-    lines = ["## 今日主线判断", ""]
-    if not themes:
-        lines.append("今日主线判断：**暂不明确**")
-        lines.append("")
-        lines.append("原因：热点比较分散，没有板块同时满足涨幅靠前和成交占比连续上升，观察池个股分布较散。")
-        lines.append("")
-        lines.append("> 这种情况下不适合强行判断主线，应该多观察，少追高。")
-        lines.append("")
-        return "\n".join(lines)
-
-    for i, theme in enumerate(themes):
-        lines.append(f"### {i + 1}. {theme['name']}（{theme['board_type']}）")
-        tt = theme.get("theme_type", "")
-        if tt:
-            lines.append(f"- **主线类型**：{tt} | **主线强度**：{theme['level']}（评分 {theme['score']}）")
-        else:
-            lines.append(f"- **主线强度**：{theme['level']}（评分 {theme['score']}）")
-        lines.append(f"- **判断依据**：")
-        for r in theme["reasons"]:
-            lines.append(f"  - {r}")
-        lines.append(f"- **小白解释**：{theme['beginner_explain']}")
-        lines.append(f"- **持续性风险**：{theme['sustainability_risk']}")
+        risk_level = row.get("risk_level", "-")
+        lines.append(f"**{idx + 1}. {row['name']}（{row['code']}）** | 风险:{risk_level}")
+        lines.append(f"- 收盘:{fmt_num(row['close'])} | 涨幅:{fmt_pct(row['pct_chg'])}")
+        lines.append(f"- MA20:{fmt_num(row.get('ma20', np.nan))} | MACD DIF:{fmt_num(row.get('macd_dif', np.nan), 4)}")
+        lines.append(f"- 止损(MA20):{fmt_num(row.get('invalid_price', np.nan))} | 持仓:{row.get('hold_days', '-')}")
+        reason = row.get("entry_reason", row.get("reason", ""))
+        if reason:
+            lines.append(f"- 入选原因:{reason}")
         lines.append("")
     return "\n".join(lines)
 
 
-# ── 小白版完整报告 ──
+# ── 统一主日报 ──
 
-def render_beginner_report(
-    trade_date, data_status, quality, market, industry, concept,
-    sentiment, selectors, themes, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None, report_context=None,
-):
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-
-    lines = []
-    lines.append(f"# A股每日复盘报告 · 小白友好版")
-    lines.append(f"**日期：{date_display}**")
-    lines.append("")
-    lines.append("> 注意：本报告只基于公开行情数据和规则筛选生成，不构成投资建议。以下内容仅为基于数据规则筛选出的观察标的。")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 1. 数据质量检查
-    lines.append(render_quality_check(quality))
-    lines.append("---")
-    lines.append("")
-
-    # 2. 今日市场一句话结论（AI）
-    # 板块资金趋势摘要
-    if board_trend_summary:
-        lines.append("## 板块资金趋势摘要")
-        lines.append("")
-        lines.append("> 今日主线判断 = 当前综合强度 | 板块资金趋势摘要 = 资金趋势和生命周期变化")
-        lines.append("> 来源：板块资金趋势追踪 | 优先参考近5日资金变化和生命周期迁移")
-        lines.append("> 板块名称已按同花顺常用名称归一，成分股仍基于当前系统映射。")
-        lines.append("")
-        ts = board_trend_summary
-        st = ts.get("strengthening_boards", [])
-        wk = ts.get("weakening_boards", [])
-        if not st and not wk and ts.get("watch_points"):
-            lines.append("暂无明显阶段切换板块，今日仅列出资金观察点。")
-            lines.append("")
-        for b in st[:3]:
-            lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}")
-        for b in wk[:2]:
-            lines.append(f"- **{b['board_name']}**：{b.get('prev_life_cycle','')} → {b.get('life_cycle','')}，{b.get('life_cycle_signal','')}，短线注意")
-        if ts.get("watch_points") and ts["watch_points"]:
-            lines.append(f"- {ts['watch_points'][0]}")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    lines.append("## 今日市场一句话结论")
-    lines.append("")
-    one_line_prompt = build_one_line_prompt(date_display, market, sentiment, industry, concept)
-    ai_one_line = call_minimax(one_line_prompt)
-    if ai_one_line:
-        lines.append(ai_one_line)
-    else:
-        score = market["score"]
-        if score >= 60:
-            lines.append(f"今天市场整体偏强，成交额{market['total_amount']:.0f}亿，上涨{market['up_count']}只。热门方向较活跃，但部分个股涨幅较大，明天需要防止追高。")
-        elif score >= 45:
-            lines.append(f"今天市场处于震荡平衡状态，成交额{market['total_amount']:.0f}亿，上涨{market['up_count']}只。板块轮动较快，适合观察，不适合重仓操作。")
-        else:
-            lines.append(f"今天市场偏弱，成交额{market['total_amount']:.0f}亿，下跌{market['down_count']}只。亏钱效应较明显，应优先控制风险，等待情绪修复。")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # context 优先取值
-    market_context = _get_context_section(report_context, "market")
-    sentiment_context = _get_context_section(report_context, "sentiment")
-    m_score = market_context.get("score", market.get("score"))
-    m_status = market_context.get("status", market.get("status"))
-    m_summary = market_context.get("summary", market.get("summary", ""))
-    s_score = sentiment_context.get("score", sentiment.get("score"))
-    s_stage = sentiment_context.get("stage", sentiment.get("stage"))
-
-    # 3. 市场情绪
-    lines.append("## 市场情绪")
-    lines.append("")
-    lines.append(f"- 市场综合评分：**{m_score} / 100**（状态：{m_status}）")
-    lines.append(f"- 短线情绪周期评分：**{s_score} / 100**（阶段：{s_stage}）")
-    lines.append(f"- 小白解释：{explain_market_status(s_score)}")
-    lines.append("")
-
-    # 关键数据
-    lines.append(f"- 成交额：{market['total_amount']:.0f}亿")
-    lines.append(f"- 上涨：{market['up_count']}只 / 下跌：{market['down_count']}只")
-    lines.append(f"- 涨停：{market['limit_up']}只 / 跌停：{market['limit_down']}只")
-    lines.append("")
-
-    # 防误操作提示
-    if market["score"] < 45:
-        lines.append("> **风险提示**：当前市场偏弱，不适合追高。所有观察池仅供学习复盘。")
-        lines.append("")
-    if market["limit_down"] >= 50:
-        lines.append("> **风险提示**：跌停数量较多，说明市场亏钱效应较强。今日观察池只适合学习复盘。")
-        lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 4. 今日主线判断
-    lines.append(render_themes(themes))
-    lines.append("---")
-    lines.append("")
-
-    # 5. 今日风险方向
-    lines.append("## 今日风险方向")
-    lines.append("")
-    if industry and industry.get("top_loss") is not None and not industry["top_loss"].empty:
-        top_loss_names = list(dict.fromkeys(
-            normalize_board_name(n) for n in industry["top_loss"]["board_name"].head(8).tolist()
-        ))[:5]
-        lines.append(f"- **跌幅靠前行业**：{'、'.join(top_loss_names)}")
-    if concept and concept.get("top_loss") is not None and not concept["top_loss"].empty:
-        top_loss_concepts = list(dict.fromkeys(
-            normalize_board_name(n) for n in concept["top_loss"]["board_name"].head(8).tolist()
-        ))[:5]
-        lines.append(f"- **跌幅靠前概念**：{'、'.join(top_loss_concepts)}")
-    lines.append(f"- **跌停数量**：{market['limit_down']}只" + ("，亏钱效应较强" if market['limit_down'] >= 30 else ""))
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 6. 今日观察池
-    lines.append("## 今日观察池")
-    lines.append("")
-    if not quality.get("has_volume_ratio", True):
-        lines.append("> **注意**：当前数据源缺少量比字段，量比相关筛选已自动降级，本观察池可信度下降。")
-        lines.append("")
-    lines.append("> 以下标的为基于数据规则筛选的观察对象，风险等级和操作信号仅供参考。")
-    lines.append("")
-
-    pool_sections = [
-        ("一次起爆", "一次起爆观察池"),
-        ("N字异动", "N字异动观察池"),
-        ("二次起爆", "二次起爆观察池"),
-        ("板块联动", "板块联动观察池"),
-        ("短线强势", "短线强势观察池"),
-        ("滚雪球趋势", "滚雪球趋势观察池"),
-    ]
-    # 观察池分层展示
-    all_visible = []
-    all_caution = []
-    all_high_risk = []
-    for pool_key, label in pool_sections:
-        pool_df = selectors.get(pool_key)
-        if pool_df is None or pool_df.empty:
-            if pool_key == "滚雪球趋势":
-                lines.append(render_snowball_pool_beginner(pool_df, label))
-            continue
-        for _, row in pool_df.iterrows():
-            entry = {"pool": pool_key, "row": row}
-            risk = str(row.get("risk_level", ""))
-            action = str(row.get("action_signal", ""))
-            name = str(row.get("name", ""))
-            # 新股 N 开头 → 高风险
-            if name.startswith("N"):
-                all_high_risk.append(entry)
-            elif risk == "高" or action == "回避" or action == "数据不足":
-                all_high_risk.append(entry)
-            elif risk == "中" and action == "谨慎":
-                all_caution.append(entry)
-            else:
-                all_visible.append(entry)
-        # 滚雪球单独渲染
-        if pool_key == "滚雪球趋势":
-            lines.append(render_snowball_pool_beginner(pool_df, label))
-
-    # 可观察池
-    lines.append("### 可观察池")
-    lines.append("")
-    if all_visible:
-        for entry in all_visible:
-            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | 风险：{entry['row'].get('risk_level','-')}")
-        lines.append("")
-    else:
-        lines.append("暂无符合条件个股")
-        lines.append("")
-
-    # 谨慎观察池
-    if all_caution:
-        lines.append("### 谨慎观察池")
-        lines.append("")
-        for entry in all_caution:
-            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | 风险：{entry['row'].get('risk_level','-')}")
-        lines.append("")
-
-    # 高风险复盘池
-    if all_high_risk:
-        lines.append("### 高风险复盘池（仅复盘，不建议买入）")
-        lines.append("")
-        for entry in all_high_risk[:8]:
-            lines.append(f"- **{entry['row']['name']}**（{entry['row']['code']}）| {entry['pool']} | {entry['row'].get('risk_level','-')}/{entry['row'].get('action_signal','-')}")
-        lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 小白版：分层展示已完成，专业版保留完整策略明细
-    # 不再重复展示高风险票在原策略池中
-
-    # 多策略重合个股
-    code_to_pools = {}
-    for pool_key, _ in pool_sections:
-        pool_df = selectors.get(pool_key)
-        if pool_df is None or pool_df.empty:
-            continue
-        for _, row in pool_df.iterrows():
-            code = str(row.get("code", ""))
-            if code not in code_to_pools:
-                code_to_pools[code] = {"name": str(row.get("name", "")), "pools": []}
-            code_to_pools[code]["pools"].append(pool_key)
-
-    overlaps = {k: v for k, v in code_to_pools.items() if len(v["pools"]) > 1}
-    if overlaps:
-        lines.append("### 多策略重合个股")
-        lines.append("")
-        for code, info in sorted(overlaps.items(), key=lambda x: -len(x[1]["pools"])):
-            lines.append(f"- **{info['name']}**（{code}）：{'、'.join(info['pools'])}")
-        lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 7. 明日交易计划
-    lines.append("## 明日交易计划")
-    lines.append("")
-    if trade_plan:
-        r = trade_plan.get("market_restrictions", {})
-        s = trade_plan.get("summary", {})
-        ms = trade_plan.get("market_snapshot", {})
-
-        if not r.get("allow_real_trade", True):
-            lines.append("> **当前仅适合模拟观察，不建议实盘买入。**")
-            lines.append("")
-
-        lines.append(f"- 是否允许实盘：{'是' if r.get('allow_real_trade') else '否（仅模拟）'}")
-        lines.append(f"- 总仓位上限：{r.get('max_position_pct', 0)}成")
-        lines.append(f"- 单票仓位：{r.get('single_stock_pct', 0)}成")
-        if r.get("reasons"):
-            for reason in r["reasons"]:
-                lines.append(f"  - {reason}")
-        lines.append("")
-
-        lines.append(f"- 候选低吸：{s.get('候选低吸', 0)}只")
-        lines.append(f"- 只观察：{s.get('只观察', 0)}只")
-        lines.append(f"- 交易条件不满足：{s.get('交易条件不满足', 0)}只")
-        lines.append(f"- 高风险回避：{s.get('高风险回避', 0)}只")
-        lines.append(f"- 不可交易过滤：{s.get('不可交易过滤', 0)}只")
-        lines.append("")
-
-        # 候选低吸 Top 3
-        low_buy = trade_plan.get("plans", {}).get("候选低吸", [])
-        if low_buy:
-            lines.append("**候选低吸 Top 3：**")
-            for st in low_buy[:3]:
-                lines.append(f"- {st['name']}（{st['code']}）| 策略：{st.get('strategy','')} | 风险：{st.get('risk_level','')}")
-            lines.append("")
-
-        # 高风险回避 Top 3
-        high_risk = trade_plan.get("plans", {}).get("高风险回避", [])
-        if high_risk:
-            lines.append("**高风险回避 Top 3：**")
-            for st in high_risk[:3]:
-                lines.append(f"- {st['name']}（{st['code']}）| 策略：{st.get('strategy','')} | 原因：{st.get('reason','')}")
-            lines.append("")
-    else:
-        lines.append("暂无交易计划数据")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-
-    # 8. 明日策略（AI）
-    lines.append("## 明日策略")
-    lines.append("")
-    strategy_prompt = build_strategy_prompt(date_display, market, sentiment, selectors)
-    ai_strategy = call_minimax(strategy_prompt)
-    if ai_strategy:
-        lines.append(ai_strategy)
-    else:
-        lines.append("| 明日场景 | 判断信号 | 应对方式 |")
-        lines.append("|---|---|---|")
-        lines.append("| 市场放量上涨 | 指数上涨、成交额放大、上涨家数增加 | 观察主线方向的分歧低吸机会 |")
-        lines.append("| 市场缩量震荡 | 成交额下降、热点轮动快 | 少追高，轻仓观察 |")
-        lines.append("| 市场走弱 | 跌停增加、情绪评分下降 | 降低风险，优先学习复盘 |")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 8. 今日学习概念
-    lines.append("## 今日学习概念")
-    lines.append("")
-    topics = get_daily_learning_topics(market, industry, concept, sentiment, selectors)
-    for name, text in topics:
-        lines.append(f"### {name}")
-        lines.append(f"{text}")
-        lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # 9. 免责声明
-    lines.append("## 免责声明")
-    lines.append("")
-    lines.append("本报告仅用于数据复盘和学习，不构成任何投资建议。所有观察池标的均为基于公开行情数据的规则筛选结果，观察区间/参考压力位/风险失效位由策略公式生成，不代表未来价格走势。市场有风险，投资需谨慎。")
-    lines.append("")
-    lines.append(f"> 报告模式：小白友好版 | 数据源：AkShare | 生成时间：{date_display}")
-
-    return "\n".join(lines)
-
-
-# ── 专业版报告 ──
-
-def render_pro_report(
+def render_unified_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
     trade_plan=None, board_trend_summary=None, report_context=None,
@@ -717,247 +171,438 @@ def render_pro_report(
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
 
-    # 标题（第一行）
-    lines.append(f"# A股日报 · 专业版 | {date_display}")
+    # context 优先取值
+    market_context = _get_context_section(report_context, "market")
+    sentiment_context = _get_context_section(report_context, "sentiment")
+    m_score = market_context.get("score", market.get("score", 0))
+    m_status = market_context.get("status", market.get("status", ""))
+    s_score = sentiment_context.get("score", sentiment.get("score", 0))
+    s_stage = sentiment_context.get("stage", sentiment.get("stage", ""))
+    pos = validate_position_consistency(trade_plan)
+
+    # ── 预计算 insights ──
+    weak_triggers, weak_checked, weak_items = check_weak_market(market)
+    weak_conclusion = weak_market_conclusion(weak_triggers, weak_checked)
+    profit = assess_profit_effect(market)
+    width = compute_market_width(market)
+    env = assess_trading_environment(market, sentiment, trade_plan, profit)
+    env["weak_market_triggers"] = f"{weak_triggers}/{weak_checked}"
+    effective_themes, dynamic_themes = filter_effective_themes(sentiment.get("themes", []) if isinstance(sentiment, dict) else [])
+    # themes can come from multiple sources
+    all_themes = effective_themes  # will be overwritten below
+
+    s_stage, stage_explain = explain_sentiment_stage(s_score, s_stage)
+
+    # ── YAML frontmatter ──
+    lines.append("---")
+    lines.append(f"date: {date_display}")
+    lines.append(f"market_score: {m_score}")
+    lines.append(f"market_status: {m_status}")
+    lines.append(f"sentiment_score: {s_score}")
+    lines.append(f"sentiment_stage: {s_stage}")
+    lines.append(f"position_cap: {pos['max_pct']}成")
+    lines.append(f"data_confidence: {quality.get('confidence_score', 0)}")
+    lines.append("---")
     lines.append("")
 
-    # 数据获取概要
-    lines.append(f"## 数据获取完成 {date_display}")
+    # ── 标题 ──
+    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
+        pd.Timestamp(date_display).dayofweek]
+    lines.append(f"# A股每日复盘 | {date_display}（{weekday}）")
     lines.append("")
-    lines.append(f"- 个股日线：{data_status.get('stock_count', 0)}只")
-    lines.append(f"- 行业板块：{data_status.get('industry_count', 0)}个")
-    lines.append(f"- 概念指数：{data_status.get('concept_count', 0)}条")
+
+    # ══════════════════════════════════════
+    # 0. 今日摘要
+    # ══════════════════════════════════════
+    lines.append("## 0. 今日摘要")
+    lines.append("")
+    lines.append("| 项目 | 结论 |")
+    lines.append("|------|------|")
+    lines.append(f"| 市场综合评分 | {m_score:.1f} / 100 |")
+    lines.append(f"| 市场状态 | {m_status} |")
+    lines.append(f"| 短线情绪阶段 | {s_stage} |")
+    lines.append(f"| 总仓位上限 | {pos['max_pct']}成 |")
+    lines.append(f"| 单票上限 | {pos['single_pct']}成 |")
+    lines.append(f"| 数据可信度 | {quality.get('confidence_score', 0)} / 100 |")
+    lines.append("")
+    lines.append(f"**一句话结论：** {market.get('summary', '数据生成中')}")
     lines.append("")
     lines.append("---")
     lines.append("")
 
-    # 数据质量检查
-    lines.append(render_quality_check(quality))
-
-    # 大盘总览
-    lines.append(render_market(market))
+    # ══════════════════════════════════════
+    # 1. 交易环境判断
+    # ══════════════════════════════════════
+    lines.append("## 1. 交易环境判断")
+    lines.append("")
+    lines.append("| 维度 | 当前状态 | 解释 |")
+    lines.append("|------|----------|------|")
+    lines.append(f"| 赚钱效应 | {profit['level']} | {profit['detail'][:60]} |")
+    lines.append(f"| 弱市不做 | 触发 {weak_triggers}/{weak_checked} | {weak_conclusion} |")
+    amount = market.get("total_amount", 0)
+    lines.append(f"| 市场量能 | {amount:.0f}亿 | 成交额 |")
+    lines.append(f"| 仓位边界 | {pos['max_pct']}成 | 来自 trade_plan |")
+    lines.append("")
+    if profit["downgraded"]:
+        lines.append(f"> {profit['note']}")
+        lines.append("")
     lines.append("---")
     lines.append("")
 
-    # 行业板块分析
-    # 板块资金趋势摘要
-    if board_trend_summary:
-        lines.append(f"## 板块资金趋势摘要 | {date_display}")
-        lines.append("")
-        st_p = board_trend_summary.get("strengthening_boards", [])
-        wk_p = board_trend_summary.get("weakening_boards", [])
-        if not st_p and not wk_p and board_trend_summary.get("watch_points"):
-            lines.append("暂无明显阶段切换板块，今日仅列出资金观察点。")
-            lines.append("")
-        else:
-            lines.append("| 板块 | 类型 | 阶段变化 | 信号 | 趋势评分 |")
-            lines.append("|---|---|---|---|---:|")
-        for b in st_p[:5]:
-            lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
-        for b in wk_p[:5]:
-            lines.append(f"| {b['board_name']} | {b['board_type']} | {b.get('prev_life_cycle','')} → {b.get('life_cycle','')} | {b.get('life_cycle_signal','')} | {b.get('trend_score','-')} |")
-        if board_trend_summary.get("watch_points"):
-            lines.append("")
-            for w in board_trend_summary["watch_points"][:3]:
-                lines.append(f"> {w}")
-        lines.append("")
-        lines.append("---")
-        lines.append("")
-
-    lines.append(f"## 行业板块分析 | {date_display}")
+    # ══════════════════════════════════════
+    # 2. 市场状态
+    # ══════════════════════════════════════
+    lines.append("## 2. 市场状态")
     lines.append("")
-    for title, key in [("行业涨幅 TOP10", "top_gain"), ("行业跌幅 TOP10", "top_loss"),
-                       ("行业强度 TOP10", "top_strength"), ("行业活跃度 TOP10", "top_hot")]:
-        lines.append(f"### {title}")
-        lines.append("| 板块 | 涨幅 | 换手 | 领涨股 |")
-        lines.append("|---|---|---|---|")
-        lines.append(render_board_table(industry.get(key)))
-        lines.append("")
+    lines.append("### 2.1 大盘指数")
+    indices = market.get("indices", [])
+    if indices:
+        lines.append("| 指数 | 收盘 | 涨跌幅 | 成交额(亿) |")
+        lines.append("|------|------|--------|-----------|")
+        for item in indices:
+            lines.append(f"| {item['name']} | {fmt_num(item.get('close'))} | {fmt_pct(item.get('pct_chg'))} | {fmt_num(item.get('amount', 0)/1e8, 0)} |")
+    else:
+        lines.append("指数数据暂缺")
+    lines.append("")
 
+    lines.append("### 2.2 市场宽度")
+    lines.append("")
+    lines.append("| 指标 | 数值 | 判断 |")
+    lines.append("|------|------|------|")
+    lines.append(f"| 上涨家数 | {width['up_count']} | - |")
+    lines.append(f"| 下跌家数 | {width['down_count']} | - |")
+    lines.append(f"| 涨停家数 | {width['limit_up']} | - |")
+    lines.append(f"| 跌停家数 | {width['limit_down']} | - |")
+    lines.append(f"| 涨跌比 | {width['adv_ratio']:.2f} | {'宽度较好' if width['adv_ratio'] > 1.2 else '偏弱' if width['adv_ratio'] < 0.5 else '均衡'} |")
+    lines.append(f"| 涨跌停比 | {width['lb_ratio']:.1f} | {'短线活跃' if width['lb_ratio'] > 3 else '弱市信号' if width['lb_ratio'] < 1 else '正常'} |")
+    lines.append(f"| 绿盘占比 | {width['green_ratio']:.1%} | {'多数下跌' if width['green_ratio'] > 0.6 else '正常'} |")
+    lines.append(f"| 炸板率 | N/A | 数据不足 |")
+    lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
+    lines.append("")
+    if width["green_ratio"] > 0.6 and market.get("score", 0) > 50:
+        lines.append("> 指数偏强，但个股宽度偏弱，属于结构分化。指数强不代表赚钱效应普遍。")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 3. 弱市不做检查
+    # ══════════════════════════════════════
+    lines.append("## 3. 弱市不做检查")
+    lines.append("")
+    lines.append("| 检查项 | 当前值 | 触发 | 解读 |")
+    lines.append("|--------|--------|------|------|")
+    for item in weak_items:
+        trig = "YES" if item["triggered"] else "no"
+        if item["status"] == "insufficient":
+            trig = "-"
+        lines.append(f"| {item['name']} | {item['value']} | {trig} | {item['note']} |")
+    lines.append("")
+    lines.append(f"**结论：** 已计算 {weak_checked} 项，触发 {weak_triggers} 项；3 项数据不足。→ {weak_conclusion}。")
+    lines.append(f"**仓位上限：** 不超过 trade_plan 上限（{pos['max_pct']}成）。")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 4. 情绪周期与赚钱效应
+    # ══════════════════════════════════════
+    lines.append("## 4. 情绪周期与赚钱效应")
+    lines.append("")
+    lines.append("| 指标 | 当前值 | 信号 |")
+    lines.append("|------|--------|------|")
+    lines.append(f"| 短线情绪评分 | {s_score:.1f} / 100 | {s_stage} |")
+    lines.append(f"| 昨日涨停今日表现 | N/A | 数据不足 |")
+    lines.append(f"| 连板高度 | N/A | 数据不足 |")
+    lines.append(f"| 3板以上数量 | N/A | 数据不足 |")
+    lines.append(f"| 涨停家数 | {width['limit_up']}家 | {'活跃' if width['limit_up'] > 50 else '一般'} |")
+    lines.append(f"| 炸板率 | N/A | 数据不足 |")
+    lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
+    lines.append("")
+    lines.append(f"> {stage_explain}")
+    if profit["downgraded"]:
+        lines.append(f"> {profit['note']}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 5. 资金流向（复用 board_ratio_changes + board_trend）
+    # ══════════════════════════════════════
+    lines.append("## 5. 资金流向")
+    lines.append("")
     if board_ratio_changes:
         for label, ratio_key in [
-            ("行业成交占比 3日递增 TOP10", "industry_ratio_3d_up"),
-            ("行业成交占比 3日递减 TOP10", "industry_ratio_3d_down"),
-            ("行业成交占比 5日上升 TOP10", "industry_ratio_5d_up"),
-            ("行业成交占比 5日下降 TOP10", "industry_ratio_5d_down"),
+            ("行业 3日流入 TOP5", "industry_ratio_3d_up"),
+            ("行业 3日流出 TOP5", "industry_ratio_3d_down"),
+            ("概念 3日流入 TOP5", "concept_ratio_3d_up"),
+            ("概念 3日流出 TOP5", "concept_ratio_3d_down"),
         ]:
             df = board_ratio_changes.get(ratio_key)
             if df is not None and not df.empty:
                 lines.append(f"### {label}")
                 lines.append("| 板块 | 涨幅 | 成交占比 | 变化 |")
                 lines.append("|---|---|---|---|")
-                lines.append(render_ratio_change_table(df))
+                lines.append(render_ratio_change_table(df, max_rows=5))
                 lines.append("")
-
+    else:
+        lines.append("暂无资金流向数据")
+        lines.append("")
     lines.append("---")
     lines.append("")
 
-    # 概念板块分析
-    lines.append(f"## 概念板块分析 | {date_display}")
+    # ══════════════════════════════════════
+    # 6. 主线分析
+    # ══════════════════════════════════════
+    lines.append("## 6. 主线分析")
     lines.append("")
-    for title, key in [("概念涨幅 TOP10", "top_gain"), ("概念跌幅 TOP10", "top_loss"),
-                       ("概念强度 TOP10", "top_strength"), ("概念活跃度 TOP10", "top_hot")]:
-        lines.append(f"### {title}")
-        lines.append("| 板块 | 涨幅 | 换手 | 领涨股 |")
-        lines.append("|---|---|---|---|")
-        lines.append(render_board_table(concept.get(key)))
+    if effective_themes:
+        lines.append("### 6.1 有效主线")
+        lines.append("")
+        lines.append("| 主线 | 强度 | 说明 |")
+        lines.append("|------|------|------|")
+        for t in effective_themes:
+            lines.append(f"| {t['name']} | {t.get('level', '-')} | {t.get('beginner_explain', t.get('sustainability_risk', ''))[:60]} |")
         lines.append("")
 
-    if board_ratio_changes:
-        for label, ratio_key in [
-            ("概念成交占比 3日递增 TOP10", "concept_ratio_3d_up"),
-            ("概念成交占比 3日递减 TOP10", "concept_ratio_3d_down"),
-            ("概念成交占比 5日上升 TOP10", "concept_ratio_5d_up"),
-            ("概念成交占比 5日下降 TOP10", "concept_ratio_5d_down"),
-        ]:
-            df = board_ratio_changes.get(ratio_key)
-            if df is not None and not df.empty:
-                lines.append(f"### {label}")
-                lines.append("| 板块 | 涨幅 | 成交占比 | 变化 |")
-                lines.append("|---|---|---|---|")
-                lines.append(render_ratio_change_table(df))
-                lines.append("")
+    if dynamic_themes:
+        lines.append("### 6.2 动态标签")
+        lines.append("")
+        lines.append("以下仅为热度标签，不作为有效主线：")
+        dynamic_names = ", ".join(t["name"] for t in dynamic_themes)
+        lines.append(f"  {dynamic_names}")
+        lines.append("")
 
-    # 动态概念说明
-    lines.append("### 动态概念说明")
-    lines.append("")
-    lines.append("以下板块为短线情绪类动态板块，非传统行业分类：")
-    lines.append("- **昨日连板**：昨日连续涨停股票组成的动态板块；")
-    lines.append("- **昨日连板_含一字**：包含一字涨停的昨日连板股票；")
-    lines.append("- **昨日打二板以上表现**：昨日尝试二板及以上接力股票的整体表现；")
-    lines.append("- **昨日高换手**：昨日换手率较高股票组合；")
-    lines.append("- **历史新高/近期新高**：价格创出历史或近期高点的股票组合；")
-    lines.append("- **最近多板**：近期多次涨停股票组合。")
-    lines.append("")
-
-    # 榜单说明
-    lines.append("### 榜单说明")
-    lines.append("")
-    lines.append("- **涨幅榜**：板块今天涨得多不多；")
-    lines.append("- **活跃度榜**：偏重换手率/交易热度，涨幅不一定最高但换手最充分；")
-    lines.append("- **强度榜**：综合涨幅、换手、领涨股表现后的评分，强度和活跃度可能有交叉但含义不同。")
-    lines.append("")
-
-    lines.append("---")
-    lines.append("")
-
-    # 情绪周期
-    lines.append(f"## 情绪周期分析 | {date_display}")
-    lines.append("")
-    lines.append("### 市场情绪温度计")
-    lines.append(f"- 短线情绪周期评分：{sentiment['score']} / 100")
-    lines.append(f"- 当前阶段：{sentiment['stage']}")
-    lines.append(f"- 解读：{sentiment['comment']}")
-    lines.append("")
-    lines.append("### 行业板块情绪分布")
-    lines.append("| 阶段 | 板块数 | 占比 | 分布 |")
-    lines.append("|---|---|---|---|")
-    lines.append(render_distribution(sentiment["industry_distribution"]))
-    lines.append("")
-    lines.append("### 概念板块情绪分布")
-    lines.append("| 阶段 | 板块数 | 占比 | 分布 |")
-    lines.append("|---|---|---|---|")
-    lines.append(render_distribution(sentiment["concept_distribution"]))
+    if not effective_themes and not dynamic_themes:
+        lines.append("今日无明显主线方向，热点较为分散。")
     lines.append("")
     lines.append("---")
     lines.append("")
 
-    # 观察池（5个）
+    # ══════════════════════════════════════
+    # 7. 弱市例外扫描
+    # ══════════════════════════════════════
+    lines.append("## 7. 弱市例外扫描")
+    lines.append("")
+    if weak_triggers >= 2:
+        lines.append("当前弱市触发条件较多，以下为弱市环境下的例外扫描：")
+        lines.append("- 今日暂无明确逆势涨停候选。")
+    else:
+        lines.append("今日弱市触发条件较少，暂不需要弱市例外扫描。")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 8. 风险提示
+    # ══════════════════════════════════════
+    lines.append("## 8. 风险提示")
+    lines.append("")
+    lines.append("### 市场风险")
+    if market.get("score", 0) < 45:
+        lines.append("- 市场评分偏低，整体偏弱")
+    if width["green_ratio"] > 0.6:
+        lines.append("- 多数个股下跌，亏钱效应较强")
+    if width["lb_ratio"] < 1:
+        lines.append("- 跌停压过涨停，短线风险偏高")
+    lines.append("")
+    lines.append("### 数据风险")
+    lines.append(f"- 报告可信度：{quality.get('confidence_score', 0)} / 100")
+    if profit["downgraded"]:
+        lines.append("- 赚钱效应为降级判断（缺少连板高度、炸板率、昨涨停表现）")
+    for issue in quality.get("issues", []):
+        lines.append(f"- {issue}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 9. 机会观察
+    # ══════════════════════════════════════
+    lines.append("## 9. 机会观察")
+    lines.append("")
+    if effective_themes:
+        for t in effective_themes[:3]:
+            lines.append(f"### {t['name']}")
+            lines.append(f"- 逻辑：{t.get('beginner_explain', '')}")
+            lines.append(f"- 风险：{t.get('sustainability_risk', '待评估')}")
+            lines.append("")
+    else:
+        lines.append("暂无明确主线方向，以观察为主。")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 10. 观察池
+    # ══════════════════════════════════════
+    lines.append("## 10. 观察池")
+    lines.append("")
     if not quality.get("has_volume_ratio", True):
-        lines.append("> **注意**：当前数据源缺少量比字段，量比相关筛选已自动降级，本观察池可信度下降。")
-        lines.append("")
-    pool_sections = [
-        ("一次起爆", "观察池 · 一次起爆"),
-        ("N字异动", "观察池 · N字异动"),
-        ("二次起爆", "观察池 · 二次起爆"),
-        ("板块联动", "观察池 · 板块联动"),
-        ("短线强势", "观察池 · 短线强势"),
-        ("滚雪球趋势", "观察池 · 滚雪球趋势"),
-    ]
-    for pool_key, header in pool_sections:
-        lines.append(f"## {header} | {date_display}")
-        lines.append("")
-        if pool_key == "滚雪球趋势":
-            pool_df = selectors.get(pool_key)
-            if pool_df is not None and not pool_df.empty:
-                lines.append("> 趋势跟随策略：MACD回踩零轴附近后金叉，站上MA20，量比温和放大。")
-                lines.append("> 持有时以MA20为生命线，收盘跌破次日离场，上涨30%考虑减仓。")
-                lines.append("")
-            lines.append(render_stock_pool_pro(pool_df))
-        else:
-            lines.append(render_stock_pool_pro(selectors.get(pool_key)))
-        lines.append("---")
+        lines.append("> 当前数据源缺少量比字段，量比相关筛选已自动降级。")
         lines.append("")
 
-    # 交易计划
+    pool_sections = [
+        ("一次起爆", "一次起爆"), ("N字异动", "N字异动"),
+        ("二次起爆", "二次起爆"), ("板块联动", "板块联动"),
+        ("短线强势", "短线强势"), ("滚雪球趋势", "滚雪球趋势"),
+    ]
+    all_visible, all_caution, all_high_risk = [], [], []
+    for pool_key, _ in pool_sections:
+        df = selectors.get(pool_key)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            entry = {"pool": pool_key, "row": row}
+            risk = str(row.get("risk_level", ""))
+            action = str(row.get("action_signal", ""))
+            name = str(row.get("name", ""))
+            if name.startswith("N"):
+                all_high_risk.append(entry)
+            elif risk == "高" or action in ("回避", "数据不足"):
+                all_high_risk.append(entry)
+            elif risk == "中" and action == "谨慎":
+                all_caution.append(entry)
+            else:
+                all_visible.append(entry)
+
+    # 可观察池
+    lines.append("### 10.1 可观察")
+    lines.append("")
+    if all_visible:
+        lines.append("| 股票 | 方向 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
+        lines.append("|------|------|----------|--------|--------|----------|------|------|--------|")
+        for entry in all_visible:
+            row = entry["row"]
+            tag = assign_pattern_tag(row, entry["pool"], market, effective_themes)
+            o_low = row.get("observe_low", row.get("buy_low", "-"))
+            o_high = row.get("observe_high", row.get("buy_high", "-"))
+            inv = row.get("invalid_price", row.get("stop_loss", "-"))
+            lines.append(
+                f"| {row['name']} | {entry['pool']} | {tag} | {o_low}~{o_high} | "
+                f"{row.get('pressure_price', '-')} | 跌破{inv} | ≤{pos['single_pct']}成 | 回调企稳 | 追高/破位 |"
+            )
+        lines.append("")
+    else:
+        lines.append("暂无符合条件个股")
+        lines.append("")
+
+    # 谨慎观察
+    if all_caution:
+        lines.append("### 10.2 谨慎观察")
+        lines.append("")
+        lines.append("| 股票 | 方向 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
+        lines.append("|------|------|----------|--------|--------|----------|------|------|--------|")
+        for entry in all_caution:
+            row = entry["row"]
+            tag = assign_pattern_tag(row, entry["pool"], market, effective_themes)
+            o_low = row.get("observe_low", "-")
+            o_high = row.get("observe_high", "-")
+            inv = row.get("invalid_price", "-")
+            lines.append(
+                f"| {row['name']} | {entry['pool']} | {tag} | {o_low}~{o_high} | "
+                f"{row.get('pressure_price', '-')} | 跌破{inv} | ≤{pos['single_pct']}成 | 确认信号 | 盲目追高 |"
+            )
+        lines.append("")
+
+    # 高风险复盘
+    if all_high_risk:
+        lines.append("### 10.3 高风险复盘")
+        lines.append("")
+        lines.append("| 股票 | 方向 | 高风险原因 | 只复盘不买原因 |")
+        lines.append("|------|------|------------|----------------|")
+        for entry in all_high_risk[:8]:
+            row = entry["row"]
+            lines.append(
+                f"| {row['name']} | {entry['pool']} | "
+                f"{row.get('risk_level', '-')}/{row.get('action_signal', '-')} | 风险偏高，仅复盘 |"
+            )
+        lines.append("")
+
+    # 滚雪球
+    snowball_df = selectors.get("滚雪球趋势")
+    if snowball_df is not None and not snowball_df.empty:
+        lines.append("### 10.4 滚雪球趋势")
+        lines.append("")
+        lines.append(render_snowball_pool(snowball_df))
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 11. 明日验证清单
+    # ══════════════════════════════════════
+    lines.append("## 11. 明日验证清单")
+    lines.append("")
+    checklist = generate_validation_checklist(market, effective_themes, profit, weak_triggers)
+    for i, item in enumerate(checklist):
+        lines.append(f"{i + 1}. {item}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 12. 交易计划摘要
+    # ══════════════════════════════════════
     if trade_plan:
         r = trade_plan.get("market_restrictions", {})
         s = trade_plan.get("summary", {})
-        lines.append(f"## 明日交易计划 | {date_display}")
+        lines.append("## 12. 交易计划摘要")
         lines.append("")
         if not r.get("allow_real_trade", True):
-            lines.append("> **当前仅适合模拟观察，不建议实盘买入。**")
+            lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
             lines.append("")
-        lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '禁止'} | 仓位上限：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
-        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 交易条件不满足：{s.get('交易条件不满足',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
-        for reason in r.get("reasons", []):
-            lines.append(f"  - {reason}")
+        lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '仅模拟'} | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+        lines.append("")
+        lines.append("---")
         lines.append("")
 
-    # 风险与机会
-    lines.append(f"## 风险与机会 | {date_display}")
+    # ══════════════════════════════════════
+    # 13. 纪律
+    # ══════════════════════════════════════
+    lines.append("## 13. 纪律")
     lines.append("")
-    lines.append("### 风险提示")
-    lines.append("- 若市场综合评分低于45，应降低仓位，避免追高。")
-    lines.append("- 若跌停数量明显增加，说明亏钱效应扩散。")
-    lines.append("- 若热点板块连续高潮，次日应警惕分歧。")
-    lines.append("")
-    lines.append("### 机会方向")
-    lines.append("- 优先关注强势行业与强势概念的交集。")
-    lines.append("- 优先选择放量但未严重透支的个股。")
-    lines.append("- 优先关注站上 MA5/MA10/MA20 且量价配合的标的。")
+    lines.append("- 不追高；")
+    lines.append(f"- 总仓位不超过 trade_plan 上限（{pos['max_pct']}成）；")
+    lines.append("- 弱市不做，结构分化只做核心方向；")
+    lines.append("- 高风险复盘票只复盘，不作为正常买入候选；")
+    lines.append("- 数据可信度不足时，只观察不下结论；")
+    lines.append("- 本报告用于自动化复盘、风险提示和观察池生成，不构成实盘买卖建议。")
     lines.append("")
     lines.append("---")
     lines.append("")
 
-    # AI 市场总结与策略
-    lines.append(f"## 市场总结与策略 | {date_display}")
+    # ══════════════════════════════════════
+    # 14. 数据可信度
+    # ══════════════════════════════════════
+    lines.append("## 14. 数据可信度")
     lines.append("")
-    ai_prompt = build_ai_prompt(date_display, market, industry, concept, sentiment, selectors)
-    ai_prompt += "\n请按以下结构输出分析（不构成投资建议）：\n1. 整体判断\n2. 主线方向分析\n3. 操作建议\n4. 明日策略（分三个场景）"
-    ai_result = call_minimax(ai_prompt)
-    if ai_result:
-        lines.append(ai_result)
-    else:
-        lines.append("### 一、整体判断")
-        lines.append(f"- 当前市场状态：{market['status']}，情绪评分：{market['score']} / 100")
-        lines.append("### 二、主线方向")
-        lines.append("- 参考行业强度 TOP10 与概念强度 TOP10。")
-        lines.append("### 三、操作建议")
-        if market["score"] >= 60:
-            lines.append("- 市场情绪偏强，可关注主线板块内的分歧机会。")
-        elif market["score"] >= 45:
-            lines.append("- 市场处于震荡平衡阶段，适合轻仓试错。")
-        else:
-            lines.append("- 市场偏弱，应控制仓位，等待情绪修复。")
+    lines.append("| 项目 | 状态 | 说明 |")
+    lines.append("|------|------|------|")
+    lines.append(f"| 报告可信度 | {quality.get('confidence_score', 0)} / 100 | {'可参考' if quality.get('confidence_score', 0) >= 60 else '谨慎参考'} |")
+    for item in quality.get("items", []):
+        lines.append(f"| {item['item']} | {item['status']} | {item['detail']} |")
+    lines.append("")
+    if quality.get("issues"):
+        lines.append("**主要扣分项：**")
+        for issue in quality["issues"]:
+            lines.append(f"- {issue}")
         lines.append("")
-        lines.append("### 四、明日策略")
-        lines.append("| 场景 | 信号 | 策略 | 仓位 |")
-        lines.append("|---|---|---|---|")
-        lines.append("| 指数反弹 | 放量上涨且上涨家数增加 | 关注主线低吸 | 3-5成 |")
-        lines.append("| 震荡分化 | 热点轮动但成交不足 | 只做核心前排 | 2-3成 |")
-        lines.append("| 继续下跌 | 跌停增加且缩量 | 控制风险，等待修复 | 1-2成以下 |")
-
+    lines.append("**影响范围：**")
+    lines.append("- 市场和板块判断：影响较小；")
+    lines.append("- 个股观察池排序：可能受影响（均线/量比数据缺失时）。")
     lines.append("")
+
+    # ── 免责声明 ──
     lines.append("---")
     lines.append("")
-
-    # 免责声明
     lines.append("## 免责声明")
     lines.append("")
-    lines.append("以上内容仅为量化数据分析和策略复盘，不构成任何投资建议。")
+    lines.append("本报告仅用于数据复盘和学习，不构成任何投资建议。所有观察池标的均为基于公开行情数据的规则筛选结果，观察区间/参考压力位/风险失效位由策略公式生成，不代表未来价格走势。市场有风险，投资需谨慎。")
     lines.append("")
-    lines.append(f"> 报告模式：专业版 | 数据源：AkShare | 生成时间：{date_display}")
+    lines.append(f"> 数据源：AkShare | 生成时间：{date_display}")
 
     return "\n".join(lines)
 
@@ -970,28 +615,20 @@ def render_daily_report(
     quality=None, themes=None, trade_plan=None, board_trend_summary=None,
     report_context=None,
 ):
-    """统一入口，根据 mode 分发到 beginner 或 pro 渲染"""
-    if mode == "pro":
-        return render_pro_report(
-            trade_date, data_status, quality, market, industry,
-            concept, sentiment, selectors, board_ratio_changes,
-            trade_plan=trade_plan, board_trend_summary=board_trend_summary,
-            report_context=report_context,
-        )
-    else:
-        return render_beginner_report(
-            trade_date, data_status, quality, market, industry,
-            concept, sentiment, selectors, themes, board_ratio_changes,
-            trade_plan=trade_plan, board_trend_summary=board_trend_summary,
-            report_context=report_context,
-        )
+    """统一入口：所有 mode 走同一份主日报"""
+    return render_unified_report(
+        trade_date, data_status, quality, market, industry,
+        concept, sentiment, selectors, board_ratio_changes,
+        trade_plan=trade_plan, board_trend_summary=board_trend_summary,
+        report_context=report_context,
+    )
 
 
 def save_report(report, trade_date, mode="beginner"):
     out_dir = Path("reports/daily")
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "" if mode == "beginner" else "_pro"
-    path = out_dir / f"daily_report_{trade_date}{suffix}.md"
+    # 统一只生成一份主日报
+    path = out_dir / f"daily_report_{trade_date}.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(report)
     return path

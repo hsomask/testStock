@@ -24,7 +24,6 @@ EXPECTED_FILES = [
 
 CRITICAL = [
     "daily_report_{}.md",
-    "daily_report_{}_pro.md",
     "daily_summary_{}.json",
     "trade_plan_{}.md",
     "trade_plan_{}.json",
