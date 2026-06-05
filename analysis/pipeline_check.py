@@ -10,7 +10,6 @@ REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
 
 EXPECTED_FILES = [
     "daily_report_{}.md",
-    "daily_report_{}_pro.md",
     "daily_summary_{}.json",
     "trade_plan_{}.md",
     "trade_plan_{}.json",

@@ -16,7 +16,7 @@ from analysis.report_insights import (
     generate_validation_checklist, explain_sentiment_stage,
     validate_position_consistency,
     filter_effective_themes, is_dynamic_label,
-    classify_concept_label, dedup_watchlist_entries,
+    classify_concept_label, label_category_name, dedup_watchlist_entries,
 )
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
@@ -400,12 +400,12 @@ def render_unified_report(
                     cat = classify_concept_label(name)
                     if cat != "industrial":
                         change = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
-                        cat_label = {"dynamic_sentiment": "动态情绪", "index_style": "指数/风格", "institutional": "资金/机构"}.get(cat, "其他")
+                        cat_label = label_category_name(cat)
                         if name not in all_non_ind or abs(change) > abs(all_non_ind[name][0]):
                             all_non_ind[name] = (change, cat_label)
 
         if all_non_ind:
-            lines.append("### 动态/风格标签变化 TOP5")
+            lines.append("### 动态/风格/属性标签变化 TOP5")
             lines.append("| 标签 | 类型 | 变化 | 解读 |")
             lines.append("|------|------|------|------|")
             sorted_tags = sorted(all_non_ind.items(), key=lambda x: abs(x[1][0]), reverse=True)
@@ -434,7 +434,8 @@ def render_unified_report(
                 for _, row in df.iterrows():
                     name = str(row.get("board_name", ""))
                     if classify_concept_label(name) == "industrial":
-                        change = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+                        raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+                        change = float(raw) * 100 if pd.notna(raw) else 0
                         obs_directions.append((name, change))
 
         # 也从行业提取
@@ -443,7 +444,8 @@ def render_unified_report(
             if df is not None and not df.empty:
                 for _, row in df.iterrows():
                     name = row.get("board_name", "")
-                    change = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+                    raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+                    change = float(raw) * 100 if pd.notna(raw) else 0
                     obs_directions.append((name, change))
 
         obs_directions.sort(key=lambda x: x[1], reverse=True)
@@ -485,7 +487,14 @@ def render_unified_report(
     # 主线结论
     if obs_main:
         main_names = "、".join(n for n, _ in obs_main[:4])
-        lines.append(f"**主线结论：** 今日没有全市场级别主线，但存在局部结构方向：{main_names}。由于市场宽度偏弱，这些方向只作为观察主线，不宜扩散到普买。")
+        width_ok = width["adv_ratio"] > 1.2 and width["green_ratio"] < 0.5
+        if width_ok:
+            width_word = "市场宽度尚可"
+            advice = "适合分歧低吸，但短线情绪处于高潮，不宜追高扩散"
+        else:
+            width_word = "市场宽度偏弱"
+            advice = "只作为观察主线，不宜扩散到普买"
+        lines.append(f"**主线结论：** 今日没有全市场级别主线，但存在局部结构方向：{main_names}。{width_word}，{advice}。")
     elif not obs_directions:
         lines.append("今日暂无明确产业主线，热点偏分散。")
     lines.append("")
@@ -512,6 +521,10 @@ def render_unified_report(
     lines.append("## 8. 风险提示")
     lines.append("")
     lines.append("### 8.1 市场风险")
+    sentiment_stage = s_stage
+    if sentiment_stage in ("高潮", "过热"):
+        lines.append(f"- 短线情绪处于**{sentiment_stage}**，需警惕高潮后分歧。涨停家数较多但不宜在高潮阶段盲目追高。")
+        lines.append("- 若次日强势股开始冲高回落，应降低追涨优先级。")
     if width["green_ratio"] > 0.6:
         lines.append(f"- 绿盘占比 {width['green_ratio']:.1%}，多数个股下跌，指数表现不能代表全市场赚钱效应。")
     if width["lb_ratio"] < 1:
@@ -520,7 +533,7 @@ def render_unified_report(
         lines.append("- 涨跌比偏弱，市场宽度不足。")
     if market.get("score", 0) < 45:
         lines.append("- 市场综合评分偏低，整体偏弱。")
-    if not (width["green_ratio"] > 0.6 or width["lb_ratio"] < 1 or market.get("score", 0) < 45):
+    if sentiment_stage not in ("高潮", "过热") and not (width["green_ratio"] > 0.6 or width["lb_ratio"] < 1 or market.get("score", 0) < 45):
         lines.append("- 当前市场风险信号未明显触发。")
     lines.append("")
 
@@ -536,11 +549,25 @@ def render_unified_report(
 
     # 观察池风险
     lines.append("### 8.3 观察池风险")
-    n_count = sum(1 for e in all_visible_raw + all_caution_raw if "N字异动" in str(e.get("pool", "")) or "二次起爆" in str(e.get("pool", "")))
+    # 从 selectors 直接统计
+    n_count = 0
+    caution_count = 0
+    for pool_key in ["一次起爆", "N字异动", "二次起爆", "板块联动", "短线强势", "滚雪球趋势"]:
+        df = selectors.get(pool_key)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            strategy = str(row.get("strategy", ""))
+            risk = str(row.get("risk_level", ""))
+            action = str(row.get("action_signal", ""))
+            if strategy in ("N字异动", "二次起爆") or pool_key in ("N字异动", "二次起爆"):
+                n_count += 1
+            if risk == "中" and action == "谨慎":
+                caution_count += 1
     if n_count > 3:
         lines.append(f"- 多只候选来自 N字异动/二次起爆（{n_count}只），一旦市场宽度继续走弱，容易冲高回落。")
-    if all_caution:
-        lines.append(f"- 谨慎观察层 {len(all_caution)} 只股票不应和可观察层同等对待。")
+    if caution_count > 0:
+        lines.append(f"- 谨慎观察层 {caution_count} 只股票不应和可观察层同等对待。")
     lines.append("")
 
     # 数据风险

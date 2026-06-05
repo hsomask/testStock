@@ -21,16 +21,23 @@ DYNAMIC_SENTIMENT_KEYWORDS = [
 
 INDEX_STYLE_KEYWORDS = [
     "HS300_", "上证180_", "中证500", "中盘成长", "权重股",
-    "创业板综", "ST板块",
+    "创业板综", "ST板块", "中盘股", "大盘股", "小盘股",
+    "大盘价值", "大盘成长", "中盘价值", "中盘成长",
+    "小盘价值", "小盘成长",
 ]
 
 INSTITUTIONAL_KEYWORDS = [
     "机构重仓", "QFII重仓", "融资融券", "MSCI中国", "富时罗素",
+    "证金持股", "社保重仓", "基金重仓",
+]
+
+ATTRIBUTE_KEYWORDS = [
+    "专精特新", "央企", "国企改革", "高送转", "预盈预增", "参股金融",
 ]
 
 
 def classify_concept_label(name):
-    """将概念名称分为: industrial / dynamic_sentiment / index_style / institutional"""
+    """将概念名称分为: industrial / dynamic_sentiment / index_style / institutional / attribute"""
     if not name:
         return "industrial"
     for kw in DYNAMIC_SENTIMENT_KEYWORDS:
@@ -42,12 +49,26 @@ def classify_concept_label(name):
     for kw in INSTITUTIONAL_KEYWORDS:
         if kw in name:
             return "institutional"
+    for kw in ATTRIBUTE_KEYWORDS:
+        if kw in name:
+            return "attribute"
     return "industrial"
 
 
 def is_dynamic_label(name):
-    """检查板块名是否属于动态/风格/机构标签（旧接口，保持兼容）"""
+    """检查板块名是否不属于产业概念"""
     return classify_concept_label(name) != "industrial"
+
+
+def label_category_name(cat):
+    """分类标签 → 中文名"""
+    return {
+        "dynamic_sentiment": "动态情绪",
+        "index_style": "市值风格",
+        "institutional": "资金属性",
+        "attribute": "属性标签",
+        "industrial": "产业概念",
+    }.get(cat, "其他标签")
 
 
 def split_board_names(concepts, sort_by_change=True):
