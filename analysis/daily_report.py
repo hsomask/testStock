@@ -155,11 +155,12 @@ def save_summary_json(summary, trade_date):
 
 
 def _get_db_conn():
-    """获取独立数据库连接"""
+    """获取独立数据库连接（带重试）"""
     if not DATABASE_DSN:
         return None
     try:
-        return psycopg2.connect(DATABASE_DSN)
+        from data.config import get_db_conn
+        return get_db_conn()
     except Exception as e:
         logger.exception(f"数据库连接失败：{e}")
         return None
@@ -434,7 +435,7 @@ def main():
     # DB 连接
     db_conn = None
     try:
-        db_conn = psycopg2.connect(DATABASE_DSN)
+        db_conn = _get_db_conn()
     except Exception as e:
         logger.exception(f"数据库连接失败：{e}")
 

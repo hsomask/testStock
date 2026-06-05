@@ -11,6 +11,18 @@ import akshare as ak
 from data.config import DATABASE_DSN, get_db_conn
 from analysis.utils import to_date_display
 
+
+def _safe_int(val):
+    """安全转换为 int，NaN/None 返回 None"""
+    import numpy as np
+    try:
+        v = float(val)
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,8 +203,8 @@ def save_board_amount_ratio(df, trade_date):
             row["amount"],
             row["amount_ratio"],
             row["turnover"],
-            row["up_count"],
-            row["down_count"],
+            _safe_int(row.get("up_count")),
+            _safe_int(row.get("down_count")),
             row["leader_name"],
             row["leader_pct_chg"],
         ))
