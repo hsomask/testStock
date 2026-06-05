@@ -416,7 +416,8 @@ def main():
 
     force = args.force
     mode = args.mode
-    modes = ["beginner", "pro"] if mode == "both" else [mode]
+    # 统一日报，不再区分 beginner/pro，both 也只生成一份
+    modes = ["unified"]
 
     trade_date = args.date if args.date else get_trade_date()
 

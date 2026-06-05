@@ -278,18 +278,15 @@ def main():
 
     if summary is not None:
         data = json.loads(summary.read_text(encoding="utf-8"))
-        date_str = data.get("trade_date", "")
+        date_key = data.get("trade_date", "")
+        date_display = f"{date_key[:4]}-{date_key[4:6]}-{date_key[6:]}" if len(date_key) == 8 else date_key
 
-        # 格式化日期
-        if len(date_str) == 8:
-            date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-
-        subject = f"【A股每日复盘】{date_str}"
+        subject = f"【A股每日复盘】{date_display}"
         body = build_email_body_from_json(data, report_path)
 
         # 交易计划摘要（--date 模式只取当天，否则取最新）
         if args.date:
-            tp_path = REPORTS_DIR / f"trade_plan_{date_str}.json"
+            tp_path = REPORTS_DIR / f"trade_plan_{date_key}.json"
             tp_path = tp_path if tp_path.exists() else None
         else:
             tp_path = find_latest_trade_plan()
