@@ -308,29 +308,23 @@ def main():
         print("[邮件] 未找到任何报告，跳过推送")
         return
 
-    attachments = []
-    if report_path:
-        attachments.append(report_path)
-    # pro 报告不再默认发送
+    # 日报邮件默认附件：主日报 + 板块趋势明细
+    date_key = date_str.replace("-", "") if len(date_str) > 8 else date_str
 
-    # 附件：当天文件（按 trade_date 精确匹配，不混旧日期）
-    date_str = date_str.replace("-", "") if len(date_str) > 8 else date_str
-    missing_hint = []
-    for fname in [f"board_trend_tracker_{date_str}.xlsx",
-                  f"board_mapping_quality_{date_str}.md"]:
-        fpath = REPORTS_DIR / fname
-        if fpath.exists():
-            attachments.append(fpath)
-        else:
-            missing_hint.append(fname)
+    if not report_path or not Path(report_path).exists():
+        print(f"[邮件] 主日报缺失：{report_path}，跳过发送")
+        return
 
-    if missing_hint:
-        body += "\n\n---\n以下当天文件未生成：\n"
-        for f in missing_hint:
-            body += f"- {f}\n"
+    attachments = [report_path]
+
+    tracker = REPORTS_DIR / f"board_trend_tracker_{date_key}.xlsx"
+    if tracker.exists():
+        attachments.append(tracker)
+    else:
+        body += f"\n\n---\n板块趋势明细附件缺失：{tracker.name}\n"
 
     # 流程检查结果（读取同日期 pipeline_check JSON）
-    pipeline_path = REPORTS_DIR / f"pipeline_check_{date_str}.json"
+    pipeline_path = REPORTS_DIR / f"pipeline_check_{date_key}.json"
     if pipeline_path.exists():
         try:
             pc = json.loads(pipeline_path.read_text(encoding="utf-8"))
