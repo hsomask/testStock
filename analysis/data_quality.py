@@ -4,9 +4,7 @@
 """
 import pandas as pd
 import numpy as np
-import psycopg2
-
-from data.config import DATABASE_DSN
+from data.config import DATABASE_DSN, get_db_conn
 
 
 def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=None, selector_result=None):
@@ -105,7 +103,7 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
     if DATABASE_DSN:
         if db_conn is None or (hasattr(db_conn, 'closed') and db_conn.closed):
             try:
-                db_conn = psycopg2.connect(DATABASE_DSN)
+                db_conn = get_db_conn()
             except Exception:
                 db_conn = None
 
@@ -161,9 +159,25 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
 
             cur.close()
         except Exception:
-            items.append({"item": "数据库连接", "status": "异常", "detail": "数据库连接失败"})
-            score -= 15
-            issues.append("数据库连接失败，板块历史数据和个股映射不可用。")
+            # 重试一次：重新连接后再查询
+            try:
+                db_conn = get_db_conn()
+                if db_conn:
+                    cur2 = db_conn.cursor()
+                    cur2.execute("SELECT COUNT(*) FROM board_amount_ratio")
+                    ba_count = cur2.fetchone()[0]
+                    has_board_amount_ratio = ba_count > 0
+                    cur2.execute("SELECT COUNT(*) FROM stock_board_map")
+                    sm_count = cur2.fetchone()[0]
+                    has_stock_board_map = sm_count > 0
+                    cur2.close()
+                    items.append({"item": "数据库连接", "status": "重连成功", "detail": "首次查询失败，重试后恢复"})
+                else:
+                    raise Exception("retry failed")
+            except Exception:
+                items.append({"item": "数据库连接", "status": "异常", "detail": "数据库连接失败"})
+                score -= 15
+                issues.append("数据库连接失败，板块历史数据和个股映射不可用。")
     else:
         items.append({"item": "数据库", "status": "未连接", "detail": "未提供数据库连接"})
 
