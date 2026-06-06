@@ -140,10 +140,26 @@ def load_t1_evaluation_summary(as_of_date):
         except Exception:
             pass
 
+    evaluated_1d = row.get("evaluated_1d") or 0
     cov1d = row.get("coverage_1d") or 0
-    if cov1d < 0.8:
+    confidence_level = str(row.get("confidence_level", ""))
+    conclusion_level = str(row.get("conclusion_level", ""))
+
+    # 只有明确标记 defer 时才是 defer
+    is_defer = (
+        "defer" in confidence_level.lower()
+        or "defer" in conclusion_level.lower()
+    )
+
+    if is_defer:
         status = "defer"
         msg = "今日 T+1 复盘因行情缓存不足暂缓。"
+    elif evaluated_1d == 0:
+        status = "insufficient"
+        msg = "今日 T+1 复盘覆盖不足，暂不下结论。"
+    elif cov1d < 0.8:
+        status = "partial"
+        msg = "今日 T+1 覆盖率偏低，结果仅供观察。"
     else:
         status = "ok"
         msg = None

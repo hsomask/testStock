@@ -241,7 +241,69 @@ def render_unified_report(
     # ══════════════════════════════════════
     lines.append("## 1. 昨日观察池兑现复盘（T+1）")
     lines.append("")
-    if t1_data and t1_data.get("available"):
+
+    status = (t1_data or {}).get("status", "missing")
+
+    if not t1_data or not t1_data.get("available"):
+        # missing / error
+        msg = (t1_data or {}).get("message", "今日 T+1 复盘尚未生成。")
+        lines.append(f"{msg}")
+        lines.append("")
+        lines.append("本模块将在 evaluation 链路完成后自动展示，不影响今日日报主体。")
+        lines.append("")
+
+    elif status == "defer":
+        lines.append("今日 T+1 复盘因行情缓存不足暂缓。")
+        lines.append("当前不对昨日观察池表现下结论。")
+        lines.append("")
+
+    elif status == "insufficient":
+        td = t1_data
+        lines.append("今日 T+1 复盘覆盖不足，暂不下结论。")
+        lines.append("")
+        lines.append("| 项目 | 结果 |")
+        lines.append("|------|------|")
+        lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
+        lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
+        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
+        lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        lines.append("")
+        lines.append("> 覆盖不足时不展示胜率、平均收益和强结论。")
+        lines.append("")
+
+    elif status == "partial":
+        td = t1_data
+        lines.append("> T+1 覆盖率偏低，结果仅供观察，不作为稳定结论。")
+        lines.append("")
+        lines.append("| 项目 | 结果 |")
+        lines.append("|------|------|")
+        lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
+        lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
+        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
+        lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        lines.append(f"| 平均次日收益 | {_fmt_pct(td.get('avg_return_1d'))} |")
+        lines.append(f"| 次日胜率 | {_fmt_pct(td.get('win_rate_1d'))} |")
+        lines.append(f"| 分层倒挂 | {'**是**' if td.get('inversion') else '否'} |")
+        lines.append(f"| 风险预警 | {'**有**' if td.get('risk_warning') else '无'} |")
+        lines.append(f"| 结论等级 | {td.get('conclusion_level', 'N/A')} |")
+        lines.append("")
+        top = td.get("top_winners", [])
+        bottom = td.get("top_losers", [])
+        if top or bottom:
+            lines.append("> 样本覆盖不足，个股表现仅作为局部参考。")
+            lines.append("")
+            if top:
+                for s in top:
+                    lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
+            if bottom:
+                for s in bottom:
+                    lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
+            lines.append("")
+
+    else:
+        # ok
         td = t1_data
         lines.append("| 项目 | 结果 |")
         lines.append("|------|------|")
@@ -253,31 +315,22 @@ def render_unified_report(
         lines.append(f"| 平均次日收益 | {_fmt_pct(td.get('avg_return_1d'))} |")
         lines.append(f"| 次日胜率 | {_fmt_pct(td.get('win_rate_1d'))} |")
         lines.append(f"| 分层倒挂 | {'**是**' if td.get('inversion') else '否'} |")
-        lines.append(f"| 风险提示有效 | {'是' if not td.get('risk_warning') else '**否**'} |")
+        lines.append(f"| 风险预警 | {'**有**' if td.get('risk_warning') else '无'} |")
         lines.append(f"| 结论等级 | {td.get('conclusion_level', 'N/A')} |")
         lines.append("")
-
-        # Top/Bottom
         top = td.get("top_winners", [])
         bottom = td.get("top_losers", [])
         if top:
             lines.append("**表现较好：**")
             for s in top:
-                ret_str = _fmt_pct(s["ret"])
-                lines.append(f"- {s['name']}（{s.get('layer','')}）：{ret_str}")
+                lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
             lines.append("")
         if bottom:
             lines.append("**表现较弱：**")
             for s in bottom:
-                ret_str = _fmt_pct(s["ret"])
-                lines.append(f"- {s['name']}（{s.get('layer','')}）：{ret_str}")
+                lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
             lines.append("")
-    else:
-        msg = (t1_data or {}).get("message", "今日 T+1 复盘尚未生成。")
-        lines.append(f"{msg}")
-        lines.append("")
-        lines.append("本模块将在 evaluation 链路完成后自动展示，不影响今日日报主体。")
-        lines.append("")
+
     lines.append("---")
     lines.append("")
 
@@ -305,7 +358,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     lines.append("## 3. 市场状态")
     lines.append("")
-    lines.append("### 2.1 大盘指数")
+    lines.append("### 3.1 大盘指数")
     indices = market.get("indices", [])
     if indices:
         lines.append("| 指数 | 收盘 | 涨跌幅 | 成交额(亿) |")
@@ -316,7 +369,7 @@ def render_unified_report(
         lines.append("指数数据暂缺")
     lines.append("")
 
-    lines.append("### 2.2 市场宽度")
+    lines.append("### 3.2 市场宽度")
     lines.append("")
     lines.append("| 指标 | 数值 | 判断 |")
     lines.append("|------|------|------|")
@@ -514,7 +567,7 @@ def render_unified_report(
         receding = [(n, c) for n, c in obs_directions if c < 0][:5]
 
         if obs_main:
-            lines.append("### 6.1 有效主线 / 观察主线")
+            lines.append("### 7.1 有效主线 / 观察主线")
             lines.append("")
             lines.append("| 方向 | 依据 | 风险 |")
             lines.append("|------|------|------|")
@@ -535,7 +588,7 @@ def render_unified_report(
             lines.append("")
 
         if receding:
-            lines.append("### 6.2 退潮方向")
+            lines.append("### 7.2 退潮方向")
             lines.append("")
             lines.append("| 方向 | 依据 | 说明 |")
             lines.append("|------|------|------|")
@@ -545,7 +598,7 @@ def render_unified_report(
             lines.append("")
 
     if dynamic_themes:
-        lines.append("### 6.3 动态标签（不作为主线）")
+        lines.append("### 7.3 动态标签（不作为主线）")
         lines.append("")
         dynamic_names = ", ".join(t["name"] for t in dynamic_themes[:8])
         lines.append(f"  {dynamic_names}")
