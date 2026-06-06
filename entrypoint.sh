@@ -2,6 +2,7 @@
 set -e
 
 TRADE_DATE=${TRADE_DATE:-$(date +%Y%m%d)}
+SEND_DAILY_EMAIL="${SEND_DAILY_EMAIL:-1}"
 echo "=== 日期：$TRADE_DATE ==="
 
 # 非交易日跳过全部流程
@@ -36,12 +37,16 @@ python -m analysis.backtest_report || echo "[警告] 策略统计生成失败"
 
 echo "=== 推送消息 ==="
 
-if [ "$PUSH_CHANNEL" = "email" ]; then
-    python -m analysis.email_sender --date "$TRADE_DATE" || echo "[警告] 邮件推送失败，但报告已生成"
-elif [ "$PUSH_CHANNEL" = "feishu" ]; then
-    python -m analysis.feishu_sender || echo "[警告] 飞书推送失败，但报告已生成"
+if [ "$SEND_DAILY_EMAIL" = "1" ]; then
+    if [ "$PUSH_CHANNEL" = "email" ]; then
+        python -m analysis.email_sender --date "$TRADE_DATE" || echo "[警告] 邮件推送失败，但报告已生成"
+    elif [ "$PUSH_CHANNEL" = "feishu" ]; then
+        python -m analysis.feishu_sender || echo "[警告] 飞书推送失败，但报告已生成"
+    else
+        echo "PUSH_CHANNEL=$PUSH_CHANNEL，跳过推送"
+    fi
 else
-    echo "PUSH_CHANNEL=$PUSH_CHANNEL，跳过推送"
+    echo "[INFO] SEND_DAILY_EMAIL=0, skip daily email"
 fi
 
 echo "=== 完成 ==="

@@ -168,7 +168,7 @@ def render_unified_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
     trade_plan=None, board_trend_summary=None, report_context=None,
-    themes=None,
+    themes=None, t1_data=None,
 ):
     date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
     lines = []
@@ -237,9 +237,54 @@ def render_unified_report(
     lines.append("")
 
     # ══════════════════════════════════════
-    # 1. 交易环境判断
+    # 1. 昨日观察池兑现复盘（T+1）
     # ══════════════════════════════════════
-    lines.append("## 1. 交易环境判断")
+    lines.append("## 1. 昨日观察池兑现复盘（T+1）")
+    lines.append("")
+    if t1_data and t1_data.get("available"):
+        td = t1_data
+        lines.append("| 项目 | 结果 |")
+        lines.append("|------|------|")
+        lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
+        lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
+        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
+        lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        lines.append(f"| 平均次日收益 | {_fmt_pct(td.get('avg_return_1d'))} |")
+        lines.append(f"| 次日胜率 | {_fmt_pct(td.get('win_rate_1d'))} |")
+        lines.append(f"| 分层倒挂 | {'**是**' if td.get('inversion') else '否'} |")
+        lines.append(f"| 风险提示有效 | {'是' if not td.get('risk_warning') else '**否**'} |")
+        lines.append(f"| 结论等级 | {td.get('conclusion_level', 'N/A')} |")
+        lines.append("")
+
+        # Top/Bottom
+        top = td.get("top_winners", [])
+        bottom = td.get("top_losers", [])
+        if top:
+            lines.append("**表现较好：**")
+            for s in top:
+                ret_str = _fmt_pct(s["ret"])
+                lines.append(f"- {s['name']}（{s.get('layer','')}）：{ret_str}")
+            lines.append("")
+        if bottom:
+            lines.append("**表现较弱：**")
+            for s in bottom:
+                ret_str = _fmt_pct(s["ret"])
+                lines.append(f"- {s['name']}（{s.get('layer','')}）：{ret_str}")
+            lines.append("")
+    else:
+        msg = (t1_data or {}).get("message", "今日 T+1 复盘尚未生成。")
+        lines.append(f"{msg}")
+        lines.append("")
+        lines.append("本模块将在 evaluation 链路完成后自动展示，不影响今日日报主体。")
+        lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 2. 交易环境判断
+    # ══════════════════════════════════════
+    lines.append("## 2. 交易环境判断")
     lines.append("")
     lines.append("| 维度 | 当前状态 | 解释 |")
     lines.append("|------|----------|------|")
@@ -258,7 +303,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 2. 市场状态
     # ══════════════════════════════════════
-    lines.append("## 2. 市场状态")
+    lines.append("## 3. 市场状态")
     lines.append("")
     lines.append("### 2.1 大盘指数")
     indices = market.get("indices", [])
@@ -294,7 +339,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 3. 弱市不做检查
     # ══════════════════════════════════════
-    lines.append("## 3. 弱市不做检查")
+    lines.append("## 4. 弱市不做检查")
     lines.append("")
     lines.append(f"**弱市不做：{weak_tag}**")
     lines.append("")
@@ -326,7 +371,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 4. 情绪周期与赚钱效应
     # ══════════════════════════════════════
-    lines.append("## 4. 情绪周期与赚钱效应")
+    lines.append("## 5. 情绪周期与赚钱效应")
     lines.append("")
     lines.append("| 指标 | 当前值 | 信号 |")
     lines.append("|------|--------|------|")
@@ -348,7 +393,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 5. 资金流向（复用 board_ratio_changes + board_trend）
     # ══════════════════════════════════════
-    lines.append("## 5. 资金流向")
+    lines.append("## 6. 资金流向")
     lines.append("")
     if board_ratio_changes:
         # 行业表格（原样保留）
@@ -434,7 +479,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 6. 主线分析
     # ══════════════════════════════════════
-    lines.append("## 6. 主线分析")
+    lines.append("## 7. 主线分析")
     lines.append("")
 
     # 从 board_ratio_changes 提取产业概念作为观察方向
@@ -531,7 +576,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 7. 弱市例外扫描
     # ══════════════════════════════════════
-    lines.append("## 7. 弱市例外扫描")
+    lines.append("## 8. 弱市例外扫描")
     lines.append("")
     if weak_triggers >= 2:
         lines.append("当前弱市触发条件较多，以下为弱市环境下的例外扫描：")
@@ -545,9 +590,9 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 8. 风险提示
     # ══════════════════════════════════════
-    lines.append("## 8. 风险提示")
+    lines.append("## 9. 风险提示")
     lines.append("")
-    lines.append("### 8.1 市场风险")
+    lines.append("### 9.1 市场风险")
     sentiment_stage = s_stage
     if sentiment_stage in ("高潮", "过热"):
         lines.append(f"- 短线情绪处于**{sentiment_stage}**，需警惕高潮后分歧。涨停家数较多但不宜在高潮阶段盲目追高。")
@@ -567,7 +612,7 @@ def render_unified_report(
     # 板块风险：从资金流出方向提取
     receding_list = [(n, c) for n, c in obs_directions if c < 0][:5] if obs_directions else []
     if receding_list:
-        lines.append("### 8.2 板块风险")
+        lines.append("### 9.2 板块风险")
         receding_names = "、".join(n for n, _ in receding_list[:5])
         lines.append(f"- {receding_names} 短期资金流出，相关个股降低追高优先级。")
         if any(True for n, c in obs_directions if c > 0):
@@ -576,7 +621,7 @@ def render_unified_report(
         lines.append("")
 
     # 观察池风险
-    lines.append("### 8.3 观察池风险")
+    lines.append("### 9.3 观察池风险")
     # 从 selectors 直接统计
     n_count = 0
     caution_count = 0
@@ -599,7 +644,7 @@ def render_unified_report(
     lines.append("")
 
     # 数据风险
-    lines.append("### 8.4 数据风险")
+    lines.append("### 9.4 数据风险")
     lines.append(f"- 报告可信度：{quality.get('confidence_score', 0)} / 100")
     if profit["downgraded"]:
         lines.append("- 赚钱效应为降级判断（缺少连板高度、炸板率、昨涨停表现）")
@@ -612,7 +657,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 9. 机会观察
     # ══════════════════════════════════════
-    lines.append("## 9. 机会观察")
+    lines.append("## 10. 机会观察")
     lines.append("")
     obs_main_list = [(n, c) for n, c in obs_directions if c > 0][:5] if obs_directions else []
     receding_list = [(n, c) for n, c in obs_directions if c < 0][:3] if obs_directions else []
@@ -639,7 +684,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 10. 观察池
     # ══════════════════════════════════════
-    lines.append("## 10. 观察池")
+    lines.append("## 11. 观察池")
     lines.append("")
     if not quality.get("has_volume_ratio", True):
         lines.append("> 当前数据源缺少量比字段，量比相关筛选已自动降级。")
@@ -653,7 +698,7 @@ def render_unified_report(
         # 10.1 候选低吸
         low_buy = tp_plans.get("候选低吸", [])
         if low_buy:
-            lines.append(f"### 10.1 候选低吸（{tp_summary.get('候选低吸', len(low_buy))}只）")
+            lines.append(f"### 11.1 候选低吸（{tp_summary.get('候选低吸', len(low_buy))}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
             lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
@@ -671,7 +716,7 @@ def render_unified_report(
         # 10.2 只观察
         watch_only = tp_plans.get("只观察", [])
         if watch_only:
-            lines.append(f"### 10.2 只观察（{tp_summary.get('只观察', len(watch_only))}只）")
+            lines.append(f"### 11.2 只观察（{tp_summary.get('只观察', len(watch_only))}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
             lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
@@ -699,7 +744,7 @@ def render_unified_report(
                 else:
                     cf_seen[key] = dict(st)
             cond_fail = list(cf_seen.values())
-            lines.append(f"### 10.3 交易条件不满足（{len(cond_fail)}只）")
+            lines.append(f"### 11.3 交易条件不满足（{len(cond_fail)}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 当前状态 | 原因 | 处理 |")
             lines.append("|------|----------|----------|------|------|")
@@ -710,7 +755,7 @@ def render_unified_report(
 
         # 10.4 高风险回避（始终展示，与 trade_plan 对齐）
         high_risk = tp_plans.get("高风险回避", [])
-        lines.append(f"### 10.4 高风险回避（{len(high_risk)}只）")
+        lines.append(f"### 11.4 高风险回避（{len(high_risk)}只）")
         lines.append("")
         if high_risk:
             lines.append("| 股票 | 策略来源 | 高风险原因 | 只复盘不买原因 |")
@@ -724,7 +769,7 @@ def render_unified_report(
         # 10.5 不可交易过滤
         excluded = tp_plans.get("不可交易过滤", [])
         if excluded:
-            lines.append(f"### 10.5 不可交易过滤（{tp_summary.get('不可交易过滤', len(excluded))}只）")
+            lines.append(f"### 11.5 不可交易过滤（{tp_summary.get('不可交易过滤', len(excluded))}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 原因 | 处理 |")
             lines.append("|------|----------|------|------|")
@@ -743,7 +788,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 11. 明日验证清单
     # ══════════════════════════════════════
-    lines.append("## 11. 明日验证清单")
+    lines.append("## 12. 明日验证清单")
     lines.append("")
     checklist = generate_validation_checklist(market, effective_themes, profit, weak_triggers)
     for i, item in enumerate(checklist):
@@ -753,12 +798,12 @@ def render_unified_report(
     lines.append("")
 
     # ══════════════════════════════════════
-    # 12. 交易计划摘要
+    # 13. 交易计划摘要
     # ══════════════════════════════════════
     if trade_plan:
         r = trade_plan.get("market_restrictions", {})
         s = trade_plan.get("summary", {})
-        lines.append("## 12. 交易计划摘要")
+        lines.append("## 13. 交易计划摘要")
         lines.append("")
         if not r.get("allow_real_trade", True):
             lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
@@ -772,7 +817,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 13. 纪律
     # ══════════════════════════════════════
-    lines.append("## 13. 纪律")
+    lines.append("## 14. 纪律")
     lines.append("")
     lines.append("- 不追高；")
     lines.append(f"- 总仓位不超过 trade_plan 上限（{pos['max_pct']}成）；")
@@ -787,7 +832,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 14. 数据可信度
     # ══════════════════════════════════════
-    lines.append("## 14. 数据可信度")
+    lines.append("## 15. 数据可信度")
     lines.append("")
     lines.append("| 项目 | 状态 | 说明 |")
     lines.append("|------|------|------|")
@@ -846,6 +891,7 @@ def render_daily_report(
         trade_plan=trade_plan, board_trend_summary=board_trend_summary,
         report_context=report_context,
         themes=themes,
+        t1_data=t1_data,
     )
 
 
