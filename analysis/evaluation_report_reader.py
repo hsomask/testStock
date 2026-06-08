@@ -122,9 +122,38 @@ def load_t1_evaluation_summary(as_of_date):
     读取 T+1 evaluation 摘要。
     返回 {"available": bool, ...} 或 {"available": False, "status": "missing/defer/error"}
     """
+    # 1. DB summary
     row = _try_db(as_of_date)
+    # 2. evaluation result JSON
     if not row:
         row = _try_file(as_of_date)
+    # 3. status file (defer 时写入)
+    if not row:
+        status_path = EVAL_DIR / f"evaluation_status_{as_of_date}.json"
+        if status_path.exists():
+            try:
+                sf = json.loads(status_path.read_text(encoding="utf-8"))
+                return {
+                    "available": False,
+                    "status": sf.get("status", "defer"),
+                    "message": sf.get("message", "今日 T+1 复盘暂缓。"),
+                    "signal_date": sf.get("signal_date", ""),
+                    "as_of_date": sf.get("as_of_date", as_of_date),
+                    "total_signals": sf.get("total_signals", 0),
+                    "evaluated_1d": 0,
+                    "coverage_1d": sf.get("price_cache_coverage", 0),
+                    "avg_return_1d": None,
+                    "win_rate_1d": None,
+                    "inversion": False,
+                    "risk_warning": False,
+                    "confidence_level": "",
+                    "conclusion_level": "",
+                    "top_winners": [],
+                    "top_losers": [],
+                    "messages": [],
+                }
+            except Exception:
+                pass
 
     if not row:
         return {"available": False, "status": "missing", "message": "今日 T+1 复盘尚未生成。"}

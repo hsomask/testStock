@@ -13,7 +13,7 @@ from datetime import datetime
 import psycopg2
 
 from data.config import DATABASE_DSN
-from analysis.data_fetcher import is_trade_day
+from analysis.data_fetcher import is_trade_day, get_stock_history
 
 
 def get_db_conn():
@@ -61,27 +61,80 @@ def check_existing_evaluation(cur, signal_date, as_of_date):
     return cur.fetchone()[0]
 
 
-def check_price_cache(cur, signal_date, as_of_date):
-    """检查 signal 股票中已有 as_of 行情的比例"""
-    if not table_exists(cur, "stock_hist_kline"):
-        return 0, 0, 0
-
+def check_signal_pool_coverage(cur, signal_date, as_of_date, try_fill=True):
+    """
+    按观察池股票（stock_signal.code）检查行情覆盖率。
+    如果覆盖率不足且 try_fill=True，尝试 get_stock_history 补齐缺失 K 线。
+    返回 (signal_count, covered_count, coverage, missing_codes, scope)
+    """
     sql_signal = f"{signal_date[:4]}-{signal_date[4:6]}-{signal_date[6:8]}"
     sql_asof = f"{as_of_date[:4]}-{as_of_date[4:6]}-{as_of_date[6:8]}"
 
-    cur.execute("SELECT COUNT(DISTINCT code) FROM stock_signal WHERE trade_date = %s", (sql_signal,))
-    signal_count = cur.fetchone()[0]
+    if not table_exists(cur, "stock_signal"):
+        return 0, 0, 0, [], "no_signal_table"
 
-    cur.execute(
-        "SELECT COUNT(DISTINCT s.code) FROM stock_signal s "
-        "JOIN stock_hist_kline h ON s.code = h.code "
-        "WHERE s.trade_date = %s AND h.trade_date = %s",
-        (sql_signal, sql_asof),
-    )
-    cached_count = cur.fetchone()[0]
+    # 获取观察池股票列表
+    cur.execute("SELECT DISTINCT code FROM stock_signal WHERE trade_date = %s", (sql_signal,))
+    signal_codes = [row[0] for row in cur.fetchall()]
+    signal_count = len(signal_codes)
 
-    coverage = cached_count / signal_count if signal_count > 0 else 0
-    return signal_count, cached_count, coverage
+    if signal_count == 0:
+        return 0, 0, 0, [], "no_signal_pool"
+
+    # 检查每只股票是否有 signal_date 和 as_of_date 的 K 线
+    covered = 0
+    missing_codes = []
+
+    for code in signal_codes:
+        cur.execute(
+            "SELECT COUNT(*) FROM stock_hist_kline WHERE code = %s AND trade_date IN (%s, %s)",
+            (code, sql_signal, sql_asof),
+        )
+        days_found = cur.fetchone()[0]
+        if days_found >= 2:
+            covered += 1
+        else:
+            missing_codes.append(code)
+
+    coverage = covered / signal_count if signal_count > 0 else 0
+
+    # 如果覆盖不足，尝试补齐缺失股票的 K 线
+    if try_fill and coverage < 0.8 and missing_codes:
+        import sys as _sys
+        print(f"  观察池行情覆盖率 {coverage:.1%}，尝试补齐 {len(missing_codes)} 只缺失股票...", file=_sys.stderr)
+        filled = 0
+        for code in missing_codes:
+            try:
+                # 先用 80 天走缓存，不够再用 500 天绕过缓存
+                hist = get_stock_history(code, days=80)
+                if hist is not None and not hist.empty:
+                    dates = hist["date"].astype(str).str[:10]
+                    last_date = dates.max()
+                    if last_date < sql_asof:
+                        hist = get_stock_history(code, days=500)
+                if hist is not None and not hist.empty:
+                    filled += 1
+            except Exception:
+                pass
+        print(f"  补齐完成：{filled}/{len(missing_codes)}", file=_sys.stderr)
+
+        # 重新计算覆盖率
+        covered2 = 0
+        missing2 = []
+        for code in signal_codes:
+            cur.execute(
+                "SELECT COUNT(*) FROM stock_hist_kline WHERE code = %s AND trade_date IN (%s, %s)",
+                (code, sql_signal, sql_asof),
+            )
+            if cur.fetchone()[0] >= 2:
+                covered2 += 1
+            else:
+                missing2.append(code)
+        covered = covered2
+        missing_codes = missing2
+        coverage = covered / signal_count if signal_count > 0 else 0
+
+    return signal_count, covered, coverage, missing_codes, "signal_pool"
 
 
 def main():
@@ -180,8 +233,10 @@ def main():
     elif existing_count > 0:
         warnings.append(f"已存在 {existing_count} 条 daily evaluation 记录，重复运行将触发 upsert 覆盖")
 
-    # ── 行情缓存覆盖率 ──
-    sig_cnt, cached_cnt, cache_cov = check_price_cache(cur, signal_date, as_of_date)
+    # ── 观察池行情覆盖率 ──
+    sig_cnt, covered_cnt, cache_cov, missing_codes, cov_scope = check_signal_pool_coverage(
+        cur, signal_date, as_of_date, try_fill=True
+    )
     defer_evaluation = (cache_cov < 0.8 and sig_cnt > 0)
 
     cur.close()
@@ -199,9 +254,12 @@ def main():
     # ── 状态判定 ──
     if signal_count == 0 or not trade_day_ok:
         status = "skip"
+    elif cov_scope == "no_signal_pool":
+        status = "defer"
+        warnings.append("未找到昨日观察池，T+1 复盘暂缓")
     elif defer_evaluation:
         status = "defer"
-        warnings.append(f"as_of 行情缓存覆盖率 {cache_cov:.1%}，低于 80%，暂缓 evaluation")
+        warnings.append(f"观察池价格覆盖率 {cache_cov:.1%}，低于 80%，暂缓 evaluation")
     elif warnings:
         status = "warning"
     else:
@@ -218,8 +276,10 @@ def main():
             "existing_evaluation": existing_count > 0,
             "summary_table_exists": summary_table_exists,
             "price_cache_coverage": cache_cov,
-            "price_cache_cached": cached_cnt,
+            "coverage_scope": cov_scope,
+            "price_cache_cached": covered_cnt,
             "price_cache_signal_total": sig_cnt,
+            "missing_codes": missing_codes[:10],
             "warnings": warnings,
             "recommended_commands": recommended,
         }
@@ -232,9 +292,9 @@ def main():
         print(f"  stock_signal:  {signal_count} 条")
         print(f"  已有评价记录:  {'是' if existing_count > 0 else '否'}")
         if sig_cnt > 0:
-            print(f"  行情缓存覆盖:  {cached_cnt}/{sig_cnt} = {cache_cov:.1%}")
+            print(f"  观察池行情:    {covered_cnt}/{sig_cnt} = {cache_cov:.1%}（范围: {cov_scope}）")
         else:
-            print(f"  行情缓存覆盖:  N/A（无信号或 hist_kline 表不存在）")
+            print(f"  观察池行情:    N/A（无信号数据）")
 
         print(f"\n  状态: {status.upper()}")
         if warnings:
