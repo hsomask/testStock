@@ -52,6 +52,7 @@ from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
 from analysis.selector import run_all_selectors
 from analysis.report_renderer import render_daily_report, save_report
+from analysis.evaluation_report_reader import load_t1_evaluation_summary
 from analysis.data_quality import check_data_quality
 from analysis.theme_detector import detect_main_themes
 from data.config import DATABASE_DSN
@@ -362,6 +363,9 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
                          trade_plan=None, board_trend_summary=None,
                          report_context=None):
     """生成单个模式的报告并保存，返回报告文本"""
+    # 读取 T+1 evaluation 结果
+    t1_data = load_t1_evaluation_summary(trade_date)
+
     report = render_daily_report(
         trade_date=trade_date,
         data_status=data_status,
@@ -377,6 +381,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         trade_plan=trade_plan,
         board_trend_summary=board_trend_summary,
         report_context=report_context,
+        t1_data=t1_data,
     )
     path = save_report(report, trade_date, mode)
     try:

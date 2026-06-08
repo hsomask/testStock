@@ -31,7 +31,31 @@ if [ "$STATUS" = "skip" ]; then
 fi
 
 if [ "$STATUS" = "defer" ]; then
-    echo "[DEFER] Scheduler check returned defer, price cache not ready. Exiting without evaluation."
+    echo "[DEFER] Scheduler check returned defer, writing status file."
+    # 写 status 文件供日报读取
+    STATUS_FILE="reports/evaluation/evaluation_status_${AS_OF_DATE}.json"
+    mkdir -p reports/evaluation
+    PYTHONIOENCODING=utf-8 python -c "
+import json
+with open('$CHECK_FILE', encoding='utf-8') as f:
+    sc = json.load(f)
+status_data = {
+    'available': False,
+    'status': 'defer',
+    'as_of_date': sc.get('as_of_date', '$AS_OF_DATE'),
+    'signal_date': sc.get('signal_date', ''),
+    'reason': 'observer_pool_price_not_ready',
+    'message': '今日 T+1 复盘因观察池价格覆盖不足暂缓。',
+    'coverage_scope': sc.get('coverage_scope', 'signal_pool'),
+    'price_cache_coverage': sc.get('price_cache_coverage', 0),
+    'total_signals': sc.get('signal_count', 0),
+    'covered_signals': sc.get('price_cache_cached', 0),
+    'missing_codes': sc.get('missing_codes', []),
+}
+with open('$STATUS_FILE', 'w', encoding='utf-8') as f:
+    json.dump(status_data, f, ensure_ascii=False, indent=2)
+print(f'Status file written: $STATUS_FILE')
+"
     exit 0
 fi
 
