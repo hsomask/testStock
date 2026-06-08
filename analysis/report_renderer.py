@@ -935,7 +935,7 @@ def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
     quality=None, themes=None, trade_plan=None, board_trend_summary=None,
-    report_context=None,
+    report_context=None, t1_data=None,
 ):
     """统一入口：所有 mode 走同一份主日报"""
     return render_unified_report(

@@ -99,13 +99,16 @@ def check_signal_pool_coverage(cur, signal_date, as_of_date, try_fill=True):
     coverage = covered / signal_count if signal_count > 0 else 0
 
     # 如果覆盖不足，尝试补齐缺失股票的 K 线
+    attempted_fill = 0
+    fill_success = 0
+    upstream_lag_codes = []
+
     if try_fill and coverage < 0.8 and missing_codes:
         import sys as _sys
-        print(f"  观察池行情覆盖率 {coverage:.1%}，尝试补齐 {len(missing_codes)} 只缺失股票...", file=_sys.stderr)
-        filled = 0
+        attempted_fill = len(missing_codes)
+        print(f"  观察池行情覆盖率 {coverage:.1%}，尝试补齐 {attempted_fill} 只缺失股票...", file=_sys.stderr)
         for code in missing_codes:
             try:
-                # 先用 80 天走缓存，不够再用 500 天绕过缓存
                 hist = get_stock_history(code, days=80)
                 if hist is not None and not hist.empty:
                     dates = hist["date"].astype(str).str[:10]
@@ -113,15 +116,19 @@ def check_signal_pool_coverage(cur, signal_date, as_of_date, try_fill=True):
                     if last_date < sql_asof:
                         hist = get_stock_history(code, days=500)
                 if hist is not None and not hist.empty:
-                    filled += 1
+                    fill_success += 1
             except Exception:
                 pass
-        print(f"  补齐完成：{filled}/{len(missing_codes)}", file=_sys.stderr)
+        print(f"  补齐完成：{fill_success}/{attempted_fill}", file=_sys.stderr)
 
         # 重新计算覆盖率
         covered2 = 0
         missing2 = []
-        for code in signal_codes:
+        # 重新获取信号池（可能因新股上市等原因变化）
+        cur.execute("SELECT DISTINCT code FROM stock_signal WHERE trade_date = %s", (sql_signal,))
+        signal_codes2 = [row[0] for row in cur.fetchall()]
+        total2 = len(signal_codes2)
+        for code in signal_codes2:
             cur.execute(
                 "SELECT COUNT(*) FROM stock_hist_kline WHERE code = %s AND trade_date IN (%s, %s)",
                 (code, sql_signal, sql_asof),
@@ -129,12 +136,23 @@ def check_signal_pool_coverage(cur, signal_date, as_of_date, try_fill=True):
             if cur.fetchone()[0] >= 2:
                 covered2 += 1
             else:
-                missing2.append(code)
+                # 识别上游延迟：填了但数据仍不覆盖的
+                cur.execute("SELECT MAX(trade_date) FROM stock_hist_kline WHERE code = %s", (code,))
+                max_dt = cur.fetchone()[0]
+                max_dt_str = max_dt.strftime("%Y-%m-%d") if max_dt else "N/A"
+                if max_dt and max_dt_str < sql_signal:
+                    upstream_lag_codes.append(code)
+
+        signal_count = total2
         covered = covered2
         missing_codes = missing2
         coverage = covered / signal_count if signal_count > 0 else 0
 
-    return signal_count, covered, coverage, missing_codes, "signal_pool"
+    upstream_lag_note = ""
+    if upstream_lag_codes:
+        upstream_lag_note = f"上游 K 线数据延迟（{len(upstream_lag_codes)} 只股票最新数据早于信号日），无法强行评价。"
+
+    return signal_count, covered, coverage, missing_codes, "signal_pool", attempted_fill, fill_success, upstream_lag_codes, upstream_lag_note
 
 
 def main():
@@ -234,7 +252,7 @@ def main():
         warnings.append(f"已存在 {existing_count} 条 daily evaluation 记录，重复运行将触发 upsert 覆盖")
 
     # ── 观察池行情覆盖率 ──
-    sig_cnt, covered_cnt, cache_cov, missing_codes, cov_scope = check_signal_pool_coverage(
+    sig_cnt, covered_cnt, cache_cov, missing_codes, cov_scope, attempted_fill, fill_success, upstream_lag_codes, upstream_lag_note = check_signal_pool_coverage(
         cur, signal_date, as_of_date, try_fill=True
     )
     defer_evaluation = (cache_cov < 0.8 and sig_cnt > 0)
@@ -252,13 +270,20 @@ def main():
         ]
 
     # ── 状态判定 ──
+    defer_reason = ""
     if signal_count == 0 or not trade_day_ok:
         status = "skip"
     elif cov_scope == "no_signal_pool":
         status = "defer"
+        defer_reason = "no_signal_pool"
         warnings.append("未找到昨日观察池，T+1 复盘暂缓")
     elif defer_evaluation:
         status = "defer"
+        if upstream_lag_codes:
+            defer_reason = "upstream_kline_lag"
+            warnings.append(f"上游 K 线延迟，{len(upstream_lag_codes)} 只股票最新数据早于信号日")
+        else:
+            defer_reason = "observer_pool_price_not_ready"
         warnings.append(f"观察池价格覆盖率 {cache_cov:.1%}，低于 80%，暂缓 evaluation")
     elif warnings:
         status = "warning"
@@ -280,6 +305,11 @@ def main():
             "price_cache_cached": covered_cnt,
             "price_cache_signal_total": sig_cnt,
             "missing_codes": missing_codes[:10],
+            "attempted_fill": attempted_fill,
+            "fill_success": fill_success,
+            "upstream_lag_codes": upstream_lag_codes[:10],
+            "upstream_lag_note": upstream_lag_note,
+            "defer_reason": defer_reason,
             "warnings": warnings,
             "recommended_commands": recommended,
         }
