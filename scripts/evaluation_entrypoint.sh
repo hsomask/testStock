@@ -39,17 +39,33 @@ if [ "$STATUS" = "defer" ]; then
 import json
 with open('$CHECK_FILE', encoding='utf-8') as f:
     sc = json.load(f)
+
+defer_reason = sc.get('defer_reason', 'observer_pool_price_not_ready')
+upstream_note = sc.get('upstream_lag_note', '')
+msg_map = {
+    'upstream_kline_lag': '今日 T+1 复盘因上游 K 线延迟暂缓。部分股票历史行情未更新到评价日。',
+    'observer_pool_price_not_ready': '今日 T+1 复盘因观察池价格覆盖不足暂缓。',
+    'no_signal_pool': '未找到昨日观察池，今日 T+1 复盘暂缓。',
+}
+message = msg_map.get(defer_reason, '今日 T+1 复盘暂缓。')
+if upstream_note and defer_reason == 'upstream_kline_lag':
+    message += ' ' + upstream_note
+
 status_data = {
     'available': False,
     'status': 'defer',
     'as_of_date': sc.get('as_of_date', '$AS_OF_DATE'),
     'signal_date': sc.get('signal_date', ''),
-    'reason': 'observer_pool_price_not_ready',
-    'message': '今日 T+1 复盘因观察池价格覆盖不足暂缓。',
+    'reason': defer_reason,
+    'message': message,
     'coverage_scope': sc.get('coverage_scope', 'signal_pool'),
     'price_cache_coverage': sc.get('price_cache_coverage', 0),
-    'total_signals': sc.get('signal_count', 0),
+    'total_signals': sc.get('price_cache_signal_total', sc.get('signal_count', 0)),
     'covered_signals': sc.get('price_cache_cached', 0),
+    'attempted_fill': sc.get('attempted_fill', 0),
+    'fill_success': sc.get('fill_success', 0),
+    'upstream_lag_codes': sc.get('upstream_lag_codes', []),
+    'upstream_lag_note': upstream_note,
     'missing_codes': sc.get('missing_codes', []),
 }
 with open('$STATUS_FILE', 'w', encoding='utf-8') as f:
