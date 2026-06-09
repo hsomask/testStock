@@ -10,7 +10,6 @@ from pathlib import Path
 from datetime import datetime
 
 from data.config import DATABASE_DSN, REPORT_DIR
-from analysis.data_fetcher import is_trade_day
 
 logger = logging.getLogger(__name__)
 
@@ -97,20 +96,17 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
             return None
 
         # 2. 读取当日全市场行情快照（东方财富，与 K 线源分离）
-        # 保护：只允许 as_of_date 为当天交易日，避免历史重渲染错用今天行情
+        # 保护：只有 as_of_date == today 才允许实时行情，历史日期必须读缓存
         today = datetime.now().strftime("%Y%m%d")
-        if as_of_date != today and not is_trade_day(as_of_date):
-            return None
-        if as_of_date != today:
-            # 非当天：检查是否有本地缓存，没有则降级
+        if as_of_date == today:
+            from analysis.data_fetcher import fetch_stock_spot
+            spot_df = fetch_stock_spot()
+        else:
             cache_path = REPORT_DIR / "cache" / f"stock_spot_{as_of_date}.json"
             if not cache_path.exists():
                 return None
             import pandas as pd
             spot_df = pd.read_json(cache_path, orient="records")
-        else:
-            from analysis.data_fetcher import fetch_stock_spot
-            spot_df = fetch_stock_spot()
         if spot_df is None or spot_df.empty:
             return None
 
@@ -175,7 +171,8 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
             "top_losers": bottom5,
         }
 
-    except Exception:
+    except Exception as e:
+        logger.warning("build_snapshot_t1_recap failed: %s", e)
         return None
 
 
