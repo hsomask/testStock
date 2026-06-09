@@ -13,6 +13,27 @@ logger = logging.getLogger(__name__)
 EVAL_DIR = REPORT_DIR / "evaluation"
 
 
+def _infer_signal_date(as_of_date):
+    """从 stock_signal 推断上一个交易日"""
+    if not DATABASE_DSN:
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_DSN)
+        cur = conn.cursor()
+        sql_date = f"{as_of_date[:4]}-{as_of_date[4:6]}-{as_of_date[6:8]}"
+        cur.execute("SELECT MAX(trade_date) FROM stock_signal WHERE trade_date < %s", (sql_date,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            td = row[0]
+            return td.strftime("%Y%m%d") if hasattr(td, "strftime") else str(td).replace("-", "")[:8]
+    except Exception:
+        pass
+    return None
+
+
 def _try_db(as_of_date):
     """从 watchlist_evaluation_summary 读取最新 daily evaluation"""
     if not DATABASE_DSN:
@@ -127,35 +148,58 @@ def load_t1_evaluation_summary(as_of_date):
     # 2. evaluation result JSON
     if not row:
         row = _try_file(as_of_date)
-    # 3. status file (defer 时写入)
+    # 3. status file (defer 时写入) → 尝试快照降级
+    kline_insufficient = False
+    status_signal_date = None
     if not row:
         status_path = EVAL_DIR / f"evaluation_status_{as_of_date}.json"
         if status_path.exists():
             try:
                 sf = json.loads(status_path.read_text(encoding="utf-8"))
-                return {
-                    "available": False,
-                    "status": sf.get("status", "defer"),
-                    "message": sf.get("message", "今日 T+1 复盘暂缓。"),
-                    "signal_date": sf.get("signal_date", ""),
-                    "as_of_date": sf.get("as_of_date", as_of_date),
-                    "total_signals": sf.get("total_signals", 0),
-                    "evaluated_1d": 0,
-                    "coverage_1d": sf.get("price_cache_coverage", 0),
-                    "avg_return_1d": None,
-                    "win_rate_1d": None,
-                    "inversion": False,
-                    "risk_warning": False,
-                    "confidence_level": "",
-                    "conclusion_level": "",
-                    "top_winners": [],
-                    "top_losers": [],
-                    "messages": [],
-                }
+                status_signal_date = sf.get("signal_date", "")
+                kline_cov = sf.get("price_cache_coverage", 0)
+                # K 线不足时，尝试快照复盘
+                if kline_cov < 0.8 and status_signal_date:
+                    kline_insufficient = True
+                else:
+                    # K 线足够但不是 coverage issue，直接返回 defer
+                    return {
+                        "available": False,
+                        "status": sf.get("status", "defer"),
+                        "message": sf.get("message", "今日 T+1 复盘暂缓。"),
+                        "signal_date": status_signal_date,
+                        "as_of_date": sf.get("as_of_date", as_of_date),
+                        "total_signals": sf.get("total_signals", 0),
+                        "evaluated_1d": 0, "coverage_1d": kline_cov,
+                        "avg_return_1d": None, "win_rate_1d": None,
+                        "inversion": False, "risk_warning": False,
+                        "confidence_level": "", "conclusion_level": "",
+                        "top_winners": [], "top_losers": [], "messages": [],
+                    }
             except Exception:
                 pass
 
+    # 4. 快照复盘降级（正式复盘不存在 + K 线覆盖不足）
     if not row:
+        signal_date_guess = status_signal_date or _infer_signal_date(as_of_date)
+        if signal_date_guess:
+            from analysis.evaluation_snapshot_recap import build_snapshot_t1_recap
+            snap = build_snapshot_t1_recap(signal_date_guess, as_of_date)
+            if snap:
+                return snap
+        # 快照也不足，返回 defer（复用 status 信息）
+        if kline_insufficient:
+            return {
+                "available": False, "status": "defer",
+                "message": "今日 T+1 复盘因 K 线和快照覆盖均不足暂缓。",
+                "signal_date": signal_date_guess or "",
+                "as_of_date": as_of_date,
+                "total_signals": 0, "evaluated_1d": 0, "coverage_1d": 0,
+                "avg_return_1d": None, "win_rate_1d": None,
+                "inversion": False, "risk_warning": False,
+                "confidence_level": "", "conclusion_level": "",
+                "top_winners": [], "top_losers": [], "messages": [],
+            }
         return {"available": False, "status": "missing", "message": "今日 T+1 复盘尚未生成。"}
 
     signal_date = row.get("signal_date", "")
