@@ -1,5 +1,6 @@
 """
 快照复盘：在正式 K 线覆盖不足时，使用当日行情快照生成降级 T+1 复盘。
+数据源：fetch_stock_spot 东方财富全市场快照（与 K 线源分离）。
 不写库、不改变 selector/trade_plan/evaluation 计算逻辑。
 """
 import json
@@ -25,7 +26,6 @@ def _load_kline_status(as_of_date):
 
 
 def _result_tag(pct_chg):
-    """根据涨跌幅返回结果标签"""
     if pct_chg is None:
         return "数据不足"
     if pct_chg >= 10:
@@ -42,24 +42,7 @@ def _result_tag(pct_chg):
         return "大跌"
 
 
-def _volume_short_note(pct_chg, volume):
-    """快照复盘量价简评"""
-    if volume is None:
-        return "数据不足"
-    up = (pct_chg or 0) > 0
-    if up and volume > 1e8:
-        return "放量上涨"
-    elif up:
-        return "上涨"
-    elif not up and pct_chg is not None and volume > 1e8:
-        return "放量下跌"
-    elif pct_chg is not None:
-        return "下跌"
-    return "数据不足"
-
-
 def _volume_note(volume_ratio):
-    """根据量比返回量价表现"""
     if volume_ratio is None:
         return "量价数据不足"
     try:
@@ -78,20 +61,18 @@ def _volume_note(volume_ratio):
 
 def build_snapshot_t1_recap(signal_date, as_of_date):
     """
-    使用当日行情快照生成降级 T+1 复盘。
-    数据来源：stock_signal（昨日观察池）+ 当日行情快照。
-
+    使用当日行情快照（东方财富全市场）生成降级 T+1 复盘。
+    数据源与 K 线分离：official 用 stock_hist_kline，snapshot 用 fetch_stock_spot。
     返回 dict 或 None（快照也不足时）。
     """
-    if not DATABASE_DSN:
-        return None
-
     try:
         import psycopg2
-        conn = psycopg2.connect(DATABASE_DSN)
-        cur = conn.cursor()
 
         # 1. 读取昨日观察池
+        conn = psycopg2.connect(DATABASE_DSN) if DATABASE_DSN else None
+        if not conn:
+            return None
+        cur = conn.cursor()
         sql_signal = f"{signal_date[:4]}-{signal_date[4:6]}-{signal_date[6:8]}"
         cur.execute(
             "SELECT DISTINCT code, name, close_price, risk_level, action_signal, strategy "
@@ -105,56 +86,49 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
                 "code": code, "name": row[1], "entry_close": float(row[2]) if row[2] else None,
                 "risk_level": row[3] or "", "action_signal": row[4] or "", "strategy": row[5] or "",
             }
-
-        total_signals = len(signal_stocks)
-        if total_signals == 0:
-            cur.close()
-            conn.close()
-            return None
-
-        # 2. 读取 as_of_date 行情快照（从 stock_hist_kline）
-        sql_asof = f"{as_of_date[:4]}-{as_of_date[4:6]}-{as_of_date[6:8]}"
-        codes_list = list(signal_stocks.keys())
-        placeholders = ",".join(["%s"] * len(codes_list))
-        cur.execute(
-            f"SELECT code, close, volume FROM stock_hist_kline "
-            f"WHERE code IN ({placeholders}) AND trade_date = %s",
-            (*codes_list, sql_asof),
-        )
-        asof_data = {}
-        for row in cur.fetchall():
-            code = row[0]
-            asof_data[code] = {
-                "close": float(row[1]) if row[1] else None,
-                "volume": float(row[2]) if row[2] else None,
-            }
-
         cur.close()
         conn.close()
 
-        # 3. 匹配结果
+        total_signals = len(signal_stocks)
+        if total_signals == 0:
+            return None
+
+        # 2. 读取当日全市场行情快照（东方财富，与 K 线源分离）
+        from analysis.data_fetcher import fetch_stock_spot
+        spot_df = fetch_stock_spot()
+        if spot_df is None or spot_df.empty:
+            return None
+
+        # 构建 code → 快照数据的映射
+        spot_map = {}
+        for _, row in spot_df.iterrows():
+            code = str(row.get("code", "")).strip()
+            spot_map[code] = {
+                "close": float(row["close"]) if row.get("close") else None,
+                "pct_chg": float(row["pct_chg"]) if row.get("pct_chg") else None,
+                "volume_ratio": float(row["volume_ratio"]) if row.get("volume_ratio") and not _is_nan(row.get("volume_ratio")) else None,
+                "turnover": float(row["turnover"]) if row.get("turnover") and not _is_nan(row.get("turnover")) else None,
+                "amount": float(row["amount"]) if row.get("amount") else None,
+            }
+
+        # 3. 匹配：昨日观察池 vs 今日快照
         evaluated = []
         for code, sig in signal_stocks.items():
-            ad = asof_data.get(code, {})
-            entry_close = sig.get("entry_close")
-            asof_close = ad.get("close")
-            vr = ad.get("volume")
-
-            pct_chg = None
-            if entry_close and asof_close and entry_close > 0:
-                pct_chg = (asof_close / entry_close - 1) * 100
+            spot = spot_map.get(code, {})
+            pct_chg = spot.get("pct_chg")
+            vr = spot.get("volume_ratio")
 
             evaluated.append({
                 "code": code,
                 "name": sig["name"],
                 "layer": sig["risk_level"],
                 "strategy": sig["strategy"],
-                "entry_close": entry_close,
-                "asof_close": asof_close,
+                "entry_close": sig.get("entry_close"),
+                "asof_close": spot.get("close"),
                 "pct_chg": round(pct_chg, 2) if pct_chg is not None else None,
-                "volume": round(vr, 0) if vr is not None else None,
+                "volume_ratio": round(vr, 1) if vr is not None else None,
                 "tag": _result_tag(pct_chg),
-                "volume_note": _volume_short_note(vr, ad.get("volume")),
+                "volume_note": _volume_note(vr),
             })
 
         snapshot_covered = sum(1 for e in evaluated if e["pct_chg"] is not None)
@@ -163,12 +137,11 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
         if snapshot_coverage < 0.8:
             return None
 
-        # 4. 排序，取 Top 5 / Bottom 5
+        # 4. 排序 Top 5 / Bottom 5
         evaluated.sort(key=lambda e: e["pct_chg"] if e["pct_chg"] is not None else -999, reverse=True)
         top5 = [e for e in evaluated if e["pct_chg"] is not None][:5]
         bottom5 = [e for e in evaluated if e["pct_chg"] is not None][-5:][::-1]
 
-        # K 线覆盖率
         kline_status = _load_kline_status(as_of_date)
         kline_cov = kline_status.get("price_cache_coverage") if kline_status else None
 
@@ -189,3 +162,11 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
 
     except Exception:
         return None
+
+
+def _is_nan(val):
+    try:
+        import numpy as np
+        return np.isnan(float(val))
+    except Exception:
+        return False
