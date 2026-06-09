@@ -164,6 +164,40 @@ def render_snowball_pool(df):
 
 # ── 统一主日报 ──
 
+def _fmt_pct(val):
+    if val is None:
+        return "N/A"
+    return f"{val * 100:.2f}%"
+
+
+def _render_snapshot_stocks(lines, td):
+    """快照复盘：展示 Top/Bottom 表现"""
+    top = td.get("top_winners", [])
+    bottom = td.get("top_losers", [])
+    if top:
+        lines.append("### 表现较好")
+        lines.append("")
+        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 |")
+        lines.append("|------|----------|----------|------|------|")
+        for s in top:
+            pct_str = _fmt_pct(s.get("pct_chg", 0) / 100) if s.get("pct_chg") is not None else "N/A"
+            vol_note = s.get("volume_note", "N/A")
+            tag = s.get("tag", "N/A")
+            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} |")
+        lines.append("")
+    if bottom:
+        lines.append("### 表现较弱")
+        lines.append("")
+        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 |")
+        lines.append("|------|----------|----------|------|------|")
+        for s in bottom:
+            pct_str = _fmt_pct(s.get("pct_chg", 0) / 100) if s.get("pct_chg") is not None else "N/A"
+            vol_note = s.get("volume_note", "N/A")
+            tag = s.get("tag", "N/A")
+            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} |")
+        lines.append("")
+
+
 def render_unified_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
@@ -251,6 +285,23 @@ def render_unified_report(
         lines.append("")
         lines.append("本模块将在 evaluation 链路完成后自动展示，不影响今日日报主体。")
         lines.append("")
+
+    elif status == "snapshot":
+        td = t1_data
+        lines.append("> K 线覆盖率不足，本段使用当日行情快照生成降级复盘，仅供观察，不计入正式 evaluation 统计。")
+        lines.append("")
+        lines.append("| 项目 | 结果 |")
+        lines.append("|------|------|")
+        lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
+        lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
+        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 快照覆盖数量 | {td.get('snapshot_covered', 0)} |")
+        lines.append(f"| 快照覆盖率 | {_fmt_pct(td.get('snapshot_coverage'))} |")
+        if td.get('kline_coverage') is not None:
+            lines.append(f"| K线覆盖率 | {_fmt_pct(td.get('kline_coverage'))} |")
+        lines.append(f"| 复盘口径 | 快照复盘（降级） |")
+        lines.append("")
+        _render_snapshot_stocks(lines, td)
 
     elif status == "defer":
         lines.append("今日 T+1 复盘因行情缓存不足暂缓。")
