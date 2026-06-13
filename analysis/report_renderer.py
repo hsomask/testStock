@@ -198,6 +198,23 @@ def _render_snapshot_stocks(lines, td):
         lines.append("")
 
 
+def _dedup_tp_entries(items):
+    """trade_plan 条目按 name 去重，合并 strategy"""
+    if not items:
+        return items
+    seen = {}
+    for st in items:
+        key = st.get("name", st.get("code", ""))
+        if key in seen:
+            existing = seen[key]
+            s = st.get("strategy", "")
+            if s and s not in existing.get("strategy", ""):
+                existing["strategy"] = existing.get("strategy", "") + " / " + s
+        else:
+            seen[key] = dict(st)
+    return list(seen.values())
+
+
 def render_unified_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
@@ -799,8 +816,8 @@ def render_unified_report(
         tp_plans = trade_plan["plans"]
         tp_summary = trade_plan.get("summary", {})
 
-        # 10.1 候选低吸
-        low_buy = tp_plans.get("候选低吸", [])
+        # 10.1 候选低吸（去重）
+        low_buy = _dedup_tp_entries(tp_plans.get("候选低吸", []))
         if low_buy:
             lines.append(f"### 11.1 候选低吸（{tp_summary.get('候选低吸', len(low_buy))}只）")
             lines.append("")
@@ -818,7 +835,7 @@ def render_unified_report(
             lines.append("")
 
         # 10.2 只观察
-        watch_only = tp_plans.get("只观察", [])
+        watch_only = _dedup_tp_entries(tp_plans.get("只观察", []))
         if watch_only:
             lines.append(f"### 11.2 只观察（{tp_summary.get('只观察', len(watch_only))}只）")
             lines.append("")
@@ -836,19 +853,8 @@ def render_unified_report(
             lines.append("")
 
         # 10.3 交易条件不满足（去重）
-        cond_fail_raw = tp_plans.get("交易条件不满足", [])
-        if cond_fail_raw:
-            # dedup by name
-            cf_seen = {}
-            for st in cond_fail_raw:
-                key = st.get("name", st.get("code", ""))
-                if key in cf_seen:
-                    existing = cf_seen[key]
-                    existing["strategy"] = existing.get("strategy", "") + " / " + st.get("strategy", "")
-                else:
-                    cf_seen[key] = dict(st)
-            cond_fail = list(cf_seen.values())
-            lines.append(f"### 11.3 交易条件不满足（{len(cond_fail)}只）")
+        cond_fail = _dedup_tp_entries(tp_plans.get("交易条件不满足", []))
+        if cond_fail:
             lines.append("")
             lines.append("| 股票 | 策略来源 | 当前状态 | 原因 | 处理 |")
             lines.append("|------|----------|----------|------|------|")
@@ -858,7 +864,7 @@ def render_unified_report(
             lines.append("")
 
         # 10.4 高风险回避（始终展示，与 trade_plan 对齐）
-        high_risk = tp_plans.get("高风险回避", [])
+        high_risk = _dedup_tp_entries(tp_plans.get("高风险回避", []))
         lines.append(f"### 11.4 高风险回避（{len(high_risk)}只）")
         lines.append("")
         if high_risk:
@@ -871,9 +877,9 @@ def render_unified_report(
         lines.append("")
 
         # 10.5 不可交易过滤
-        excluded = tp_plans.get("不可交易过滤", [])
+        excluded = _dedup_tp_entries(tp_plans.get("不可交易过滤", []))
         if excluded:
-            lines.append(f"### 11.5 不可交易过滤（{tp_summary.get('不可交易过滤', len(excluded))}只）")
+            lines.append(f"### 11.5 不可交易过滤（{len(excluded)}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 原因 | 处理 |")
             lines.append("|------|----------|------|------|")
