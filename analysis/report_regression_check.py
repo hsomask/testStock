@@ -1,277 +1,197 @@
 """
-回归检查脚本
-运行：python -m analysis.report_regression_check --date YYYYMMDD
-检查日报系统的文件日期一致性、旧词、pipeline、权限过滤等
+日报内容回归检查：检查旧 bug 是否复发。
+运行：python -m analysis.report_regression_check --date 20260609
 """
 import argparse
-import json
 import re
+import sys
 from pathlib import Path
 
-REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
+from data.config import REPORT_DIR
 
-FROM_DISPLAY = {"20260528": "2026-05-28"}
+NON_INDUSTRIAL_TERMS = [
+    "沪股通", "深股通", "陆股通", "北向资金",
+    "融资融券", "转融券",
+    "MSCI中国", "富时罗素", "标普道琼斯",
+    "基金重仓", "证金持股", "社保重仓",
+    "百元股", "低价股", "高价股", "破净股",
+    "上证380", "上证180", "上证50",
+    "深证100R", "深成500",
+    "沪深300", "中证500", "中证1000",
+    "大盘股", "中盘股", "小盘股",
+    "大盘价值", "东方财富热股",
+    "昨日高振幅", "昨日涨停", "昨日连板",
+]
+
+SNAPSHOT_FORBIDDEN = [
+    "次日胜率", "平均次日收益", "正式胜率", "正式平均收益",
+]
 
 
-def _ymd_to_display(date_str):
-    s = str(date_str).replace("-", "").strip()[:8]
-    return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+def load_report(date_str):
+    path = REPORT_DIR / "daily" / f"daily_report_{date_str}.md"
+    if not path.exists():
+        print(f"[ERROR] 日报不存在: {path}")
+        sys.exit(1)
+    return path.read_text(encoding="utf-8")
 
 
-def _read_text(path):
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception:
+def extract_section(text, start_marker, end_marker="---"):
+    idx = text.find(start_marker)
+    if idx < 0:
         return ""
+    end = text.find(end_marker, idx + len(start_marker))
+    if end < 0:
+        end = len(text)
+    return text[idx:end]
 
 
-def _check_file_date(trade_date):
-    """检查关键文件是否存在并带正确日期"""
-    key_files = [
-        "daily_report_{}.md",
-        "daily_report_{}_pro.md",
-        "daily_summary_{}.json",
-        "trade_plan_{}.md",
-        "trade_plan_{}.json",
-        "board_trend_summary_{}.json",
-        "board_mapping_quality_{}.json",
-        "pipeline_check_{}.json",
-    ]
-    missing = []
-    ok = []
-    for pattern in key_files:
-        fname = pattern.format(trade_date)
-        if (REPORTS_DIR / fname).exists():
-            ok.append(fname)
-        else:
-            missing.append(fname)
+def check_a_non_industrial(text):
+    """A: 非产业标签不得误入产业主线"""
+    failures = []
+    industrial_zones = []
+    for marker in ["产业概念 3日流入", "产业概念 3日流出",
+                   "有效主线 / 观察主线", "退潮方向",
+                   "## 10. 机会观察"]:
+        industrial_zones.append(extract_section(text, marker))
+    combined = "\n".join(industrial_zones)
 
-    if missing:
-        return "failed", missing
-    return "ok", []
+    for term in NON_INDUSTRIAL_TERMS:
+        if term in combined:
+            failures.append(f"非产业标签 '{term}' 出现在产业主线区域")
+    return failures
 
 
-def _check_old_terms(trade_date):
-    """检查日报中是否出现旧词"""
-    old_terms = ["市场情绪评分"]
-    found = []
-    for suffix in [".md", "_pro.md"]:
-        text = _read_text(REPORTS_DIR / f"daily_report_{trade_date}{suffix}")
-        for term in old_terms:
-            if term in text:
-                found.append(f"{suffix}: 发现旧词「{term}」")
+def check_b_duplicated(text):
+    """B: 观察池重复"""
+    failures = []
+    wl_start = text.find("## 11. 观察池")
+    if wl_start < 0:
+        return ["观察池模块不存在"]
+    wl_end = text.find("## 12.", wl_start)
+    if wl_end < 0:
+        wl_end = len(text)
+    wl_text = text[wl_start:wl_end]
 
-    if found:
-        return "failed", found
-    return "ok", []
-
-
-def _check_pipeline_critical(trade_date):
-    """检查 pipeline_check JSON 是否有 critical_missing"""
-    path = REPORTS_DIR / f"pipeline_check_{trade_date}.json"
-    if not path.exists():
-        return "failed", ["pipeline_check JSON 不存在"]
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        cm = data.get("critical_missing", [])
-        if isinstance(cm, bool):
-            cm = data.get("missing_files", []) if cm else []
-        if isinstance(cm, list) and cm:
-            return "failed", cm
-        return "ok", []
-    except Exception as e:
-        return "failed", [f"pipeline_check JSON 读取失败: {e}"]
+    for marker in ["候选低吸", "只观察", "交易条件不满足", "高风险回避", "不可交易过滤"]:
+        sec = extract_section(wl_text, marker, "\n### ")
+        names = re.findall(r"^\|\s*([^\s|]+(?:\s*[^\s|]+)*?)\s*\|", sec, re.MULTILINE)
+        stocks = [n for n in names if n not in ("股票", "------", "策略来源")]
+        seen = set()
+        for name in stocks:
+            if name in seen:
+                failures.append(f"观察池 {marker} 中 '{name}' 重复出现")
+            seen.add(name)
+    return failures
 
 
-def _check_board_mapping_date(trade_date):
-    """检查 board_mapping_quality JSON actual_board_date"""
-    path = REPORTS_DIR / f"board_mapping_quality_{trade_date}.json"
-    if not path.exists():
-        return "failed", ["board_mapping_quality JSON 不存在"]
+def check_c_excluded_exclusivity(text):
+    """C: 不可交易过滤互斥"""
+    failures = []
+    # 先截取观察池区域
+    wl_start = text.find("## 11. 观察池")
+    wl_end = text.find("## 12.", wl_start) if wl_start >= 0 else -1
+    if wl_start < 0:
+        return []
+    wl_text = text[wl_start:wl_end] if wl_end > 0 else text[wl_start:]
 
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        actual = data.get("actual_board_date", "")
-        expected = _ymd_to_display(trade_date)
-        if actual == expected:
-            return "ok", []
-        if actual is None:
-            return "failed", [f"actual_board_date 为 null (期望 {expected})"]
-        return "failed", [f"actual_board_date={actual} (期望 {expected})"]
-    except Exception as e:
-        return "failed", [f"board_mapping_quality JSON 读取失败: {e}"]
+    excl_sec = extract_section(wl_text, "不可交易过滤", "\n### ")
+    if not excl_sec:
+        return []
+    excl_names = set(re.findall(r"^\|\s*([^\s|]+(?:\s*[^\s|]+)*?)\s*\|", excl_sec, re.MULTILINE))
+    excl_names.discard("股票")
+    excl_names.discard("------")
 
-
-def _check_trend_summary_missing(trade_date):
-    """趋势摘要缺失时检查日报是否有提示"""
-    trend_path = REPORTS_DIR / f"board_trend_summary_{trade_date}.json"
-    if trend_path.exists():
-        return "ok", []
-
-    hints = ["趋势摘要", "未生成", "board_trend_summary", "暂缺"]
-    found = False
-    for suffix in [".md", "_pro.md"]:
-        text = _read_text(REPORTS_DIR / f"daily_report_{trade_date}{suffix}")
-        if any(h in text for h in hints):
-            found = True
-            break
-
-    if not found:
-        return "warning", ["board_trend_summary 缺失且日报无提示"]
-    return "ok", []
+    for marker in ["候选低吸", "只观察", "交易条件不满足", "高风险回避"]:
+        sec = extract_section(wl_text, marker, "\n### ")
+        sec_names = set(re.findall(r"^\|\s*([^\s|]+(?:\s*[^\s|]+)*?)\s*\|", sec, re.MULTILINE))
+        sec_names.discard("股票")
+        sec_names.discard("------")
+        overlap = excl_names & sec_names
+        for name in overlap:
+            if name:
+                failures.append(f"不可交易过滤中的 '{name}' 仍出现在 {marker}")
+    return failures
 
 
-def _check_duplicate_layer(trade_date):
-    """检查日报中是否有 Ⅱ/Ⅲ 重复层级"""
-    pairs = [("白酒Ⅱ", "白酒Ⅲ"), ("证券Ⅱ", "证券Ⅲ"), ("体育Ⅱ", "体育Ⅲ"),
-             ("保险Ⅱ", "保险Ⅲ"), ("电子化学品Ⅱ", "电子化学品Ⅲ")]
-    found = []
-    for suffix in [".md", "_pro.md"]:
-        text = _read_text(REPORTS_DIR / f"daily_report_{trade_date}{suffix}")
-        for a, b in pairs:
-            if a in text and b in text:
-                found.append(f"{suffix}: {a} 和 {b} 同时出现")
-
-    if found:
-        return "warning", found
-    return "ok", []
+def check_d_t1_exists(text):
+    """D: T+1 模块存在"""
+    t1_start = text.find("## 1. 昨日观察池兑现复盘（T+1）")
+    if t1_start < 0:
+        return ["T+1 模块不存在"]
+    t1_end = text.find("## 2.", t1_start)
+    if t1_end < 0:
+        t1_end = len(text)
+    t1_text = text[t1_start:t1_end]
+    if len(t1_text.strip()) < 50:
+        return ["T+1 模块为空"]
+    return []
 
 
-def _check_permission_filter(trade_date):
-    """检查小白版可观察/谨慎池是否出现不可买市场"""
-    import os
-    allow_cyb = os.getenv("ALLOW_CHINEXT", "false").lower() == "true"
-    allow_star = os.getenv("ALLOW_STAR", "false").lower() == "true"
-    allow_bse = os.getenv("ALLOW_BSE", "false").lower() == "true"
-
-    if allow_cyb and allow_star and allow_bse:
-        return "ok", []
-
-    forbidden = set()
-    if not allow_cyb:
-        forbidden.update(["300", "301"])
-    if not allow_star:
-        forbidden.add("688")
-    if not allow_bse:
-        forbidden.add("920")
-
-    text = _read_text(REPORTS_DIR / f"daily_report_{trade_date}.md")
-
-    # 找到可观察/谨慎池区域（分层标题之间）
-    obs_start = text.find("### 可观察池")
-    caution_start = text.find("### 谨慎观察池")
-    high_risk_start = text.find("### 高风险复盘池")
-
-    if obs_start == -1:
-        return "ok", []
-
-    # 只检查可观察+谨慎区域（在高风险之前）
-    check_text = text[obs_start:high_risk_start] if high_risk_start > obs_start else text[obs_start:]
-
-    found = []
-    code_pattern = re.compile(r"\b(\d{6})\b")
-    for m in code_pattern.finditer(check_text):
-        code = m.group(1)
-        for prefix in forbidden:
-            if code.startswith(prefix):
-                found.append(f"{code}: 不可买市场({prefix})")
-
-    if found:
-        return "failed", found[:10]
-    return "ok", []
+def check_e_snapshot_no_official_rate(text):
+    """E: 快照复盘不展示正式胜率"""
+    t1_sec = extract_section(text, "## 1. 昨日观察池兑现复盘（T+1）", "## 2.")
+    if "快照复盘" not in t1_sec and "降级" not in t1_sec:
+        return []
+    failures = []
+    for term in SNAPSHOT_FORBIDDEN:
+        if term in t1_sec:
+            failures.append(f"快照复盘展示了 '{term}'")
+    return failures
 
 
-def _check_high_risk_duplicate(trade_date):
-    """检查高风险票是否在可观察/谨慎池重复出现"""
-    text = _read_text(REPORTS_DIR / f"daily_report_{trade_date}.md")
-
-    obs_start = text.find("### 可观察池")
-    high_risk_start = text.find("### 高风险复盘池")
-
-    if obs_start == -1 or high_risk_start == -1:
-        return "ok", []
-
-    obs_text = text[obs_start:high_risk_start]
-    high_text = text[high_risk_start:]
-
-    code_pattern = re.compile(r"\b(\d{6})\b")
-    obs_codes = set(m.group(1) for m in code_pattern.finditer(obs_text))
-    high_codes = set(m.group(1) for m in code_pattern.finditer(high_text))
-
-    dupes = obs_codes & high_codes
-    if dupes:
-        return "failed", [f"{c}: 同时出现在可观察和高风险池" for c in dupes]
-    return "ok", []
-
-
-def _check_summary_context(trade_date):
-    """检查 daily_summary 中是否有 report_context"""
-    path = REPORTS_DIR / f"daily_summary_{trade_date}.json"
-    if not path.exists():
-        return "warning", ["daily_summary JSON 不存在"]
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        ctx = data.get("report_context") or {}
-        missing = [k for k in ["market", "sentiment", "quality"] if not ctx.get(k)]
-        if missing:
-            return "warning", [f"report_context 缺少: {', '.join(missing)}"]
-        return "ok", []
-    except Exception as e:
-        return "warning", [str(e)]
-
-
-CHECK_FUNCTIONS = {
-    "file_date": _check_file_date,
-    "old_terms": _check_old_terms,
-    "pipeline_critical": _check_pipeline_critical,
-    "board_mapping_date": _check_board_mapping_date,
-    "trend_summary_missing": _check_trend_summary_missing,
-    "duplicate_layer": _check_duplicate_layer,
-    "permission_filter": _check_permission_filter,
-    "high_risk_duplicate": _check_high_risk_duplicate,
-    "summary_context": _check_summary_context,
-}
-
-
-def run(trade_date):
-    results = {}
-    errors = []
-    warnings = []
-
-    for name, fn in CHECK_FUNCTIONS.items():
-        status, details = fn(trade_date)
-        results[name] = {"status": status, "details": details}
-        if status == "failed":
-            errors.append(name)
-        elif status == "warning":
-            warnings.append(name)
-
-    overall = "failed" if errors else ("warning" if warnings else "ok")
-
-    output = {
-        "trade_date": trade_date,
-        "status": overall,
-        "errors": errors,
-        "warnings": warnings,
-        "checks": results,
-    }
-
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    json_path = REPORTS_DIR / f"report_regression_check_{trade_date}.json"
-    json_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    error_count = len(errors)
-    warn_count = len(warnings)
-    print(f"回归检查完成：{overall}（{error_count} errors / {warn_count} warnings）")
-    print(f"JSON: {json_path}")
+def check_f_attachment_whitelist():
+    """F: 邮件附件白名单"""
+    email_path = Path(__file__).resolve().parent / "email_sender.py"
+    if not email_path.exists():
+        return ["email_sender.py 不存在"]
+    content = email_path.read_text(encoding="utf-8")
+    failures = []
+    forbidden = ["trade_plan_", "daily_summary_", "board_trend_report_",
+                 "board_alias_", "board_mapping_quality_", "pipeline_check_"]
+    lines = content.split("\n")
+    in_attach_block = False
+    for line in lines:
+        if "attachments" in line and ("=" in line or ".append" in line):
+            in_attach_block = True
+        if in_attach_block:
+            for fw in forbidden:
+                if fw in line and "attachments.append" in line:
+                    failures.append(f"邮件附件中包含禁止项: {fw}")
+    return failures
 
 
 def main():
-    parser = argparse.ArgumentParser(description="日报回归检查")
-    parser.add_argument("--date", type=str, required=True, help="日期 YYYYMMDD")
+    parser = argparse.ArgumentParser(description="日报内容回归检查")
+    parser.add_argument("--date", type=str, required=True, help="检查日期 YYYYMMDD")
     args = parser.parse_args()
-    run(args.date)
+
+    text = load_report(args.date)
+
+    all_failures = []
+    checks = [
+        ("非产业标签误入产业主线", lambda: check_a_non_industrial(text)),
+        ("观察池重复股票", lambda: check_b_duplicated(text)),
+        ("不可交易过滤互斥", lambda: check_c_excluded_exclusivity(text)),
+        ("T+1 模块存在且合法", lambda: check_d_t1_exists(text)),
+        ("快照复盘不展示正式胜率", lambda: check_e_snapshot_no_official_rate(text)),
+        ("邮件附件白名单", check_f_attachment_whitelist),
+    ]
+
+    for name, check_fn in checks:
+        failures = check_fn()
+        if failures:
+            for f in failures:
+                print(f"[FAIL] {f}")
+                all_failures.append(f)
+        else:
+            print(f"[PASS] {name}")
+
+    if all_failures:
+        print(f"\nREGRESSION FAIL: {len(all_failures)} issues")
+        sys.exit(1)
+    else:
+        print("\nREGRESSION PASS")
 
 
 if __name__ == "__main__":

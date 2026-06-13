@@ -16,7 +16,8 @@ import numpy as np
 
 DYNAMIC_SENTIMENT_KEYWORDS = [
     "东方财富热股", "昨日涨停", "昨日首板", "昨日连板",
-    "昨日高振幅", "最近多板", "近期新高", "百日新高", "历史新高",
+    "昨日高振幅", "昨日触板", "昨日炸板", "昨日换手",
+    "最近多板", "近期新高", "近期强势", "百日新高", "历史新高",
 ]
 
 INDEX_STYLE_KEYWORDS = [
@@ -24,20 +25,30 @@ INDEX_STYLE_KEYWORDS = [
     "创业板综", "ST板块", "中盘股", "大盘股", "小盘股",
     "大盘价值", "大盘成长", "中盘价值", "中盘成长",
     "小盘价值", "小盘成长",
+    "上证380", "上证180", "上证50",
+    "深证100R", "深成500",
+    "沪深300", "中证500", "中证1000",
+    "创业板综", "创业板指", "科创50",
 ]
 
 INSTITUTIONAL_KEYWORDS = [
     "机构重仓", "QFII重仓", "融资融券", "MSCI中国", "富时罗素",
     "证金持股", "社保重仓", "基金重仓",
+    "沪股通", "深股通", "陆股通", "北向资金",
+    "标普道琼斯", "转融券",
 ]
 
 ATTRIBUTE_KEYWORDS = [
     "专精特新", "央企", "国企改革", "高送转", "预盈预增", "参股金融",
 ]
 
+PRICE_ATTRIBUTE_KEYWORDS = [
+    "百元股", "低价股", "高价股", "破净股",
+]
+
 
 def classify_concept_label(name):
-    """将概念名称分为: industrial / dynamic_sentiment / index_style / institutional / attribute"""
+    """将概念名称分为: industrial / dynamic_sentiment / index_style / institutional / attribute / price / other"""
     if not name:
         return "industrial"
     for kw in DYNAMIC_SENTIMENT_KEYWORDS:
@@ -52,7 +63,20 @@ def classify_concept_label(name):
     for kw in ATTRIBUTE_KEYWORDS:
         if kw in name:
             return "attribute"
+    for kw in PRICE_ATTRIBUTE_KEYWORDS:
+        if kw in name:
+            return "price"
     return "industrial"
+
+
+def is_industrial_theme(name):
+    """是否为产业概念（可进入主线）"""
+    return classify_concept_label(name) == "industrial"
+
+
+def is_non_industrial_label(name):
+    """是否为非产业标签（不可进入主线/产业概念表/退潮/机会/风险）"""
+    return classify_concept_label(name) != "industrial"
 
 
 def is_dynamic_label(name):
@@ -64,9 +88,10 @@ def label_category_name(cat):
     """分类标签 → 中文名"""
     return {
         "dynamic_sentiment": "动态情绪",
-        "index_style": "市值风格",
+        "index_style": "指数/风格",
         "institutional": "资金属性",
         "attribute": "属性标签",
+        "price": "价格属性",
         "industrial": "产业概念",
     }.get(cat, "其他标签")
 
@@ -387,7 +412,7 @@ def explain_non_industrial_label(name, category):
     """按标签类型生成个性化解释"""
     label_map = {
         "昨日高振幅": "短线波动增强，资金博弈激烈",
-        "东方财富热股": "热门股成交占比上升",
+        "东方财富热股": "热门股成交占比变化",
         "最近多板": "连板/强势股活跃",
         "近期新高": "趋势新高股活跃",
         "百日新高": "中期趋势股活跃",
