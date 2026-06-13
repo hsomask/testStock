@@ -853,9 +853,9 @@ def render_unified_report(
             lines.append("")
 
         # 10.2 只观察
+        lines.append(f"### 11.2 只观察（{len(watch_only)}只）")
+        lines.append("")
         if watch_only:
-            lines.append(f"### 11.2 只观察（{tp_summary.get('只观察', len(watch_only))}只）")
-            lines.append("")
             lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
             lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
             for st in watch_only:
@@ -867,18 +867,22 @@ def render_unified_report(
                     f"| {st.get('name','')} | {st.get('strategy','')} | {tag} | {o_low}~{o_high} | "
                     f"{st.get('pressure_price', '-')} | 跌破{inv} | ≤{pos['single_pct']}成 | 确认信号 | 盲目追高 |"
                 )
-            lines.append("")
+        else:
+            lines.append("暂无")
+        lines.append("")
 
         # 10.3 交易条件不满足
+        lines.append(f"### 11.3 交易条件不满足（{len(cond_fail)}只）")
+        lines.append("")
         if cond_fail:
-            lines.append(f"### 11.3 交易条件不满足（{len(cond_fail)}只）")
-            lines.append("")
             lines.append("| 股票 | 策略来源 | 当前状态 | 原因 | 处理 |")
             lines.append("|------|----------|----------|------|------|")
             for st in cond_fail:
                 reason = st.get("reason", st.get("entry_reason", "-"))
                 lines.append(f"| {st.get('name','')} | {st.get('strategy','')} | 不适合低吸 | {reason} | 不追高，只观察 |")
-            lines.append("")
+        else:
+            lines.append("暂无")
+        lines.append("")
 
         # 10.4 高风险回避（始终展示，与 trade_plan 对齐）
         lines.append(f"### 11.4 高风险回避（{len(high_risk)}只）")
@@ -893,15 +897,17 @@ def render_unified_report(
         lines.append("")
 
         # 10.5 不可交易过滤
+        lines.append(f"### 11.5 不可交易过滤（{len(excluded)}只）")
+        lines.append("")
         if excluded:
-            lines.append(f"### 11.5 不可交易过滤（{len(excluded)}只）")
-            lines.append("")
             lines.append("| 股票 | 策略来源 | 原因 | 处理 |")
             lines.append("|------|----------|------|------|")
             for st in excluded:
                 reason = st.get("reason", "-")
                 lines.append(f"| {st.get('name','')} | {st.get('strategy','')} | {reason} | 不纳入观察池 |")
-            lines.append("")
+        else:
+            lines.append("暂无")
+        lines.append("")
     else:
         lines.append("暂无交易计划数据")
         lines.append("")
