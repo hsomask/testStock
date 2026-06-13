@@ -56,9 +56,8 @@ def check_a_non_industrial(text):
         industrial_zones.append(extract_section(text, marker))
     combined = "\n".join(industrial_zones)
 
-    style_sec = extract_section(text, "短线情绪/风格标签变化")
     for term in NON_INDUSTRIAL_TERMS:
-        if term in combined and term not in style_sec:
+        if term in combined:
             failures.append(f"非产业标签 '{term}' 出现在产业主线区域")
     return failures
 
@@ -89,7 +88,14 @@ def check_b_duplicated(text):
 def check_c_excluded_exclusivity(text):
     """C: 不可交易过滤互斥"""
     failures = []
-    excl_sec = extract_section(text, "不可交易过滤")
+    # 先截取观察池区域
+    wl_start = text.find("## 11. 观察池")
+    wl_end = text.find("## 12.", wl_start) if wl_start >= 0 else -1
+    if wl_start < 0:
+        return []
+    wl_text = text[wl_start:wl_end] if wl_end > 0 else text[wl_start:]
+
+    excl_sec = extract_section(wl_text, "不可交易过滤", "\n### ")
     if not excl_sec:
         return []
     excl_names = set(re.findall(r"^\|\s*([^\s|]+(?:\s*[^\s|]+)*?)\s*\|", excl_sec, re.MULTILINE))
@@ -97,7 +103,7 @@ def check_c_excluded_exclusivity(text):
     excl_names.discard("------")
 
     for marker in ["候选低吸", "只观察", "交易条件不满足", "高风险回避"]:
-        sec = extract_section(text, marker)
+        sec = extract_section(wl_text, marker, "\n### ")
         sec_names = set(re.findall(r"^\|\s*([^\s|]+(?:\s*[^\s|]+)*?)\s*\|", sec, re.MULTILINE))
         sec_names.discard("股票")
         sec_names.discard("------")
