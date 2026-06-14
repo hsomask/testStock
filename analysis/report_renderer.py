@@ -170,6 +170,88 @@ def _fmt_pct(val):
     return f"{val * 100:.2f}%"
 
 
+def _get_limitup_metrics(market, sentiment=None):
+    metrics = {}
+    if isinstance(market, dict):
+        metrics = market.get("limitup_metrics") or {}
+    if not metrics and isinstance(sentiment, dict):
+        metrics = sentiment.get("limitup_metrics") or {}
+    return metrics if isinstance(metrics, dict) else {}
+
+
+def _get_limitup_stats(market, sentiment=None):
+    stats = {}
+    if isinstance(market, dict):
+        stats = market.get("limitup_stats") or {}
+    if not stats and isinstance(sentiment, dict):
+        stats = sentiment.get("limitup_stats") or {}
+    return stats if isinstance(stats, dict) else {}
+
+
+def _as_float(value):
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _render_failed_limitup_cells(market, sentiment=None):
+    stats = _get_limitup_stats(market, sentiment)
+    if stats.get("status") == "ok" and stats.get("failed_limit_up_rate") is not None:
+        rate = _as_float(stats.get("failed_limit_up_rate"))
+        touched = stats.get("touched_limit_up_count", 0)
+        failed = stats.get("failed_limit_up_count", 0)
+        value = f"{rate:.1%}" if rate is not None else "未覆盖"
+        return value, f"触板 {touched} / 炸板 {failed}"
+
+    metrics = _get_limitup_metrics(market, sentiment)
+    if metrics.get("data_status") == "ok":
+        rate = metrics.get("failed_limit_up_rate")
+        touched = metrics.get("touched_limit_up_count", 0)
+        failed = metrics.get("failed_limit_up_count", 0)
+        value = f"{rate:.1%}" if rate is not None else "未覆盖"
+        return value, f"触板 {touched} / 炸板 {failed}"
+
+    reason = metrics.get("reason") or "当日 high/pre_close 数据不足"
+    return "未覆盖", reason
+
+
+def _render_yesterday_limitup_cells(market, sentiment=None):
+    stats = _get_limitup_stats(market, sentiment)
+    if stats.get("status") == "ok" and stats.get("yesterday_limit_up_avg_return") is not None:
+        avg_return = _as_float(stats.get("yesterday_limit_up_avg_return"))
+        win_rate = _as_float(stats.get("yesterday_limit_up_win_rate"))
+        value = f"{avg_return:+.2f}%"
+        if win_rate is not None:
+            value = f"{value}，胜率 {win_rate:.0%}"
+        return value, "昨日涨停池 T+1"
+    reason = "缺少前一交易日涨停池" if stats.get("status") == "ok" else stats.get("reason")
+    reason = reason or "limitup_daily_stats 未生成"
+    return "未生成", reason
+
+
+def _render_consecutive_height_cells(market, sentiment=None):
+    stats = _get_limitup_stats(market, sentiment)
+    if stats.get("status") == "ok" and stats.get("max_consecutive_limit_up") is not None:
+        count = int(stats.get("max_consecutive_limit_up") or 0)
+        return f"{count}板", "来自涨停生态日表"
+    reason = "缺少前一交易日涨停池" if stats.get("status") == "ok" else stats.get("reason")
+    reason = reason or "limitup_daily_stats 未生成"
+    return "未生成", reason
+
+
+def _render_three_board_cells(market, sentiment=None):
+    stats = _get_limitup_stats(market, sentiment)
+    if stats.get("status") == "ok" and stats.get("three_board_plus_count") is not None:
+        count = int(stats.get("three_board_plus_count") or 0)
+        return f"{count}只", "高标梯队数量"
+    reason = "缺少前一交易日涨停池" if stats.get("status") == "ok" else stats.get("reason")
+    reason = reason or "limitup_daily_stats 未生成"
+    return "未生成", reason
+
+
 def _render_snapshot_stocks(lines, td):
     """快照复盘：展示 Top/Bottom 表现"""
     top = td.get("top_winners", [])
@@ -249,6 +331,10 @@ def render_unified_report(
     effective_themes, dynamic_themes = filter_effective_themes(all_raw_themes)
 
     s_stage, stage_explain = explain_sentiment_stage(s_score, s_stage)
+    failed_limitup_value, failed_limitup_note = _render_failed_limitup_cells(market, sentiment)
+    yesterday_limitup_value, yesterday_limitup_note = _render_yesterday_limitup_cells(market, sentiment)
+    consecutive_height_value, consecutive_height_note = _render_consecutive_height_cells(market, sentiment)
+    three_board_value, three_board_note = _render_three_board_cells(market, sentiment)
 
     # ── YAML frontmatter ──
     lines.append("---")
@@ -443,12 +529,8 @@ def render_unified_report(
     lines.append("|------|------|------|")
     lines.append(f"| 上涨家数 | {width['up_count']} | - |")
     lines.append(f"| 下跌家数 | {width['down_count']} | - |")
-    lines.append(f"| 涨停家数 | {width['limit_up']} | - |")
-    lines.append(f"| 跌停家数 | {width['limit_down']} | - |")
     lines.append(f"| 涨跌比 | {width['adv_ratio']:.2f} | {'宽度较好' if width['adv_ratio'] > 1.2 else '偏弱' if width['adv_ratio'] < 0.5 else '均衡'} |")
-    lines.append(f"| 涨跌停比 | {width['lb_ratio']:.1f} | {'短线活跃' if width['lb_ratio'] > 3 else '弱市信号' if width['lb_ratio'] < 1 else '正常'} |")
     lines.append(f"| 绿盘占比 | {width['green_ratio']:.1%} | {'多数下跌' if width['green_ratio'] > 0.6 else '正常'} |")
-    lines.append(f"| 炸板率 | N/A | 数据不足 |")
     lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
     lines.append("")
     if width["green_ratio"] > 0.6 and market.get("score", 0) > 50:
@@ -497,11 +579,11 @@ def render_unified_report(
     lines.append("| 指标 | 当前值 | 信号 |")
     lines.append("|------|--------|------|")
     lines.append(f"| 短线情绪评分 | {s_score:.1f} / 100 | {s_stage} |")
-    lines.append(f"| 昨日涨停今日表现 | N/A | 数据不足 |")
-    lines.append(f"| 连板高度 | N/A | 数据不足 |")
-    lines.append(f"| 3板以上数量 | N/A | 数据不足 |")
+    lines.append(f"| 昨日涨停今日表现 | {yesterday_limitup_value} | {yesterday_limitup_note} |")
+    lines.append(f"| 连板高度 | {consecutive_height_value} | {consecutive_height_note} |")
+    lines.append(f"| 3板以上数量 | {three_board_value} | {three_board_note} |")
     lines.append(f"| 涨停家数 | {width['limit_up']}家 | {'活跃' if width['limit_up'] > 50 else '一般'} |")
-    lines.append(f"| 炸板率 | N/A | 数据不足 |")
+    lines.append(f"| 炸板率 | {failed_limitup_value} | {failed_limitup_note} |")
     lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
     lines.append("")
     lines.append(f"> {stage_explain}")
@@ -768,7 +850,7 @@ def render_unified_report(
     lines.append("### 9.4 数据风险")
     lines.append(f"- 报告可信度：{quality.get('confidence_score', 0)} / 100")
     if profit["downgraded"]:
-        lines.append("- 赚钱效应为降级判断（缺少连板高度、炸板率、昨涨停表现）")
+        lines.append(f"- 赚钱效应为降级判断（{profit.get('note', '').strip('。')}）")
     for issue in quality.get("issues", [])[:3]:
         lines.append(f"- {issue}")
     lines.append("")

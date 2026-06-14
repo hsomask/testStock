@@ -23,6 +23,9 @@ python -m analysis.board_mapping_quality --date "$TRADE_DATE" || echo "[警告] 
 echo "=== 板块资金趋势追踪 ==="
 python -m analysis.board_trend_tracker --date "$TRADE_DATE" || echo "[警告] 资金趋势追踪失败"
 
+echo "=== 更新涨停生态 ==="
+python -m analysis.limitup_daily_update --date "$TRADE_DATE" || echo "[警告] 涨停生态更新失败"
+
 echo "=== 生成报告 ==="
 python -m analysis.daily_report --mode both --date "$TRADE_DATE"
 

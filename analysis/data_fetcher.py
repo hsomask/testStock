@@ -8,6 +8,7 @@ import logging
 warnings.filterwarnings("ignore")
 
 from analysis.utils import safe_numeric
+from analysis.limitup_metrics import enrich_limitup_flags
 
 logger = logging.getLogger(__name__)
 
@@ -526,7 +527,10 @@ def _get_hist_from_db(code, days=80):
         return pd.DataFrame()
     try:
         df = pd.read_sql(
-            "SELECT trade_date as date, open, close, high, low, volume "
+            "SELECT trade_date as date, name, open, close, high, low, volume, "
+            "pre_close, pct_chg, amount, turnover, limit_ratio, "
+            "limit_up_price, limit_down_price, is_limit_up, is_limit_down, "
+            "is_touched_limit_up, is_failed_limit_up, data_source "
             "FROM stock_hist_kline WHERE code=%s "
             "ORDER BY trade_date DESC LIMIT %s",
             conn, params=(code, days)
@@ -535,13 +539,27 @@ def _get_hist_from_db(code, days=80):
             return df
         df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
         df = df.sort_values("date")
-        df["amount"] = np.nan
-        df["pct_chg"] = np.nan
-        df["turnover"] = np.nan
         return df
     except Exception as e:
-        logger.debug(f"读取历史K线缓存失败：{code}, {e}")
-        return pd.DataFrame()
+        try:
+            conn.rollback()
+            df = pd.read_sql(
+                "SELECT trade_date as date, open, close, high, low, volume "
+                "FROM stock_hist_kline WHERE code=%s "
+                "ORDER BY trade_date DESC LIMIT %s",
+                conn, params=(code, days)
+            )
+            if df.empty:
+                return df
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            df = df.sort_values("date")
+            df["amount"] = np.nan
+            df["pct_chg"] = np.nan
+            df["turnover"] = np.nan
+            return df
+        except Exception as fallback_error:
+            logger.debug(f"读取历史K线缓存失败：{code}, {e}; fallback={fallback_error}")
+            return pd.DataFrame()
 
 
 def _save_hist_to_db(code, df):
@@ -555,22 +573,92 @@ def _save_hist_to_db(code, df):
             if pd.isna(row.get("date")):
                 continue
             cur.execute("""
-                INSERT INTO stock_hist_kline (code, trade_date, open, close, high, low, volume)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (code, trade_date) DO NOTHING
+                INSERT INTO stock_hist_kline (
+                    code, trade_date, name,
+                    open, close, high, low, volume,
+                    pre_close, pct_chg, amount, turnover,
+                    limit_ratio, limit_up_price, limit_down_price,
+                    is_limit_up, is_limit_down, is_touched_limit_up, is_failed_limit_up,
+                    data_source, updated_at
+                )
+                VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (code, trade_date)
+                DO UPDATE SET
+                    name = EXCLUDED.name,
+                    open = EXCLUDED.open,
+                    close = EXCLUDED.close,
+                    high = EXCLUDED.high,
+                    low = EXCLUDED.low,
+                    volume = EXCLUDED.volume,
+                    pre_close = EXCLUDED.pre_close,
+                    pct_chg = EXCLUDED.pct_chg,
+                    amount = EXCLUDED.amount,
+                    turnover = EXCLUDED.turnover,
+                    limit_ratio = EXCLUDED.limit_ratio,
+                    limit_up_price = EXCLUDED.limit_up_price,
+                    limit_down_price = EXCLUDED.limit_down_price,
+                    is_limit_up = EXCLUDED.is_limit_up,
+                    is_limit_down = EXCLUDED.is_limit_down,
+                    is_touched_limit_up = EXCLUDED.is_touched_limit_up,
+                    is_failed_limit_up = EXCLUDED.is_failed_limit_up,
+                    data_source = EXCLUDED.data_source,
+                    updated_at = CURRENT_TIMESTAMP
             """, (
                 code,
                 str(row["date"])[:10],
+                _text_or_none(row.get("name")),
                 _num_or_none(row.get("open")),
                 _num_or_none(row.get("close")),
                 _num_or_none(row.get("high")),
                 _num_or_none(row.get("low")),
                 _num_or_none(row.get("volume")),
+                _num_or_none(row.get("pre_close")),
+                _num_or_none(row.get("pct_chg")),
+                _num_or_none(row.get("amount")),
+                _num_or_none(row.get("turnover")),
+                _num_or_none(row.get("limit_ratio")),
+                _num_or_none(row.get("limit_up_price")),
+                _num_or_none(row.get("limit_down_price")),
+                _bool_or_none(row.get("is_limit_up")),
+                _bool_or_none(row.get("is_limit_down")),
+                _bool_or_none(row.get("is_touched_limit_up")),
+                _bool_or_none(row.get("is_failed_limit_up")),
+                _text_or_none(row.get("data_source")),
             ))
         conn.commit()
         cur.close()
     except Exception as e:
-        logger.debug(f"保存历史K线失败：{code}, {e}")
+        try:
+            conn.rollback()
+            cur = conn.cursor()
+            for _, row in df.iterrows():
+                if pd.isna(row.get("date")):
+                    continue
+                cur.execute("""
+                    INSERT INTO stock_hist_kline (code, trade_date, open, close, high, low, volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (code, trade_date) DO NOTHING
+                """, (
+                    code,
+                    str(row["date"])[:10],
+                    _num_or_none(row.get("open")),
+                    _num_or_none(row.get("close")),
+                    _num_or_none(row.get("high")),
+                    _num_or_none(row.get("low")),
+                    _num_or_none(row.get("volume")),
+                ))
+            conn.commit()
+            cur.close()
+            logger.debug(f"历史K线扩展字段保存失败，已回退旧字段：{code}, {e}")
+        except Exception as fallback_error:
+            logger.debug(f"保存历史K线失败：{code}, {e}; fallback={fallback_error}")
 
 
 def _num_or_none(x):
@@ -582,7 +670,27 @@ def _num_or_none(x):
         return None
 
 
-def get_stock_history(code: str, days: int = 80):
+def _bool_or_none(x):
+    try:
+        if pd.isna(x):
+            return None
+        return bool(x)
+    except Exception:
+        return None
+
+
+def _text_or_none(x):
+    try:
+        if pd.isna(x):
+            return None
+    except Exception:
+        pass
+    if x is None:
+        return None
+    return str(x)
+
+
+def get_stock_history(code: str, days: int = 80, name: str = ""):
     """
     获取个股历史K线。优先从 DB 缓存读取，缺失时从 API 获取并自动入库。
     """
@@ -622,6 +730,12 @@ def get_stock_history(code: str, days: int = 80):
     if api_df.empty:
         logger.debug(f"历史行情全部通道失败：{code}, tried={symbol_candidates}")
         return db_df if not db_df.empty else pd.DataFrame()
+
+    api_df["code"] = code
+    api_df["name"] = name
+    api_df = enrich_limitup_flags(api_df)
+    if "data_source" not in api_df.columns:
+        api_df["data_source"] = "get_stock_history"
 
     # 4. 只保存 DB 中没有的新日期
     new_rows = []
@@ -707,7 +821,8 @@ def enrich_stock_indicators(stock_df, max_stocks: int = 1200):
 
     for idx in selected_indices:
         code = str(df.at[idx, "code"])
-        hist = get_stock_history(code, days=80)
+        name = df.at[idx, "name"] if "name" in df.columns else ""
+        hist = get_stock_history(code, days=80, name=name)
         indicators = calc_history_indicators(hist)
 
         if not indicators:
@@ -742,7 +857,7 @@ def enrich_selected_stocks_indicators(selector_result):
                 continue
 
             code = str(row.get("code", ""))
-            hist = get_stock_history(code, days=80)
+            hist = get_stock_history(code, days=80, name=row.get("name", ""))
             indicators = calc_history_indicators(hist)
 
             if not indicators:

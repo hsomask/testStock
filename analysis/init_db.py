@@ -20,6 +20,8 @@ TABLES = [
     "stock_signal",
     "job_run_log",
     "stock_hist_kline",
+    "limitup_stock_pool",
+    "limitup_daily_stats",
     "signal_performance",
     "watchlist_evaluation_result",
     "watchlist_evaluation_summary",

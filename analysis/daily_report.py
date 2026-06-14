@@ -50,6 +50,8 @@ def load_board_trend_summary(trade_date):
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
+from analysis.limitup_metrics import compute_intraday_limitup_metrics
+from analysis.limitup_stats_reader import load_limitup_daily_stats
 from analysis.selector import run_all_selectors
 from analysis.report_renderer import render_daily_report, save_report
 from analysis.evaluation_report_reader import load_t1_evaluation_summary
@@ -466,6 +468,12 @@ def main():
         industry_result = analyze_boards(industry_df, board_type="行业")
         concept_result = analyze_boards(concept_df, board_type="概念")
         sentiment_result = analyze_sentiment(stock_df, industry_df, concept_df)
+        limitup_metrics = compute_intraday_limitup_metrics(stock_df)
+        limitup_stats = load_limitup_daily_stats(trade_date)
+        market_result["limitup_metrics"] = limitup_metrics
+        market_result["limitup_stats"] = limitup_stats
+        sentiment_result["limitup_metrics"] = limitup_metrics
+        sentiment_result["limitup_stats"] = limitup_stats
 
         market_score = market_result["score"]
 
