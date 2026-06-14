@@ -108,6 +108,31 @@ def check_limitup_database(trade_date):
                 "status": "PASS" if stats_count > 0 else "WARN",
                 "message": "已生成" if stats_count > 0 else "未生成，日报应显示未生成状态",
             })
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS total_rows,
+                COUNT(limit_up_price) AS limit_price_rows,
+                COUNT(is_limit_up) AS limit_flag_rows
+            FROM stock_hist_kline
+            WHERE trade_date >= CURRENT_DATE - INTERVAL '120 days'
+            """
+        )
+        total_rows, limit_price_rows, limit_flag_rows = cur.fetchone()
+        coverage = min(
+            (limit_price_rows or 0) / max(total_rows or 0, 1),
+            (limit_flag_rows or 0) / max(total_rows or 0, 1),
+        )
+        checks.append({
+            "name": "stock_hist_kline 历史字段回填覆盖率",
+            "status": "PASS" if coverage >= 0.8 else "WARN",
+            "message": (
+                f"最近120天覆盖率 {coverage:.1%}"
+                if coverage >= 0.8
+                else f"最近120天覆盖率 {coverage:.1%}，可运行 python -m analysis.backfill_stock_hist_limit_fields --days 120"
+            ),
+        })
     except Exception as e:
         checks.append({
             "name": "涨停生态数据库检查",
