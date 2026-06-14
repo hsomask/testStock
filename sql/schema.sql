@@ -139,14 +139,102 @@ CREATE TABLE IF NOT EXISTS stock_hist_kline (
     id SERIAL PRIMARY KEY,
     code VARCHAR(20) NOT NULL,
     trade_date DATE NOT NULL,
+    name TEXT,
     open NUMERIC,
     close NUMERIC,
     high NUMERIC,
     low NUMERIC,
     volume NUMERIC,
+    pre_close NUMERIC,
+    pct_chg NUMERIC,
+    amount NUMERIC,
+    turnover NUMERIC,
+    limit_ratio NUMERIC,
+    limit_up_price NUMERIC,
+    limit_down_price NUMERIC,
+    is_limit_up BOOLEAN,
+    is_limit_down BOOLEAN,
+    is_touched_limit_up BOOLEAN,
+    is_failed_limit_up BOOLEAN,
+    data_source TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (code, trade_date)
 );
 CREATE INDEX IF NOT EXISTS idx_hist_kline_code_date ON stock_hist_kline(code, trade_date);
+
+ALTER TABLE stock_hist_kline
+    ADD COLUMN IF NOT EXISTS name TEXT,
+    ADD COLUMN IF NOT EXISTS pre_close NUMERIC,
+    ADD COLUMN IF NOT EXISTS pct_chg NUMERIC,
+    ADD COLUMN IF NOT EXISTS amount NUMERIC,
+    ADD COLUMN IF NOT EXISTS turnover NUMERIC,
+    ADD COLUMN IF NOT EXISTS limit_ratio NUMERIC,
+    ADD COLUMN IF NOT EXISTS limit_up_price NUMERIC,
+    ADD COLUMN IF NOT EXISTS limit_down_price NUMERIC,
+    ADD COLUMN IF NOT EXISTS is_limit_up BOOLEAN,
+    ADD COLUMN IF NOT EXISTS is_limit_down BOOLEAN,
+    ADD COLUMN IF NOT EXISTS is_touched_limit_up BOOLEAN,
+    ADD COLUMN IF NOT EXISTS is_failed_limit_up BOOLEAN,
+    ADD COLUMN IF NOT EXISTS data_source TEXT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+
+-- 涨停生态个股池
+-- 每日记录个股涨停/触板/炸板/连板状态
+CREATE TABLE IF NOT EXISTS limitup_stock_pool (
+    trade_date DATE NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+
+    close NUMERIC,
+    pct_chg NUMERIC,
+    high NUMERIC,
+    low NUMERIC,
+    pre_close NUMERIC,
+
+    limit_ratio NUMERIC,
+    limit_up_price NUMERIC,
+    limit_down_price NUMERIC,
+
+    is_limit_up BOOLEAN,
+    is_limit_down BOOLEAN,
+    is_touched_limit_up BOOLEAN,
+    is_failed_limit_up BOOLEAN,
+
+    consecutive_limit_up_count INTEGER,
+    limitup_status TEXT,
+
+    data_source TEXT,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (trade_date, code)
+);
+CREATE INDEX IF NOT EXISTS idx_limitup_pool_date ON limitup_stock_pool(trade_date);
+CREATE INDEX IF NOT EXISTS idx_limitup_pool_code_date ON limitup_stock_pool(code, trade_date);
+
+
+-- 涨停生态每日聚合表
+-- 日报直接读取该表，避免主链路临时全市场拉历史K线
+CREATE TABLE IF NOT EXISTS limitup_daily_stats (
+    trade_date DATE PRIMARY KEY,
+
+    limit_up_count INTEGER,
+    limit_down_count INTEGER,
+
+    touched_limit_up_count INTEGER,
+    failed_limit_up_count INTEGER,
+    failed_limit_up_rate NUMERIC,
+
+    max_consecutive_limit_up INTEGER,
+    three_board_plus_count INTEGER,
+
+    yesterday_limit_up_avg_return NUMERIC,
+    yesterday_limit_up_win_rate NUMERIC,
+
+    data_source TEXT,
+    coverage_ratio NUMERIC,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 
 -- 信号表现追踪表

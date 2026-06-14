@@ -163,10 +163,31 @@ def check_weak_market(market):
                    "triggered": triggered, "status": "checked",
                    "note": "跌停压过涨停" if triggered else "涨停多于跌停"})
 
-    # 数据不足项
-    for name in ["昨涨停今表现差", "3板以上稀少", "量能持续萎缩"]:
-        items.append({"name": name, "value": "N/A", "triggered": False,
-                       "status": "insufficient", "note": "当前数据源未覆盖"})
+    limitup_stats = market.get("limitup_stats") or {}
+    if limitup_stats.get("status") == "ok" and limitup_stats.get("yesterday_limit_up_avg_return") is not None:
+        avg_return = float(limitup_stats.get("yesterday_limit_up_avg_return") or 0)
+        triggered = avg_return < 0
+        items.append({"name": "昨涨停今表现差", "value": f"{avg_return:+.2f}%",
+                       "triggered": triggered, "status": "checked",
+                       "note": "昨日涨停池转弱" if triggered else "昨日涨停池表现尚可"})
+    else:
+        note = "缺少前一交易日涨停池" if limitup_stats.get("status") == "ok" else "涨停生态日表未生成"
+        items.append({"name": "昨涨停今表现差", "value": "未生成", "triggered": False,
+                       "status": "insufficient", "note": note})
+
+    if limitup_stats.get("status") == "ok" and limitup_stats.get("three_board_plus_count") is not None:
+        three_count = int(limitup_stats.get("three_board_plus_count") or 0)
+        triggered = three_count == 0
+        items.append({"name": "3板以上稀少", "value": f"{three_count}只",
+                       "triggered": triggered, "status": "checked",
+                       "note": "高标梯队断层" if triggered else "高标梯队仍在"})
+    else:
+        note = "缺少前一交易日涨停池" if limitup_stats.get("status") == "ok" else "涨停生态日表未生成"
+        items.append({"name": "3板以上稀少", "value": "未生成", "triggered": False,
+                       "status": "insufficient", "note": note})
+
+    items.append({"name": "量能持续萎缩", "value": "N/A", "triggered": False,
+                   "status": "insufficient", "note": "当前数据源未覆盖"})
 
     triggers = sum(1 for it in items if it["triggered"])
     checked = sum(1 for it in items if it["status"] == "checked")
@@ -217,13 +238,41 @@ def assess_profit_effect(market):
         detail = "涨跌比和绿盘占比显示市场宽度明显偏弱，亏钱效应较为普遍。"
     else:
         level = "尚可"
-        detail = "短线宽度正常，但缺少连板高度和炸板率数据，无法完整评估。"
+        detail = "短线宽度正常。"
+
+    limitup_stats = market.get("limitup_stats") or {}
+    limitup_metrics = market.get("limitup_metrics") or {}
+    has_failed_rate = (
+        limitup_stats.get("status") == "ok"
+        and limitup_stats.get("failed_limit_up_rate") is not None
+    ) or (
+        limitup_metrics.get("data_status") == "ok"
+        and limitup_metrics.get("failed_limit_up_rate") is not None
+    )
+    has_consecutive = (
+        limitup_stats.get("status") == "ok"
+        and limitup_stats.get("max_consecutive_limit_up") is not None
+    )
+    has_yesterday = (
+        limitup_stats.get("status") == "ok"
+        and limitup_stats.get("yesterday_limit_up_avg_return") is not None
+    )
+
+    missing = []
+    if not has_yesterday:
+        missing.append("昨日涨停表现")
+    if not has_consecutive:
+        missing.append("连板高度")
+    if not has_failed_rate:
+        missing.append("炸板率")
+    downgraded = bool(missing)
+    note = f"由于缺少{'、'.join(missing)}，本结论为降级判断。" if missing else ""
 
     return {
         "level": level,
         "detail": detail,
-        "downgraded": True,
-        "note": "由于缺少昨日涨停表现、连板高度、炸板率，本结论为降级判断。",
+        "downgraded": downgraded,
+        "note": note,
         "adv_ratio": adv_ratio,
         "lb_ratio": lb_ratio,
         "green_ratio": green_ratio,
@@ -455,4 +504,3 @@ def validate_position_consistency(trade_plan):
     r = trade_plan.get("market_restrictions", {})
     return {"ok": True, "max_pct": r.get("max_position_pct", 0),
             "single_pct": r.get("single_stock_pct", 0)}
-
