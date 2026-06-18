@@ -75,6 +75,13 @@ def analyze_market(stock_df, index_df):
         - min(limit_down / 50, 1) * 15
         + 20
     )
+    # Penalize poor market breadth so high volume/limit-up activity does not
+    # produce an overly bullish score when most stocks are falling.
+    green_ratio = down_count / max(len(df), 1)
+    if green_ratio > 0.60:
+        score -= min((green_ratio - 0.60) / 0.20, 1) * 12
+    if down_count > up_count:
+        score -= min((down_count / max(up_count, 1) - 1) / 1.5, 1) * 8
     score = max(0, min(100, score))
 
     status = classify_market_status(score)

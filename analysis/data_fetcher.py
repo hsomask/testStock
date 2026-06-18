@@ -701,7 +701,13 @@ def _text_or_none(x):
     return str(x)
 
 
-def get_stock_history(code: str, days: int = 80, name: str = ""):
+def get_stock_history(
+    code: str,
+    days: int = 80,
+    name: str = "",
+    require_fresh: bool = True,
+    allow_api: bool = True,
+):
     """
     获取个股历史K线。优先从 DB 缓存读取，缺失时从 API 获取并自动入库。
     """
@@ -713,11 +719,16 @@ def get_stock_history(code: str, days: int = 80, name: str = ""):
     if not db_df.empty and "date" in db_df.columns:
         db_dates = set(db_df["date"].astype(str).str[:10].tolist())
     latest_db_date = max(db_dates) if db_dates else None
-    fresh_cutoff = _latest_expected_cache_date()
+    fresh_cutoff = _latest_expected_cache_date() if require_fresh else None
 
     # 2. 如果 DB 已有足够且不陈旧的数据，直接返回
-    if len(db_dates) >= max(days - 3, 1) and latest_db_date and latest_db_date >= fresh_cutoff:
+    has_enough_cache = len(db_dates) >= max(days - 3, 1)
+    is_fresh_enough = (not require_fresh) or (latest_db_date and latest_db_date >= fresh_cutoff)
+    if has_enough_cache and is_fresh_enough:
         return db_df.tail(days)
+
+    if not allow_api:
+        return db_df.tail(days) if not db_df.empty else pd.DataFrame()
 
     # 3. 从 API 获取
     symbol_candidates = [code]
@@ -788,7 +799,7 @@ def calc_history_indicators(hist):
     }
 
 
-def enrich_stock_indicators(stock_df, max_stocks: int = 1200):
+def enrich_stock_indicators(stock_df, max_stocks: int = 300):
     """给个股实时数据补充 MA5/MA10/MA20/5日涨幅/20日涨幅"""
     df = stock_df.copy()
 
@@ -835,7 +846,7 @@ def enrich_stock_indicators(stock_df, max_stocks: int = 1200):
     for idx in selected_indices:
         code = str(df.at[idx, "code"])
         name = df.at[idx, "name"] if "name" in df.columns else ""
-        hist = get_stock_history(code, days=80, name=name)
+        hist = get_stock_history(code, days=80, name=name, require_fresh=False, allow_api=False)
         indicators = calc_history_indicators(hist)
 
         if not indicators:

@@ -27,11 +27,11 @@ def _status_for(sample_count, win_rate, avg_return, failed_rate, avg_drawdown):
     dd = avg_drawdown or 0
 
     if failed >= 0.45 or (avg <= -0.015 and dd <= -0.05):
-        return "blocked", f"失败率{failed:.1%}偏高，策略短期需要回避"
+        return "blocked", "策略短期需要回避"
     if win < 0.45 or avg < -0.01:
-        return "weak", f"胜率{win:.1%}或均值{avg:.2%}偏弱，候选需要降级"
+        return "weak", "策略近期偏弱，候选需要降级"
     if win >= 0.60 and failed <= 0.25 and avg >= 0:
-        return "hot", f"胜率{win:.1%}且失败率{failed:.1%}较低，策略反馈较好"
+        return "hot", "策略反馈较好"
     return "normal", "策略反馈中性，暂不调整"
 
 

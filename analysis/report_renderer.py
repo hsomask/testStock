@@ -1013,7 +1013,11 @@ def render_unified_report(
     # ══════════════════════════════════════
     lines.append("## 12. 明日验证清单")
     lines.append("")
-    checklist = generate_validation_checklist(market, effective_themes, profit, weak_triggers)
+    validation_themes = (
+        [{"name": name} for name, _ in obs_main[:3]]
+        if obs_main else effective_themes
+    )
+    checklist = generate_validation_checklist(market, validation_themes, profit, weak_triggers)
     for i, item in enumerate(checklist):
         lines.append(f"{i + 1}. {item}")
     lines.append("")
