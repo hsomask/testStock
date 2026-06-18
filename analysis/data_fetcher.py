@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 import akshare as ak
 import logging
 
@@ -86,6 +86,17 @@ def is_trade_day(trade_date: str) -> bool:
             return dt.weekday() < 5  # 0=Mon, 4=Fri
         except Exception:
             return False
+
+
+def _latest_expected_cache_date():
+    """Return the minimum recent date a daily K-line cache should cover."""
+    today = datetime.now().date()
+    offset = 1
+    candidate = today - timedelta(days=offset)
+    while candidate.weekday() >= 5:
+        offset += 1
+        candidate = today - timedelta(days=offset)
+    return candidate.strftime("%Y-%m-%d")
 
 
 def _ensure_columns(df, required_cols):
@@ -701,9 +712,11 @@ def get_stock_history(code: str, days: int = 80, name: str = ""):
     db_dates = set()
     if not db_df.empty and "date" in db_df.columns:
         db_dates = set(db_df["date"].astype(str).str[:10].tolist())
+    latest_db_date = max(db_dates) if db_dates else None
+    fresh_cutoff = _latest_expected_cache_date()
 
-    # 2. 如果 DB 已有足够数据（>= days 条），直接返回
-    if len(db_dates) >= max(days - 3, 1):  # 容差 3 天
+    # 2. 如果 DB 已有足够且不陈旧的数据，直接返回
+    if len(db_dates) >= max(days - 3, 1) and latest_db_date and latest_db_date >= fresh_cutoff:
         return db_df.tail(days)
 
     # 3. 从 API 获取

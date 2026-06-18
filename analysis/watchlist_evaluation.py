@@ -116,6 +116,8 @@ def fetch_signals(conn, start_date, end_date):
     desired = [
         "id", "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
+        "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
+        "pct_5d", "pct_20d", "hot_board_hits",
     ]
     select_cols = [c for c in desired if c in existing_cols]
 
@@ -159,6 +161,8 @@ def fetch_signals_for_date(conn, signal_date):
     desired = [
         "id", "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
+        "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
+        "pct_5d", "pct_20d", "hot_board_hits",
     ]
     select_cols = [c for c in desired if c in existing_cols]
 
@@ -221,6 +225,114 @@ def compute_verification_tag(next_1d_return, max_3d_drawdown, layer):
         else:
             tag = "neutral"
     return tag
+
+
+def _safe_float(value):
+    try:
+        if value is None or pd.isna(value):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def compute_feedback(signal, metrics, status):
+    """Build a T+1 feedback label and explainable attribution tags."""
+    if not metrics:
+        reasons = status.get("missing_reasons", []) if status else []
+        return {
+            "feedback_label": "data_insufficient",
+            "feedback_score": None,
+            "attribution_tags": ["data_insufficient"] + list(reasons[:3]),
+            "attribution_text": "K线覆盖不足，暂不评价强弱。",
+        }
+
+    r1 = metrics.get("next_1d_return")
+    r3 = metrics.get("next_3d_return")
+    max3 = metrics.get("max_3d_return")
+    dd3 = metrics.get("max_3d_drawdown")
+
+    if r1 is None:
+        label = "data_insufficient"
+    elif r1 >= 0.03 or (max3 is not None and max3 >= 0.06):
+        label = "strong_follow"
+    elif r1 >= 0 and (dd3 is None or dd3 >= -0.03):
+        label = "walk_strong"
+    elif r1 <= -0.03 or (dd3 is not None and dd3 <= -0.05):
+        label = "failed"
+    else:
+        label = "weak"
+
+    score = 50.0
+    if r1 is not None:
+        score += r1 * 500
+    if max3 is not None:
+        score += max3 * 120
+    if dd3 is not None:
+        score += dd3 * 180
+    feedback_score = round(max(0, min(100, score)), 1)
+
+    tags = []
+    pct_chg = _safe_float(signal.get("pct_chg"))
+    pct_5d = _safe_float(signal.get("pct_5d"))
+    pct_20d = _safe_float(signal.get("pct_20d"))
+    volume_ratio = _safe_float(signal.get("volume_ratio"))
+    next_close = _safe_float(metrics.get("next_1d_close"))
+
+    if pct_chg is not None and pct_chg >= 9.5:
+        tags.append("gap_or_chase_risk")
+    elif pct_chg is not None and pct_chg >= 7:
+        tags.append("high_intraday_position")
+
+    if volume_ratio is not None and volume_ratio >= 6:
+        tags.append("volume_overheat")
+    elif volume_ratio is not None and volume_ratio < 0.8:
+        tags.append("weak_volume")
+
+    if pct_5d is not None and pct_5d >= 20:
+        tags.append("short_term_extended")
+    if pct_20d is not None and pct_20d >= 50:
+        tags.append("swing_position_extended")
+
+    if next_close is not None:
+        broken = []
+        for ma_name in ("ma5", "ma10", "ma20"):
+            ma_val = _safe_float(signal.get(ma_name))
+            if ma_val is not None and ma_val > 0 and next_close < ma_val:
+                broken.append(ma_name.upper())
+        if broken:
+            tags.append("ma_breakdown:" + "/".join(broken))
+
+    if label in ("weak", "failed") and not tags:
+        tags.append("weak_follow_without_clear_context")
+    if label in ("strong_follow", "walk_strong") and not tags:
+        tags.append("pattern_confirmed")
+
+    tag_text = {
+        "gap_or_chase_risk": "信号日涨幅接近涨停，次日追高风险较高",
+        "high_intraday_position": "信号日涨幅偏高，适合降低追高权重",
+        "volume_overheat": "信号日量比过高，可能存在短线高潮",
+        "weak_volume": "信号日量能不足，承接确认偏弱",
+        "short_term_extended": "5日涨幅偏大，短线位置偏高",
+        "swing_position_extended": "20日涨幅偏大，波段位置偏高",
+        "weak_follow_without_clear_context": "次日走弱，现有字段未定位到单一原因",
+        "pattern_confirmed": "次日反馈验证了信号有效性",
+    }
+
+    readable = []
+    for tag in tags:
+        base = tag.split(":", 1)[0]
+        if base == "ma_breakdown":
+            readable.append("T+1跌破关键均线：" + tag.split(":", 1)[1])
+        else:
+            readable.append(tag_text.get(tag, tag))
+
+    return {
+        "feedback_label": label,
+        "feedback_score": feedback_score,
+        "attribution_tags": tags,
+        "attribution_text": "；".join(readable[:5]),
+    }
 
 
 def evaluate_signal_performance(signal, as_of_date=None):
@@ -330,8 +442,10 @@ def evaluate_signal_performance(signal, as_of_date=None):
     # 1d
     row_1d = future.iloc[0]
     next_1d_return = None
+    next_1d_close = None
     try:
-        next_1d_return = float(row_1d["close"]) / close_price - 1
+        next_1d_close = float(row_1d["close"])
+        next_1d_return = next_1d_close / close_price - 1
         status["evaluated_1d"] = True
     except (TypeError, ValueError):
         pass
@@ -360,6 +474,7 @@ def evaluate_signal_performance(signal, as_of_date=None):
 
     metrics = {
         "entry_close": close_price,
+        "next_1d_close": next_1d_close,
         "next_1d_return": next_1d_return,
         "next_3d_return": next_3d_return,
         "max_3d_return": max_3d_return,
@@ -914,6 +1029,7 @@ def evaluate_records(signals, as_of_date=None):
         r1 = metrics["next_1d_return"] if metrics else None
         dd3 = metrics["max_3d_drawdown"] if metrics else None
         vtag = compute_verification_tag(r1, dd3, layer)
+        feedback = compute_feedback(sig, metrics, status)
 
         record = {
             "signal_key": build_signal_key(sig),
@@ -927,6 +1043,10 @@ def evaluate_records(signals, as_of_date=None):
             "metrics": metrics,
             "status": status,
             "verification_tag": vtag,
+            "feedback_label": feedback["feedback_label"],
+            "feedback_score": feedback["feedback_score"],
+            "attribution_tags": feedback["attribution_tags"],
+            "attribution_text": feedback["attribution_text"],
             "debug": {
                 "entry_close_found": status["entry_close_found"],
                 "as_of_close_found": status["as_of_close_found"],
@@ -1082,6 +1202,7 @@ def save_evaluation_to_db(result):
                     action_signal, entry_close,
                     next_1d_return, next_3d_return, max_3d_return, max_3d_drawdown,
                     is_mature_1d, is_mature_3d, price_status, missing_reason, verification_tag,
+                    feedback_label, feedback_score, attribution_tags, attribution_text,
                     confidence_level, conclusion_level
                 ) VALUES (
                     %s, %s, %s, %s, %s,
@@ -1089,6 +1210,7 @@ def save_evaluation_to_db(result):
                     %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
                     %s, %s
                 )
                 ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
@@ -1103,6 +1225,10 @@ def save_evaluation_to_db(result):
                     price_status = EXCLUDED.price_status,
                     missing_reason = EXCLUDED.missing_reason,
                     verification_tag = EXCLUDED.verification_tag,
+                    feedback_label = EXCLUDED.feedback_label,
+                    feedback_score = EXCLUDED.feedback_score,
+                    attribution_tags = EXCLUDED.attribution_tags,
+                    attribution_text = EXCLUDED.attribution_text,
                     confidence_level = EXCLUDED.confidence_level,
                     conclusion_level = EXCLUDED.conclusion_level,
                     evaluated_at = NOW()
@@ -1118,6 +1244,10 @@ def save_evaluation_to_db(result):
                 "ok" if detail.get("metrics") else "missing",
                 missing_reason,
                 detail.get("verification_tag"),
+                detail.get("feedback_label"),
+                detail.get("feedback_score"),
+                json.dumps(detail.get("attribution_tags") or [], ensure_ascii=False),
+                detail.get("attribution_text"),
                 diag.get("confidence_level"), diag.get("conclusion_level"),
             ))
 

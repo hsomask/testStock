@@ -40,6 +40,7 @@ INSTITUTIONAL_KEYWORDS = [
 
 ATTRIBUTE_KEYWORDS = [
     "专精特新", "央企", "国企改革", "高送转", "预盈预增", "参股金融",
+    "行业龙头", "龙头", "独角兽",
 ]
 
 PRICE_ATTRIBUTE_KEYWORDS = [
@@ -416,13 +417,17 @@ def generate_validation_checklist(market, themes, profit_effect, weak_triggers):
     width = compute_market_width(market)
 
     if effective:
-        items.append(f"{'、'.join(t['name'] for t in effective[:2])} 能否继续承接")
+        names = [t["name"] for t in effective[:3] if t.get("name")]
+        items.append(f"{'、'.join(names)} 能否继续承接")
     if width["green_ratio"] > 0.6:
         items.append("市场宽度能否修复（绿盘占比降至 60% 以下）")
     if market.get("limit_up", 0) > 50:
         items.append("今日强势股是否出现亏钱效应")
-    items.append("高风险复盘层是否继续强于可观察层")
-    items.append("高潮板块是否出现回落")
+    if profit_effect.get("downgraded"):
+        items.append("缺失的赚钱效应指标能否补齐，避免降级判断")
+    items.append("观察池分层是否继续有效（候选低吸强于只观察/高风险）")
+    if market.get("limit_up", 0) > 80 or market.get("score", 0) >= 75:
+        items.append("高潮方向是否出现冲高回落或炸板扩散")
     return items[:5]
 
 
