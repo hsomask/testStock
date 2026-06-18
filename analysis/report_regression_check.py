@@ -47,14 +47,32 @@ def extract_section(text, start_marker, end_marker="---"):
     return text[idx:end]
 
 
+def find_heading(text, title):
+    """Find a markdown heading by title, ignoring numeric prefixes."""
+    m = re.search(rf"^##\s+\d+\.\s+{re.escape(title)}\s*$", text, re.MULTILINE)
+    if m:
+        return m.start()
+    m = re.search(rf"^##\s+{re.escape(title)}\s*$", text, re.MULTILINE)
+    return m.start() if m else -1
+
+
+def extract_heading_section(text, title):
+    start = find_heading(text, title)
+    if start < 0:
+        return ""
+    m = re.search(r"^##\s+", text[start + 1:], re.MULTILINE)
+    end = start + 1 + m.start() if m else len(text)
+    return text[start:end]
+
+
 def check_a_non_industrial(text):
     """A: 非产业标签不得误入产业主线"""
     failures = []
     industrial_zones = []
     for marker in ["产业概念 3日流入", "产业概念 3日流出",
-                   "有效主线 / 观察主线", "退潮方向",
-                   "## 10. 机会观察"]:
+                   "有效主线 / 观察主线", "退潮方向"]:
         industrial_zones.append(extract_section(text, marker))
+    industrial_zones.append(extract_heading_section(text, "机会观察"))
     combined = "\n".join(industrial_zones)
 
     for term in NON_INDUSTRIAL_TERMS:
@@ -66,12 +84,11 @@ def check_a_non_industrial(text):
 def check_b_duplicated(text):
     """B: 观察池重复"""
     failures = []
-    wl_start = text.find("## 11. 观察池")
+    wl_start = find_heading(text, "观察池")
     if wl_start < 0:
         return ["观察池模块不存在"]
-    wl_end = text.find("## 12.", wl_start)
-    if wl_end < 0:
-        wl_end = len(text)
+    next_heading = re.search(r"^##\s+", text[wl_start + 1:], re.MULTILINE)
+    wl_end = wl_start + 1 + next_heading.start() if next_heading else len(text)
     wl_text = text[wl_start:wl_end]
 
     for marker in ["候选低吸", "只观察", "交易条件不满足", "高风险回避", "不可交易过滤"]:
@@ -90,11 +107,12 @@ def check_c_excluded_exclusivity(text):
     """C: 不可交易过滤互斥"""
     failures = []
     # 先截取观察池区域
-    wl_start = text.find("## 11. 观察池")
-    wl_end = text.find("## 12.", wl_start) if wl_start >= 0 else -1
+    wl_start = find_heading(text, "观察池")
     if wl_start < 0:
         return []
-    wl_text = text[wl_start:wl_end] if wl_end > 0 else text[wl_start:]
+    next_heading = re.search(r"^##\s+", text[wl_start + 1:], re.MULTILINE)
+    wl_end = wl_start + 1 + next_heading.start() if next_heading else len(text)
+    wl_text = text[wl_start:wl_end]
 
     excl_sec = extract_section(wl_text, "不可交易过滤", "\n### ")
     if not excl_sec:

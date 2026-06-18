@@ -12,7 +12,8 @@ from analysis.board_alias import normalize_board_name
 from analysis.report_insights import (
     check_weak_market, weak_market_conclusion,
     assess_profit_effect, compute_market_width,
-    assess_trading_environment, assign_pattern_tag,
+    assess_trading_environment,
+    assign_stock_role,
     generate_validation_checklist, explain_sentiment_stage,
     validate_position_consistency,
     filter_effective_themes, is_dynamic_label,
@@ -259,24 +260,26 @@ def _render_snapshot_stocks(lines, td):
     if top:
         lines.append("### 表现较好")
         lines.append("")
-        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 |")
-        lines.append("|------|----------|----------|------|------|")
+        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 | 反馈 |")
+        lines.append("|------|----------|----------|------|------|------|")
         for s in top:
             pct_str = _fmt_pct(s.get("pct_chg", 0) / 100) if s.get("pct_chg") is not None else "N/A"
             vol_note = s.get("volume_note", "N/A")
             tag = s.get("tag", "N/A")
-            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} |")
+            feedback = _snapshot_feedback_text(s, positive=True)
+            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} | {feedback} |")
         lines.append("")
     if bottom:
         lines.append("### 表现较弱")
         lines.append("")
-        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 |")
-        lines.append("|------|----------|----------|------|------|")
+        lines.append("| 股票 | 昨日层级 | 今日涨跌 | 量价 | 结果 | 错因/风险 |")
+        lines.append("|------|----------|----------|------|------|-----------|")
         for s in bottom:
             pct_str = _fmt_pct(s.get("pct_chg", 0) / 100) if s.get("pct_chg") is not None else "N/A"
             vol_note = s.get("volume_note", "N/A")
             tag = s.get("tag", "N/A")
-            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} |")
+            feedback = _snapshot_feedback_text(s)
+            lines.append(f"| {s.get('name','')} | {s.get('layer','')} | {pct_str} | {vol_note} | {tag} | {feedback} |")
         lines.append("")
 
 
@@ -295,6 +298,237 @@ def _dedup_tp_entries(items):
         else:
             seen[key] = dict(st)
     return list(seen.values())
+
+
+def _short_text(value, max_len=36):
+    text = str(value or "").replace("\n", "；").strip()
+    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
+
+def _trading_mode(m_score, width, profit, weak_triggers, trade_plan):
+    restrictions = trade_plan.get("market_restrictions", {}) if trade_plan else {}
+    pos_cap = restrictions.get("max_position_pct", 0)
+    allow_trade = restrictions.get("allow_real_trade", True)
+    profit_level = str(profit.get("level", ""))
+    green_ratio = width.get("green_ratio", 0)
+    adv_ratio = width.get("adv_ratio", 1)
+
+    if not allow_trade or pos_cap <= 0 or m_score < 45 or weak_triggers >= 3:
+        return "空仓", "亏钱效应或交易限制较强，今日不宜开新仓。"
+    if pos_cap <= 2 or green_ratio > 0.65 or adv_ratio < 0.5 or "弱" in profit_level:
+        return "防守", "市场宽度或赚钱效应偏弱，只看核心方向。"
+    if pos_cap <= 3 or weak_triggers >= 1 or green_ratio > 0.55:
+        return "试错", "有局部机会，但确认度不足，适合小仓观察。"
+    return "进攻", "市场环境相对可用，可围绕主线做分歧低吸。"
+
+
+def _mode_actions(mode):
+    actions = {
+        "进攻": ("主线核心分歧低吸", "追高扩散、无主线普买"),
+        "试错": ("小仓试错、核心方向观察", "后排跟风加仓、情绪高潮追入"),
+        "防守": ("观察、极小仓核心低吸", "追高、中位股、跟风加仓"),
+        "空仓": ("复盘观察、等待修复", "新开仓、追涨、补仓摊平"),
+    }
+    return actions.get(mode, ("观察", "追高"))
+
+
+def _weak_brief(weak_items, triggered=True, max_items=3):
+    picked = []
+    for item in weak_items or []:
+        if item.get("status") != "checked":
+            continue
+        if bool(item.get("triggered")) == triggered:
+            picked.append(item.get("name", ""))
+        if len(picked) >= max_items:
+            break
+    return "、".join([p for p in picked if p]) or "无明显项"
+
+
+def _board_stage_map(board_trend_summary):
+    stage_map = {}
+    if not isinstance(board_trend_summary, dict):
+        return stage_map
+    for key in ("strengthening_boards", "weakening_boards"):
+        for item in board_trend_summary.get(key, []) or []:
+            name = str(item.get("board_name", "")).strip()
+            if not name:
+                continue
+            stage_map[name] = {
+                "stage": item.get("life_cycle") or "-",
+                "signal": item.get("life_cycle_signal") or "-",
+                "score": item.get("trend_score"),
+            }
+    return stage_map
+
+
+def _extract_observation_directions(board_ratio_changes):
+    """从板块成交占比变化中提取日报主线/退潮方向，供顶部和主线区共用。"""
+    directions = []
+    if not board_ratio_changes:
+        return directions, [], []
+
+    for ratio_key in ["concept_ratio_3d_up", "concept_ratio_3d_down"]:
+        df = board_ratio_changes.get(ratio_key)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            name = str(row.get("board_name", ""))
+            if classify_concept_label(name) != "industrial":
+                continue
+            raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+            change = float(raw) * 100 if pd.notna(raw) else 0
+            directions.append((name, change))
+
+    for ratio_key in ["industry_ratio_3d_up"]:
+        df = board_ratio_changes.get(ratio_key)
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            name = row.get("board_name", "")
+            raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
+            change = float(raw) * 100 if pd.notna(raw) else 0
+            directions.append((name, change))
+
+    directions.sort(key=lambda x: x[1], reverse=True)
+    main = [(n, c) for n, c in directions if c > 0][:5]
+    receding = [(n, c) for n, c in directions if c < 0][:5]
+    return directions, main, receding
+
+
+def _theme_action(stage, signal, width_weak):
+    text = f"{stage} {signal}"
+    if "退潮" in text or "失败" in text:
+        return "回避"
+    if "分歧" in text:
+        return "只看核心"
+    if "加速" in text or "高潮" in text:
+        return "不追后排"
+    if "启动" in text:
+        return "小仓试错"
+    if "主升" in text or "主线" in text or "加强" in text or "确认" in text:
+        return "核心低吸" if not width_weak else "只看核心"
+    return "观察确认"
+
+
+def _stock_trade_reason(stock, role, mode, fallback="-"):
+    reason = str(stock.get("reason") or stock.get("entry_reason") or fallback or "-")
+    if "策略反馈降级" in reason:
+        return "策略反馈偏弱，先降级观察"
+    if "关键指标缺失" in reason:
+        return "关键指标缺失，先观察"
+    if "涨幅" in reason or "接近涨停" in reason:
+        return "位置偏高，不追高"
+    if role in ("主线核心", "低位补涨"):
+        return "方向仍有承接，等待低吸条件"
+    if role in ("跟风套利", "中位风险", "短线偏高"):
+        return "依赖主线情绪，防止分化补跌"
+    if mode in ("防守", "空仓"):
+        return "当前模式偏防守，降低参与度"
+    return _short_text(reason, 28)
+
+
+def _stock_no_buy_reason(stock, role, mode):
+    reason = str(stock.get("reason") or "")
+    if "策略反馈降级" in reason:
+        return "策略近期反馈偏弱"
+    if role in ("跟风套利", "中位风险", "短线偏高"):
+        return "后排或位置风险"
+    if mode in ("防守", "空仓"):
+        return "环境不支持扩大仓位"
+    if "关键指标缺失" in reason:
+        return "关键指标不足"
+    return _short_text(reason or "等待确认", 28)
+
+
+def _decision_summary(stock, role, mode, category="watch"):
+    reason = str(stock.get("reason") or stock.get("entry_reason") or "")
+    if category == "low_buy":
+        if role in ("主线核心", "低位补涨"):
+            return "等回踩低吸，破位退出"
+        return "轻仓低吸，不追高"
+    if "策略反馈降级" in reason:
+        return "策略反馈偏弱，只观察"
+    if "接近涨停" in reason or "涨幅" in reason:
+        return "位置偏高，不追高"
+    if "关键指标缺失" in reason:
+        return "数据不足，只观察"
+    if "部分条件不满足" in reason:
+        return "条件不足，等确认"
+    if "满足全部低吸条件" in reason and category == "cond_fail":
+        return "被反馈降级，只观察"
+    if role in ("跟风套利", "中位风险", "短线偏高"):
+        return "后排/位置风险，只观察"
+    if mode in ("防守", "空仓"):
+        return "环境偏防守，只观察"
+    return _short_text(reason or "等待确认", 18)
+
+
+def _price_value(value):
+    try:
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        text = str(value or "").strip()
+        return text if text else "-"
+
+
+def _entry_zone(stock):
+    low = stock.get("observe_low", stock.get("buy_low"))
+    high = stock.get("observe_high", stock.get("buy_high"))
+    low_s = _price_value(low)
+    high_s = _price_value(high)
+    if low_s == "-" and high_s == "-":
+        return "-"
+    if low_s == high_s or high_s == "-":
+        return low_s
+    if low_s == "-":
+        return high_s
+    return f"{low_s}~{high_s}"
+
+
+def _target_price(stock):
+    return _price_value(stock.get("pressure_price", stock.get("target")))
+
+
+def _stop_price(stock):
+    return _price_value(stock.get("invalid_price", stock.get("stop_loss")))
+
+
+def _t1_feedback_text(item, positive=False):
+    text = item.get("attribution_text") or item.get("feedback_reason") or ""
+    if text:
+        return _short_text(text, 34)
+    label = item.get("feedback_label")
+    if label == "strong_follow":
+        return "信号次日有效"
+    if label == "walk_strong":
+        return "走势延续，承接尚可"
+    if label == "failed":
+        return "次日走弱，需复盘买点或环境"
+    if positive:
+        return "承接验证"
+    return "走弱，原因待复盘"
+
+
+def _snapshot_feedback_text(item, positive=False):
+    tag = str(item.get("tag") or "")
+    vol = str(item.get("volume_note") or "")
+    if positive:
+        if "健康放量" in vol:
+            return "放量承接较好"
+        if "缩量" in vol:
+            return "缩量上涨，持续性待确认"
+        return "当日表现验证"
+    if "大跌" in tag:
+        if "放量" in vol:
+            return "放量下跌，资金分歧较大"
+        return "次日大跌，需复盘环境或买点"
+    if "走弱" in tag:
+        return "承接偏弱，继续观察"
+    if "震荡" in tag:
+        return "未形成强反馈"
+    return "风险原因待正式 evaluation 确认"
 
 
 def render_unified_report(
@@ -325,11 +559,17 @@ def render_unified_report(
     width_weak = width["green_ratio"] > 0.6 or width["adv_ratio"] < 0.5
     env = assess_trading_environment(market, sentiment, trade_plan, profit)
     env["weak_market_triggers"] = f"{weak_triggers}/{weak_checked}"
+    trade_mode, mode_summary = _trading_mode(m_score, width, profit, weak_triggers, trade_plan)
+    can_do, avoid_do = _mode_actions(trade_mode)
+    board_stage_map = _board_stage_map(board_trend_summary)
+    obs_directions, obs_main, receding = _extract_observation_directions(board_ratio_changes)
     # Merge themes from both detect_main_themes and sentiment
     all_raw_themes = list(themes or [])
     if isinstance(sentiment, dict) and sentiment.get("themes"):
         all_raw_themes.extend(sentiment["themes"])
     effective_themes, dynamic_themes = filter_effective_themes(all_raw_themes)
+    validation_themes = [{"name": name} for name, _ in obs_main[:3]] if obs_main else effective_themes
+    validation_items = generate_validation_checklist(market, validation_themes, profit, weak_triggers)
 
     s_stage, stage_explain = explain_sentiment_stage(s_score, s_stage)
     failed_limitup_value, failed_limitup_note = _render_failed_limitup_cells(market, sentiment)
@@ -358,7 +598,16 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 0. 今日摘要
     # ══════════════════════════════════════
-    lines.append("## 0. 今日摘要")
+    lines.append("## 0. 今日结论")
+    lines.append("")
+    lines.append(f"**一句话：** {trade_mode}模式。{mode_summary}")
+    lines.append("")
+    lines.append("**交易纪律：**")
+    lines.append(f"- 当前模式：{trade_mode}")
+    lines.append(f"- 仓位上限：{pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
+    lines.append(f"- 可以做：{can_do}")
+    lines.append(f"- 不要做：{avoid_do}")
+    lines.append(f"- 最重要验证：{validation_items[0] if validation_items else '观察池分层是否继续有效'}")
     lines.append("")
     lines.append("| 项目 | 结论 |")
     lines.append("|------|------|")
@@ -369,7 +618,7 @@ def render_unified_report(
     lines.append(f"| 单票上限 | {pos['single_pct']}成 |")
     lines.append(f"| 数据可信度 | {quality.get('confidence_score', 0)} / 100 |")
     lines.append("")
-    lines.append(f"**一句话结论：** {market.get('summary', '数据生成中')}")
+    lines.append(f"**市场原始摘要：** {market.get('summary', '数据生成中')}")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -477,30 +726,51 @@ def render_unified_report(
         bottom = td.get("top_losers", [])
         if top:
             lines.append("**表现较好：**")
+            lines.append("")
+            lines.append("| 股票 | 昨日层级 | 今日表现 | 反馈 |")
+            lines.append("|------|----------|----------|------|")
             for s in top:
-                lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
+                lines.append(
+                    f"| {s['name']} | {s.get('layer','')} | {_fmt_pct(s['ret'])} | "
+                    f"{_t1_feedback_text(s, positive=True)} |"
+                )
             lines.append("")
         if bottom:
             lines.append("**表现较弱：**")
+            lines.append("")
+            lines.append("| 股票 | 昨日层级 | 今日表现 | 错因/风险 |")
+            lines.append("|------|----------|----------|-----------|")
             for s in bottom:
-                lines.append(f"- {s['name']}（{s.get('layer','')}）：{_fmt_pct(s['ret'])}")
+                lines.append(
+                    f"| {s['name']} | {s.get('layer','')} | {_fmt_pct(s['ret'])} | "
+                    f"{_t1_feedback_text(s)} |"
+                )
             lines.append("")
 
     lines.append("---")
     lines.append("")
 
     # ══════════════════════════════════════
-    # 2. 交易环境判断
+    # 2. 市场与交易环境
     # ══════════════════════════════════════
-    lines.append("## 2. 交易环境判断")
+    lines.append("## 2. 市场与交易环境")
     lines.append("")
-    lines.append("| 维度 | 当前状态 | 解释 |")
-    lines.append("|------|----------|------|")
-    lines.append(f"| 赚钱效应 | {profit['level']} | {profit['detail'][:60]} |")
-    lines.append(f"| 弱市不做 | 触发 {weak_triggers}/{weak_checked} | {weak_conclusion} |")
+    env_summary = "指数环境尚可，但需要结合个股宽度和赚钱效应判断。" if m_score >= 60 else "市场评分偏低，优先控制回撤。"
+    if width_weak:
+        env_summary = "市场宽度偏弱，机会集中在少数方向，不适合普买。"
+    lines.append(f"**结论：** {env_summary}")
+    lines.append("")
+    lines.append("| 维度 | 当前状态 | 对交易的影响 |")
+    lines.append("|------|----------|--------------|")
+    lines.append(f"| 市场综合评分 | {m_score:.1f} / 100 | {'可参考但不代表普遍赚钱' if width_weak else '指数环境可参考'} |")
+    lines.append(f"| 市场宽度 | {'偏弱' if width_weak else '尚可' if width_ok else '一般'} | {'多数个股赚钱难' if width_weak else '关注持续性'} |")
+    lines.append(f"| 赚钱效应 | {profit['level']} | {_short_text(profit['detail'], 32)} |")
+    lines.append(f"| 弱市检查 | 触发 {weak_triggers}/{weak_checked} | {weak_conclusion} |")
     amount = market.get("total_amount", 0)
-    lines.append(f"| 市场量能 | {amount:.0f}亿 | 成交额 |")
-    lines.append(f"| 仓位边界 | {pos['max_pct']}成 | 来自 trade_plan |")
+    lines.append(f"| 市场量能 | {amount:.0f}亿 | 观察量能是否继续配合 |")
+    lines.append(f"| 仓位边界 | {pos['max_pct']}成 | {trade_mode}模式下不突破上限 |")
+    lines.append("")
+    lines.append(f"触发项：{_weak_brief(weak_items, True)}。未触发：{_weak_brief(weak_items, False)}。")
     lines.append("")
     if profit["downgraded"]:
         lines.append(f"> {profit['note']}")
@@ -509,95 +779,42 @@ def render_unified_report(
     lines.append("")
 
     # ══════════════════════════════════════
-    # 2. 市场状态
+    # 3. 市场证据
     # ══════════════════════════════════════
-    lines.append("## 3. 市场状态")
+    lines.append("## 3. 市场证据")
     lines.append("")
-    lines.append("### 3.1 大盘指数")
+    lines.append("### 3.1 指数与宽度")
     indices = market.get("indices", [])
-    if indices:
-        lines.append("| 指数 | 收盘 | 涨跌幅 | 成交额(亿) |")
-        lines.append("|------|------|--------|-----------|")
-        for item in indices:
-            lines.append(f"| {item['name']} | {fmt_num(item.get('close'))} | {fmt_pct(item.get('pct_chg'))} | {fmt_num(item.get('amount', 0)/1e8, 0)} |")
-    else:
-        lines.append("指数数据暂缺")
-    lines.append("")
-
-    lines.append("### 3.2 市场宽度")
-    lines.append("")
-    lines.append("| 指标 | 数值 | 判断 |")
-    lines.append("|------|------|------|")
-    lines.append(f"| 上涨家数 | {width['up_count']} | - |")
-    lines.append(f"| 下跌家数 | {width['down_count']} | - |")
-    lines.append(f"| 涨跌比 | {width['adv_ratio']:.2f} | {'宽度较好' if width['adv_ratio'] > 1.2 else '偏弱' if width['adv_ratio'] < 0.5 else '均衡'} |")
-    lines.append(f"| 绿盘占比 | {width['green_ratio']:.1%} | {'多数下跌' if width['green_ratio'] > 0.6 else '正常'} |")
-    lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
-    lines.append("")
+    index_summary = []
+    for item in indices[:3]:
+        index_summary.append(f"{item['name']} {fmt_pct(item.get('pct_chg'))}")
+    index_text = "；".join(index_summary) if index_summary else "指数数据暂缺"
+    lines.append(f"- 指数：{index_text}")
+    lines.append(f"- 宽度：上涨 {width['up_count']} / 下跌 {width['down_count']}，绿盘占比 {width['green_ratio']:.1%}，涨跌比 {width['adv_ratio']:.2f}")
     if width["green_ratio"] > 0.6 and market.get("score", 0) > 50:
-        lines.append("> 指数偏强，但个股宽度偏弱，属于结构分化。指数强不代表赚钱效应普遍。")
-        lines.append("")
-    lines.append("---")
+        lines.append("- 解读：指数表现不能代表全市场赚钱效应，当前属于结构分化。")
     lines.append("")
 
-    # ══════════════════════════════════════
-    # 3. 弱市不做检查
-    # ══════════════════════════════════════
-    lines.append("## 4. 弱市不做检查")
-    lines.append("")
-    lines.append(f"**弱市不做：{weak_tag}**")
-    lines.append("")
-    if weak_triggers >= 1:
-        lines.append("可计算项中，部分指标触发弱市信号，但涨跌停比仍显示短线活跃。")
-    else:
-        lines.append("可计算项中，绿盘占比和涨跌停比均未触发弱市信号。")
-    lines.append(f"结论：{weak_conclusion}")
-    lines.append("")
-    lines.append("| 类别 | 数量 |")
-    lines.append("|------|------|")
-    lines.append(f"| 可计算项 | {weak_checked} |")
-    lines.append(f"| 已触发 | {weak_triggers} |")
-    lines.append(f"| 数据不足 | {weak_insufficient} |")
-    lines.append("")
-    lines.append("| 检查项 | 当前值 | 触发 | 解读 |")
-    lines.append("|--------|--------|------|------|")
-    for item in weak_items:
-        trig = "YES" if item["triggered"] else "no"
-        if item["status"] == "insufficient":
-            trig = "-"
-        lines.append(f"| {item['name']} | {item['value']} | {trig} | {item['note']} |")
-    lines.append("")
-    lines.append(f"**仓位上限：** 不超过 trade_plan 上限（{pos['max_pct']}成）。")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # ══════════════════════════════════════
-    # 4. 情绪周期与赚钱效应
-    # ══════════════════════════════════════
-    lines.append("## 5. 情绪周期与赚钱效应")
-    lines.append("")
-    lines.append("| 指标 | 当前值 | 信号 |")
+    lines.append("### 3.2 弱市与情绪")
+    lines.append("| 维度 | 当前值 | 判断 |")
     lines.append("|------|--------|------|")
-    lines.append(f"| 短线情绪评分 | {s_score:.1f} / 100 | {s_stage} |")
-    lines.append(f"| 昨日涨停今日表现 | {yesterday_limitup_value} | {yesterday_limitup_note} |")
-    lines.append(f"| 连板高度 | {consecutive_height_value} | {consecutive_height_note} |")
-    lines.append(f"| 3板以上数量 | {three_board_value} | {three_board_note} |")
-    lines.append(f"| 涨停家数 | {width['limit_up']}家 | {'活跃' if width['limit_up'] > 50 else '一般'} |")
-    lines.append(f"| 炸板率 | {failed_limitup_value} | {failed_limitup_note} |")
-    lines.append(f"| 成交额 | {amount:.0f}亿 | - |")
+    lines.append(f"| 弱市不做 | {weak_tag}，触发 {weak_triggers}/{weak_checked} | {weak_conclusion} |")
+    lines.append(f"| 触发项 | {_weak_brief(weak_items, True)} | 影响仓位和参与度 |")
+    lines.append(f"| 短线情绪 | {s_score:.1f} / 100，{s_stage} | {stage_explain} |")
+    lines.append(f"| 涨停/炸板 | 涨停 {width['limit_up']} 家，炸板率 {failed_limitup_value} | {failed_limitup_note} |")
+    lines.append(f"| 昨日涨停反馈 | {yesterday_limitup_value} | {yesterday_limitup_note} |")
+    lines.append(f"| 连板高度 / 3板+ | {consecutive_height_value} / {three_board_value} | {consecutive_height_note}；{three_board_note} |")
     lines.append("")
-    lines.append(f"> {stage_explain}")
     if profit["downgraded"]:
         lines.append(f"> {profit['note']}")
-    lines.append("")
+        lines.append("")
     lines.append("---")
     lines.append("")
 
     # ══════════════════════════════════════
     # 5. 资金流向（复用 board_ratio_changes + board_trend）
     # ══════════════════════════════════════
-    lines.append("## 6. 资金流向")
+    lines.append("## 4. 资金流向")
     lines.append("")
     if board_ratio_changes:
         # 行业表格（原样保留）
@@ -683,47 +900,15 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 6. 主线分析
     # ══════════════════════════════════════
-    lines.append("## 7. 主线分析")
+    lines.append("## 5. 主线分析")
     lines.append("")
 
-    # 从 board_ratio_changes 提取产业概念作为观察方向
-    obs_directions = []
-    if board_ratio_changes:
-        for ratio_key in ["concept_ratio_3d_up", "concept_ratio_3d_down"]:
-            df = board_ratio_changes.get(ratio_key)
-            if df is not None and not df.empty:
-                for _, row in df.iterrows():
-                    name = str(row.get("board_name", ""))
-                    if classify_concept_label(name) == "industrial":
-                        raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
-                        change = float(raw) * 100 if pd.notna(raw) else 0
-                        obs_directions.append((name, change))
-
-        # 也从行业提取
-        for ratio_key in ["industry_ratio_3d_up"]:
-            df = board_ratio_changes.get(ratio_key)
-            if df is not None and not df.empty:
-                for _, row in df.iterrows():
-                    name = row.get("board_name", "")
-                    raw = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
-                    change = float(raw) * 100 if pd.notna(raw) else 0
-                    obs_directions.append((name, change))
-
-        obs_directions.sort(key=lambda x: x[1], reverse=True)
-
-    obs_main = []
-    receding = []
     if obs_directions:
-        # 观察主线 (positive change)
-        obs_main = [(n, c) for n, c in obs_directions if c > 0][:5]
-        # 退潮方向 (negative change)
-        receding = [(n, c) for n, c in obs_directions if c < 0][:5]
-
         if obs_main:
-            lines.append("### 7.1 有效主线 / 观察主线")
+            lines.append("### 5.1 有效主线 / 观察主线")
             lines.append("")
-            lines.append("| 方向 | 依据 | 风险 |")
-            lines.append("|------|------|------|")
+            lines.append("| 方向 | 阶段 | 强度 | 处理 |")
+            lines.append("|------|------|------|------|")
             # 动态风险文案
             if width_ok and s_stage in ("高潮", "过热"):
                 theme_risk = "市场宽度尚可，但情绪高潮，持续性待确认"
@@ -735,23 +920,30 @@ def render_unified_report(
                 theme_risk = "市场宽度一般，持续性待确认"
 
             for name, chg in obs_main:
-                direction = "观察主线" if chg > 0.5 else "观察方向"
-                chg_str = f"3日变化 +{chg:.2f}个百分点"
-                lines.append(f"| {name} | {chg_str}，成交占比提升 | {theme_risk} |")
+                stage_info = board_stage_map.get(name, {})
+                stage = stage_info.get("stage") or ("观察主线" if chg > 0.5 else "观察方向")
+                signal = stage_info.get("signal") or "成交占比提升"
+                strength = f"趋势{stage_info.get('score')}" if stage_info.get("score") is not None else f"3日+{chg:.2f}pct"
+                action = _theme_action(stage, signal, width_weak)
+                lines.append(f"| {name} | {stage} / {signal} | {strength} | {action}（{theme_risk}） |")
             lines.append("")
 
         if receding:
-            lines.append("### 7.2 退潮方向")
+            lines.append("### 5.2 退潮方向")
             lines.append("")
-            lines.append("| 方向 | 依据 | 说明 |")
-            lines.append("|------|------|------|")
+            lines.append("| 方向 | 阶段 | 依据 | 处理 |")
+            lines.append("|------|------|------|------|")
             for name, chg in receding:
                 chg_str = f"3日变化 {chg:+.2f}个百分点"
-                lines.append(f"| {name} | {chg_str} | 相关标的不追高，只等回调确认 |")
+                stage_info = board_stage_map.get(name, {})
+                stage = stage_info.get("stage") or "资金流出"
+                signal = stage_info.get("signal") or "退潮观察"
+                action = _theme_action(stage, signal, True)
+                lines.append(f"| {name} | {stage} / {signal} | {chg_str} | {action} |")
             lines.append("")
 
     if dynamic_themes:
-        lines.append("### 7.3 动态标签（不作为主线）")
+        lines.append("### 5.3 动态标签（不作为主线）")
         lines.append("")
         dynamic_names = ", ".join(t["name"] for t in dynamic_themes[:8])
         lines.append(f"  {dynamic_names}")
@@ -780,25 +972,11 @@ def render_unified_report(
     lines.append("")
 
     # ══════════════════════════════════════
-    # 7. 弱市例外扫描
+    # 6. 风险提示
     # ══════════════════════════════════════
-    lines.append("## 8. 弱市例外扫描")
+    lines.append("## 6. 风险提示")
     lines.append("")
-    if weak_triggers >= 2:
-        lines.append("当前弱市触发条件较多，以下为弱市环境下的例外扫描：")
-        lines.append("- 今日暂无明确逆势涨停候选。")
-    else:
-        lines.append("今日弱市触发条件较少，暂不需要弱市例外扫描。")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # ══════════════════════════════════════
-    # 8. 风险提示
-    # ══════════════════════════════════════
-    lines.append("## 9. 风险提示")
-    lines.append("")
-    lines.append("### 9.1 市场风险")
+    lines.append("### 6.1 市场风险")
     sentiment_stage = s_stage
     if sentiment_stage in ("高潮", "过热"):
         lines.append(f"- 短线情绪处于**{sentiment_stage}**，需警惕高潮后分歧。涨停家数较多但不宜在高潮阶段盲目追高。")
@@ -811,6 +989,8 @@ def render_unified_report(
         lines.append("- 涨跌比偏弱，市场宽度不足。")
     if market.get("score", 0) < 45:
         lines.append("- 市场综合评分偏低，整体偏弱。")
+    if weak_triggers >= 2:
+        lines.append("- 弱市触发条件较多，逆势机会只做复盘，不作为主动买入依据。")
     if sentiment_stage not in ("高潮", "过热") and not (width["green_ratio"] > 0.6 or width["lb_ratio"] < 1 or market.get("score", 0) < 45):
         lines.append("- 当前市场风险信号未明显触发。")
     lines.append("")
@@ -818,7 +998,7 @@ def render_unified_report(
     # 板块风险：从资金流出方向提取
     receding_list = [(n, c) for n, c in obs_directions if c < 0][:5] if obs_directions else []
     if receding_list:
-        lines.append("### 9.2 板块风险")
+        lines.append("### 6.2 板块风险")
         receding_names = "、".join(n for n, _ in receding_list[:5])
         lines.append(f"- {receding_names} 短期资金流出，相关个股降低追高优先级。")
         if any(True for n, c in obs_directions if c > 0):
@@ -827,7 +1007,7 @@ def render_unified_report(
         lines.append("")
 
     # 观察池风险
-    lines.append("### 9.3 观察池风险")
+    lines.append("### 6.3 观察池风险")
     # 从 selectors 直接统计
     n_count = 0
     caution_count = 0
@@ -850,7 +1030,7 @@ def render_unified_report(
     lines.append("")
 
     # 数据风险
-    lines.append("### 9.4 数据风险")
+    lines.append("### 6.4 数据风险")
     lines.append(f"- 报告可信度：{quality.get('confidence_score', 0)} / 100")
     if profit["downgraded"]:
         lines.append(f"- 赚钱效应为降级判断（{profit.get('note', '').strip('。')}）")
@@ -861,36 +1041,9 @@ def render_unified_report(
     lines.append("")
 
     # ══════════════════════════════════════
-    # 9. 机会观察
+    # 7. 观察池
     # ══════════════════════════════════════
-    lines.append("## 10. 机会观察")
-    lines.append("")
-    obs_main_list = [(n, c) for n, c in obs_directions if c > 0][:5] if obs_directions else []
-    receding_list = [(n, c) for n, c in obs_directions if c < 0][:3] if obs_directions else []
-
-    if obs_main_list:
-        lines.append("今日没有全市场级别主线，但存在局部结构机会：")
-        lines.append("")
-        opp_risk_word = "市场宽度尚可，但短线情绪处于高潮，不宜追高扩散" if (width_ok and s_stage in ("高潮", "过热")) else ("市场宽度偏弱，不适合扩散到普买" if width_weak else "可适度参与")
-        for i, (name, chg) in enumerate(obs_main_list):
-            lines.append(f"{i + 1}. **{name}**")
-            lines.append(f"   资金流入明显，作为观察主线；{opp_risk_word}。")
-            lines.append("")
-        if receding_list:
-            receding_names = "、".join(n for n, _ in receding_list)
-            lines.append(f"**退潮方向：** {receding_names} — 短期资金流出，相关个股只做回调确认，不追高。")
-            lines.append("")
-        lines.append(f"所有机会均限制在 trade_plan 总仓位上限内。当前总仓位上限：{pos['max_pct']}成。")
-    else:
-        lines.append("暂无明确产业主线，以观察为主。")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # ══════════════════════════════════════
-    # 10. 观察池
-    # ══════════════════════════════════════
-    lines.append("## 11. 观察池")
+    lines.append("## 7. 观察池")
     lines.append("")
     if not quality.get("has_volume_ratio", True):
         lines.append("> 当前数据源缺少量比字段，量比相关筛选已自动降级。")
@@ -927,57 +1080,59 @@ def render_unified_report(
             "不可交易过滤": len(excluded),
         }
 
-        # 10.1 候选低吸
+        # 7.1 候选低吸
+        lines.append(f"### 7.1 候选低吸（{len(low_buy)}只）")
+        lines.append("")
         if low_buy:
-            lines.append(f"### 11.1 候选低吸（{len(low_buy)}只）")
-            lines.append("")
-            lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
-            lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
+            lines.append("| 股票 | 策略 | 角色 | 买点 | 目标 | 止损 | 仓位 | 结论 |")
+            lines.append("|------|------|------|------|------|------|------|------|")
             for st in low_buy:
-                tag = assign_pattern_tag(st, st.get("strategy", ""), market, effective_themes)
-                o_low = st.get("observe_low", st.get("buy_low", "-"))
-                o_high = st.get("observe_high", st.get("buy_high", "-"))
-                inv = st.get("invalid_price", st.get("stop_loss", "-"))
+                role = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
                 lines.append(
-                    f"| {st.get('name','')} | {st.get('strategy','')} | {tag} | {o_low}~{o_high} | "
-                    f"{st.get('pressure_price', '-')} | 跌破{inv} | ≤{pos['single_pct']}成 | 回调企稳 | 追高/破位 |"
+                    f"| {st.get('name','')} | {st.get('strategy','')} | {role} | "
+                    f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
+                    f"≤{pos['single_pct']}成 | {_decision_summary(st, role, trade_mode, 'low_buy')} |"
                 )
-            lines.append("")
+        else:
+            lines.append("暂无")
+        lines.append("")
 
         # 10.2 只观察
-        lines.append(f"### 11.2 只观察（{len(watch_only)}只）")
+        lines.append(f"### 7.2 只观察（{len(watch_only)}只）")
         lines.append("")
         if watch_only:
-            lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
-            lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
+            lines.append("| 股票 | 策略 | 角色 | 买点 | 目标 | 止损 | 结论 |")
+            lines.append("|------|------|------|------|------|------|------|")
             for st in watch_only:
-                tag = assign_pattern_tag(st, st.get("strategy", ""), market, effective_themes)
-                o_low = st.get("observe_low", "-")
-                o_high = st.get("observe_high", "-")
-                inv = st.get("invalid_price", "-")
+                role = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
                 lines.append(
-                    f"| {st.get('name','')} | {st.get('strategy','')} | {tag} | {o_low}~{o_high} | "
-                    f"{st.get('pressure_price', '-')} | 跌破{inv} | ≤{pos['single_pct']}成 | 确认信号 | 盲目追高 |"
+                    f"| {st.get('name','')} | {st.get('strategy','')} | {role} | "
+                    f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
+                    f"{_decision_summary(st, role, trade_mode, 'watch')} |"
                 )
         else:
             lines.append("暂无")
         lines.append("")
 
         # 10.3 交易条件不满足
-        lines.append(f"### 11.3 交易条件不满足（{len(cond_fail)}只）")
+        lines.append(f"### 7.3 交易条件不满足（{len(cond_fail)}只）")
         lines.append("")
         if cond_fail:
-            lines.append("| 股票 | 策略来源 | 当前状态 | 原因 | 处理 |")
-            lines.append("|------|----------|----------|------|------|")
+            lines.append("| 股票 | 策略 | 买点 | 目标 | 止损 | 不买原因 |")
+            lines.append("|------|------|------|------|------|----------|")
             for st in cond_fail:
-                reason = st.get("reason", st.get("entry_reason", "-"))
-                lines.append(f"| {st.get('name','')} | {st.get('strategy','')} | 不适合低吸 | {reason} | 不追高，只观察 |")
+                role = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
+                lines.append(
+                    f"| {st.get('name','')} | {st.get('strategy','')} | "
+                    f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
+                    f"{_decision_summary(st, role, trade_mode, 'cond_fail')} |"
+                )
         else:
             lines.append("暂无")
         lines.append("")
 
         # 10.4 高风险回避（始终展示，与 trade_plan 对齐）
-        lines.append(f"### 11.4 高风险回避（{len(high_risk)}只）")
+        lines.append(f"### 7.4 高风险回避（{len(high_risk)}只）")
         lines.append("")
         if high_risk:
             lines.append("| 股票 | 策略来源 | 高风险原因 | 只复盘不买原因 |")
@@ -989,7 +1144,7 @@ def render_unified_report(
         lines.append("")
 
         # 10.5 不可交易过滤
-        lines.append(f"### 11.5 不可交易过滤（{len(excluded)}只）")
+        lines.append(f"### 7.5 不可交易过滤（{len(excluded)}只）")
         lines.append("")
         if excluded:
             lines.append("| 股票 | 策略来源 | 原因 | 处理 |")
@@ -1011,14 +1166,9 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 11. 明日验证清单
     # ══════════════════════════════════════
-    lines.append("## 12. 明日验证清单")
+    lines.append("## 8. 明日验证清单")
     lines.append("")
-    validation_themes = (
-        [{"name": name} for name, _ in obs_main[:3]]
-        if obs_main else effective_themes
-    )
-    checklist = generate_validation_checklist(market, validation_themes, profit, weak_triggers)
-    for i, item in enumerate(checklist):
+    for i, item in enumerate(validation_items):
         lines.append(f"{i + 1}. {item}")
     lines.append("")
     lines.append("---")
@@ -1030,7 +1180,7 @@ def render_unified_report(
     if trade_plan:
         r = trade_plan.get("market_restrictions", {})
         s = trade_plan.get("summary", {})
-        lines.append("## 13. 交易计划摘要")
+        lines.append("## 9. 交易计划摘要")
         lines.append("")
         if not r.get("allow_real_trade", True):
             lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
@@ -1051,7 +1201,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 13. 纪律
     # ══════════════════════════════════════
-    lines.append("## 14. 纪律")
+    lines.append("## 10. 纪律")
     lines.append("")
     lines.append("- 不追高；")
     lines.append(f"- 总仓位不超过 trade_plan 上限（{pos['max_pct']}成）；")
@@ -1066,7 +1216,7 @@ def render_unified_report(
     # ══════════════════════════════════════
     # 14. 数据可信度
     # ══════════════════════════════════════
-    lines.append("## 15. 数据可信度")
+    lines.append("## 11. 数据可信度")
     lines.append("")
     lines.append("| 项目 | 状态 | 说明 |")
     lines.append("|------|------|------|")

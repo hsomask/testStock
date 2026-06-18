@@ -357,6 +357,45 @@ def assign_pattern_tag(stock, pool_name, market, themes):
     return "待确认"
 
 
+def assign_stock_role(stock, pool_name, market, themes):
+    """
+    给日报展示用的个股角色标签。
+    仅用于解释，不改变选股、分层或 trade_plan。
+    """
+    risk = str(stock.get("risk_level", "")).strip()
+    action = str(stock.get("action_signal", "")).strip()
+    strategy = str(stock.get("strategy", pool_name or "")).strip()
+    pct = safe_float(stock.get("pct_chg", 0))
+    pct_5d = safe_float(stock.get("pct_5d", np.nan))
+    pct_20d = safe_float(stock.get("pct_20d", np.nan))
+
+    if risk in ("高", "高风险") or action in ("回避",):
+        return "高风险回避"
+
+    theme_names = [str(t.get("name", "")) for t in (themes or []) if t.get("name")]
+    has_effective_theme = bool(theme_names)
+
+    if pd_notna(pct_20d) and pct_20d >= 50:
+        return "中位风险"
+    if pd_notna(pct_5d) and pct_5d >= 20:
+        return "短线偏高"
+
+    if has_effective_theme:
+        if strategy in ("板块联动", "滚雪球趋势", "二次起爆"):
+            return "主线核心"
+        if pd_notna(pct_20d) and pct_20d < 25:
+            return "低位补涨"
+        return "跟风套利"
+
+    if strategy in ("N字异动", "短线强势", "二次起爆"):
+        return "独立观察"
+
+    if pd_notna(pct) and pct >= 7:
+        return "独立强势"
+
+    return "待确认"
+
+
 def safe_float(val):
     try:
         v = float(val)
