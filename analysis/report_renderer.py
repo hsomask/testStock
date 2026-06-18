@@ -318,6 +318,7 @@ def render_unified_report(
     # ── 预计算 insights ──
     weak_triggers, weak_checked, weak_items, weak_green, weak_lb = check_weak_market(market)
     weak_tag, weak_conclusion = weak_market_conclusion(weak_triggers, weak_checked, weak_green, weak_lb)
+    weak_insufficient = sum(1 for item in weak_items if item.get("status") == "insufficient")
     profit = assess_profit_effect(market)
     width = compute_market_width(market)
     width_ok = width["adv_ratio"] > 1.2 and width["green_ratio"] < 0.5
@@ -556,7 +557,7 @@ def render_unified_report(
     lines.append("|------|------|")
     lines.append(f"| 可计算项 | {weak_checked} |")
     lines.append(f"| 已触发 | {weak_triggers} |")
-    lines.append(f"| 数据不足 | 3 |")
+    lines.append(f"| 数据不足 | {weak_insufficient} |")
     lines.append("")
     lines.append("| 检查项 | 当前值 | 触发 | 解读 |")
     lines.append("|--------|--------|------|------|")
@@ -710,6 +711,8 @@ def render_unified_report(
 
         obs_directions.sort(key=lambda x: x[1], reverse=True)
 
+    obs_main = []
+    receding = []
     if obs_directions:
         # 观察主线 (positive change)
         obs_main = [(n, c) for n, c in obs_directions if c > 0][:5]
@@ -891,12 +894,12 @@ def render_unified_report(
     lines.append("")
     if not quality.get("has_volume_ratio", True):
         lines.append("> 当前数据源缺少量比字段，量比相关筛选已自动降级。")
-        lines.append("")
+    lines.append("")
 
     # ── 以 trade_plan 为准 ──
+    tp_display_counts = None
     if trade_plan and trade_plan.get("plans"):
         tp_plans = trade_plan["plans"]
-        tp_summary = trade_plan.get("summary", {})
 
         # 先去重（节内）
         low_buy = _dedup_tp_entries(tp_plans.get("候选低吸", []))
@@ -916,10 +919,17 @@ def render_unified_report(
         cond_fail = [s for s in cond_fail if _tp_key(s) not in (excluded_keys | high_risk_keys)]
         watch_only = [s for s in watch_only if _tp_key(s) not in (excluded_keys | high_risk_keys | cond_fail_keys)]
         low_buy = [s for s in low_buy if _tp_key(s) not in (excluded_keys | high_risk_keys | cond_fail_keys | watch_keys)]
+        tp_display_counts = {
+            "候选低吸": len(low_buy),
+            "只观察": len(watch_only),
+            "交易条件不满足": len(cond_fail),
+            "高风险回避": len(high_risk),
+            "不可交易过滤": len(excluded),
+        }
 
         # 10.1 候选低吸
         if low_buy:
-            lines.append(f"### 11.1 候选低吸（{tp_summary.get('候选低吸', len(low_buy))}只）")
+            lines.append(f"### 11.1 候选低吸（{len(low_buy)}只）")
             lines.append("")
             lines.append("| 股票 | 策略来源 | 模式标签 | 买入价 | 目标价 | 止损逻辑 | 仓位 | 能买 | 不能买 |")
             lines.append("|------|----------|----------|--------|--------|----------|------|------|--------|")
@@ -1022,7 +1032,14 @@ def render_unified_report(
             lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
             lines.append("")
         lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '仅模拟'} | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
-        lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
+        if tp_display_counts:
+            lines.append(
+                f"- 候选低吸：{tp_display_counts['候选低吸']} | 只观察：{tp_display_counts['只观察']} | "
+                f"交易条件不满足：{tp_display_counts['交易条件不满足']} | "
+                f"高风险回避：{tp_display_counts['高风险回避']} | 过滤：{tp_display_counts['不可交易过滤']}"
+            )
+        else:
+            lines.append(f"- 候选低吸：{s.get('候选低吸',0)} | 只观察：{s.get('只观察',0)} | 高风险回避：{s.get('高风险回避',0)} | 过滤：{s.get('不可交易过滤',0)}")
         lines.append("")
         lines.append("---")
         lines.append("")
