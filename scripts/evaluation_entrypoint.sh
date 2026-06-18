@@ -97,6 +97,10 @@ python -m analysis.watchlist_evaluation \
     --save-db
 
 echo ""
+echo "[2b/4] Update strategy feedback"
+python -m analysis.strategy_feedback --date "$AS_OF_DATE" --window 20
+
+echo ""
 
 # ── [3/4] Query latest evaluation ──
 echo "[3/4] Query latest evaluation"

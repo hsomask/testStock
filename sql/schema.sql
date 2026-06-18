@@ -296,6 +296,10 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_result (
     price_status TEXT,
     missing_reason TEXT,
     verification_tag TEXT,
+    feedback_label TEXT,
+    feedback_score NUMERIC,
+    attribution_tags JSONB,
+    attribution_text TEXT,
 
     confidence_level TEXT,
     conclusion_level TEXT,
@@ -305,6 +309,14 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_result (
 
     UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
 );
+
+
+-- T+1 feedback attribution fields (idempotent migration)
+ALTER TABLE watchlist_evaluation_result
+    ADD COLUMN IF NOT EXISTS feedback_label TEXT,
+    ADD COLUMN IF NOT EXISTS feedback_score NUMERIC,
+    ADD COLUMN IF NOT EXISTS attribution_tags JSONB,
+    ADD COLUMN IF NOT EXISTS attribution_text TEXT;
 
 
 -- 迁移旧唯一键（幂等）
@@ -368,4 +380,26 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_summary (
     generated_at TIMESTAMP DEFAULT NOW(),
 
     UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
+);
+
+
+-- 策略反馈滚动统计表
+-- 基于 watchlist_evaluation_result 聚合最近 N 个交易日的策略表现
+CREATE TABLE IF NOT EXISTS strategy_feedback_stats (
+    id SERIAL PRIMARY KEY,
+    trade_date DATE NOT NULL,
+    strategy TEXT NOT NULL,
+    window_days INTEGER NOT NULL,
+    sample_count INTEGER,
+    win_rate_1d NUMERIC,
+    avg_next_1d_return NUMERIC,
+    avg_max_3d_return NUMERIC,
+    avg_max_3d_drawdown NUMERIC,
+    strong_rate NUMERIC,
+    failed_rate NUMERIC,
+    feedback_score NUMERIC,
+    status TEXT,
+    reason TEXT,
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (trade_date, strategy, window_days)
 );

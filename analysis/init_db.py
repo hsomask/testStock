@@ -25,6 +25,7 @@ TABLES = [
     "signal_performance",
     "watchlist_evaluation_result",
     "watchlist_evaluation_summary",
+    "strategy_feedback_stats",
 ]
 
 

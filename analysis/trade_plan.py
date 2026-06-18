@@ -127,10 +127,47 @@ def _gen_entry_notes():
     )
 
 
+def _load_strategy_feedback():
+    try:
+        from analysis.strategy_feedback import load_latest_strategy_feedback
+        return load_latest_strategy_feedback(window_days=20)
+    except Exception:
+        return {}
+
+
+def _fmt_feedback_pct(value):
+    try:
+        if value is None or pd.isna(value):
+            return "-"
+        return f"{float(value):.1%}"
+    except Exception:
+        return "-"
+
+
+def _apply_strategy_feedback_downgrade(category, reason, strategy, feedback_map):
+    feedback = feedback_map.get(strategy) or {}
+    status = feedback.get("status")
+    if status not in ("weak", "blocked"):
+        return category, reason, feedback
+
+    sample = feedback.get("sample_count") or 0
+    win_rate = _fmt_feedback_pct(feedback.get("win_rate_1d"))
+    failed_rate = _fmt_feedback_pct(feedback.get("failed_rate"))
+    feedback_reason = feedback.get("reason") or "策略近期反馈偏弱"
+    note = f"策略反馈降级：近20日样本{sample}，胜率{win_rate}，失败率{failed_rate}，{feedback_reason}"
+
+    if status == "weak" and category == "候选低吸":
+        return "只观察", f"{reason}；{note}", feedback
+    if status == "blocked" and category in ("候选低吸", "只观察"):
+        return "交易条件不满足", f"{reason}；{note}", feedback
+    return category, reason, feedback
+
+
 def generate_trade_plan(trade_date, market_result, quality, themes,
                          filtered_result, excluded_result):
     """生成交易计划"""
     restrictions = _market_restrictions(market_result, quality)
+    strategy_feedback = _load_strategy_feedback()
 
     plans = {
         "候选低吸": [],
@@ -157,6 +194,9 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
             code = str(row.get("code", ""))
             name = str(row.get("name", ""))
             category, reason = _classify_stock(row)
+            category, reason, feedback = _apply_strategy_feedback_downgrade(
+                category, reason, pool_name, strategy_feedback
+            )
             # 滚雪球趋势 + 可信度 < 70 → 强制只观察
             if pool_name == "滚雪球趋势" and quality.get("confidence_score", 0) < 70 and category == "候选低吸":
                 category = "只观察"
@@ -175,6 +215,9 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                 "pressure_price": round(float(row["pressure_price"]), 2) if pd.notna(row.get("pressure_price")) else None,
                 "invalid_price": round(float(row["invalid_price"]), 2) if pd.notna(row.get("invalid_price")) else None,
                 "reason": reason,
+                "feedback_status": feedback.get("status"),
+                "feedback_score": feedback.get("feedback_score"),
+                "feedback_reason": feedback.get("reason"),
             })
 
     # 组装输出
