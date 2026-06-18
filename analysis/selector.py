@@ -508,7 +508,7 @@ def select_snowball_trend(stock_df, limit=5, market_score=None):
             continue
 
         code = str(row.get("code", ""))
-        hist = get_stock_history(code, days=80)
+        hist = get_stock_history(code, days=80, require_fresh=False, allow_api=False)
         if hist.empty or len(hist) < 35:
             continue
 

@@ -105,6 +105,23 @@ def _try_file(as_of_date):
 
 def _try_top_bottom(as_of_date, signal_date):
     """读取 Top 3 / Bottom 3 表现明细"""
+    def _dedup_rows(rows):
+        items = []
+        seen = set()
+        for r in rows:
+            name = r[0]
+            key = str(name or "").strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "name": r[0], "layer": r[1], "ret": r[2], "strategy": r[3],
+                "feedback_label": r[4], "attribution_text": r[5]
+            })
+            if len(items) >= 3:
+                break
+        return items
+
     if not DATABASE_DSN:
         return [], []
     try:
@@ -113,24 +130,24 @@ def _try_top_bottom(as_of_date, signal_date):
         cur = conn.cursor()
         # Top 3 by 1d return
         cur.execute(
-            "SELECT name, watchlist_layer, next_1d_return "
+            "SELECT name, watchlist_layer, next_1d_return, strategy, feedback_label, attribution_text "
             "FROM watchlist_evaluation_result "
             "WHERE eval_mode = 'daily' AND as_of_date = %s "
             "AND next_1d_return IS NOT NULL "
-            "ORDER BY next_1d_return DESC LIMIT 3",
+            "ORDER BY next_1d_return DESC LIMIT 10",
             (as_of_date,),
         )
-        top = [{"name": r[0], "layer": r[1], "ret": r[2]} for r in cur.fetchall()]
+        top = _dedup_rows(cur.fetchall())
         # Bottom 3
         cur.execute(
-            "SELECT name, watchlist_layer, next_1d_return "
+            "SELECT name, watchlist_layer, next_1d_return, strategy, feedback_label, attribution_text "
             "FROM watchlist_evaluation_result "
             "WHERE eval_mode = 'daily' AND as_of_date = %s "
             "AND next_1d_return IS NOT NULL "
-            "ORDER BY next_1d_return ASC LIMIT 3",
+            "ORDER BY next_1d_return ASC LIMIT 10",
             (as_of_date,),
         )
-        bottom = [{"name": r[0], "layer": r[1], "ret": r[2]} for r in cur.fetchall()]
+        bottom = _dedup_rows(cur.fetchall())
         cur.close()
         conn.close()
         return top, bottom

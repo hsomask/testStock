@@ -208,13 +208,9 @@ def check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn=No
         if ma_missing_ratio < 0.1:
             items.append({"item": "均线数据", "status": "正常", "detail": "大部分个股均线数据可用"})
         elif ma_missing_ratio < 0.3:
-            score -= 10
-            items.append({"item": "均线数据", "status": "部分缺失", "detail": f"{ma_missing_ratio:.0%} 个股缺少均线数据"})
-            issues.append("部分个股均线数据缺失，选股结果可能偏少。")
+            items.append({"item": "全市场均线覆盖", "status": "提示", "detail": f"{ma_missing_ratio:.0%} 个股缺少均线数据；全市场预筛仅作广度参考"})
         else:
-            score -= 20
-            items.append({"item": "均线数据", "status": "大量缺失", "detail": f"{ma_missing_ratio:.0%} 个股缺少均线数据"})
-            issues.append("大量个股均线数据缺失，选股策略参考价值下降。")
+            items.append({"item": "全市场均线覆盖", "status": "提示", "detail": f"{ma_missing_ratio:.0%} 个股缺少均线数据；全市场预筛仅作广度参考"})
     else:
         ma_missing_ratio = 1.0
         items.append({"item": "均线数据", "status": "不可用", "detail": "无均线数据字段"})
