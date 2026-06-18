@@ -495,20 +495,44 @@ def select_snowball_trend(stock_df, limit=5, market_score=None):
     MACD 回踩零轴附近金叉 + 站上 MA20 + 量比温和放大
     """
     from data.config import ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE, ALLOW_MAIN_BOARD, MIN_AMOUNT
-    from analysis.data_fetcher import get_stock_history, calc_macd
+    from analysis.data_fetcher import (
+        get_stock_history,
+        calc_history_indicators,
+        calc_macd,
+        _estimate_volume_ratio,
+    )
 
-    df = filter_common_stock_pool(stock_df)
+    df = filter_common_stock_pool(stock_df).copy()
 
     candidates = []
     for _, row in df.iterrows():
+        code = str(row.get("code", ""))
+        hist = pd.DataFrame()
+        need_indicator_fill = (
+            pd.isna(row.get("volume_ratio"))
+            or pd.isna(row.get("ma20"))
+            or pd.isna(row.get("pct_20d"))
+            or pd.isna(row.get("pct_5d"))
+        )
+        if need_indicator_fill:
+            hist = get_stock_history(code, days=80, require_fresh=False, allow_api=False)
+            indicators = calc_history_indicators(hist)
+            if indicators:
+                for k, v in indicators.items():
+                    row[k] = v
+            if pd.isna(row.get("volume_ratio")):
+                estimated_volume_ratio = _estimate_volume_ratio(row, hist)
+                if pd.notna(estimated_volume_ratio):
+                    row["volume_ratio"] = estimated_volume_ratio
+
         passed, reason = _pass_snowball_base_filter(
             row, ALLOW_CHINEXT, ALLOW_STAR, ALLOW_BSE, ALLOW_MAIN_BOARD, MIN_AMOUNT
         )
         if not passed:
             continue
 
-        code = str(row.get("code", ""))
-        hist = get_stock_history(code, days=80, require_fresh=False, allow_api=False)
+        if hist.empty:
+            hist = get_stock_history(code, days=80, require_fresh=False, allow_api=False)
         if hist.empty or len(hist) < 35:
             continue
 

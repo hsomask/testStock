@@ -799,7 +799,29 @@ def calc_history_indicators(hist):
     }
 
 
-def enrich_stock_indicators(stock_df, max_stocks: int = 300):
+def _estimate_volume_ratio(row, hist):
+    """Estimate volume ratio when the real-time source does not provide it."""
+    if hist is None or hist.empty or "volume" not in hist.columns:
+        return np.nan
+
+    volumes = pd.to_numeric(hist["volume"], errors="coerce").dropna()
+    if len(volumes) < 5:
+        return np.nan
+
+    current_volume = pd.to_numeric(pd.Series([row.get("volume", np.nan)]), errors="coerce").iloc[0]
+    if pd.isna(current_volume) or current_volume <= 0:
+        current_volume = volumes.iloc[-1]
+        base = volumes.iloc[-6:-1] if len(volumes) >= 6 else volumes.iloc[:-1]
+    else:
+        base = volumes.tail(5)
+
+    avg_volume = base.mean() if len(base) else np.nan
+    if pd.isna(avg_volume) or avg_volume <= 0:
+        return np.nan
+    return float(current_volume) / float(avg_volume)
+
+
+def enrich_stock_indicators(stock_df, max_stocks: int = 2000):
     """给个股实时数据补充 MA5/MA10/MA20/5日涨幅/20日涨幅"""
     df = stock_df.copy()
 
@@ -807,47 +829,67 @@ def enrich_stock_indicators(stock_df, max_stocks: int = 300):
         if col not in df.columns:
             df[col] = np.nan
 
+    if "volume_ratio" not in df.columns:
+        df["volume_ratio"] = np.nan
+
     # 基础过滤
     base = df[
         (pd.to_numeric(df["close"], errors="coerce") > 2)
         & (pd.to_numeric(df["pct_chg"], errors="coerce") > -8)
     ].copy()
 
-    selected_indices = set()
+    selected_indices = []
+    seen_indices = set()
+
+    def add_indices(indices):
+        for idx in indices:
+            if len(selected_indices) >= max_stocks:
+                break
+            if idx in seen_indices:
+                continue
+            selected_indices.append(idx)
+            seen_indices.add(idx)
+            if len(selected_indices) >= max_stocks:
+                break
 
     # 1. 成交额靠前
     if "amount" in base.columns:
-        selected_indices.update(
-            base.sort_values("amount", ascending=False).head(1000).index.tolist()
+        add_indices(
+            base.sort_values("amount", ascending=False).head(2000).index.tolist()
         )
 
     # 2. 涨幅靠前
-    selected_indices.update(
+    add_indices(
         base.sort_values("pct_chg", ascending=False).head(300).index.tolist()
     )
 
     # 3. 量比靠前
     if "volume_ratio" in base.columns:
-        selected_indices.update(
+        add_indices(
             base.sort_values("volume_ratio", ascending=False).head(300).index.tolist()
         )
 
     # 4. 换手率靠前
     if "turnover" in base.columns:
-        selected_indices.update(
+        add_indices(
             base.sort_values("turnover", ascending=False).head(300).index.tolist()
         )
 
-    selected_indices = list(selected_indices)[:max_stocks]
-
     success = 0
     fail = 0
+    volume_ratio_filled = 0
 
     for idx in selected_indices:
         code = str(df.at[idx, "code"])
         name = df.at[idx, "name"] if "name" in df.columns else ""
         hist = get_stock_history(code, days=80, name=name, require_fresh=False, allow_api=False)
         indicators = calc_history_indicators(hist)
+
+        if pd.isna(df.at[idx, "volume_ratio"]):
+            estimated_volume_ratio = _estimate_volume_ratio(df.loc[idx], hist)
+            if pd.notna(estimated_volume_ratio):
+                df.loc[idx, "volume_ratio"] = estimated_volume_ratio
+                volume_ratio_filled += 1
 
         if not indicators:
             fail += 1
