@@ -4,6 +4,7 @@
 """
 import pandas as pd
 from analysis.board_alias import normalize_board_name
+from analysis.board_classifier import classify_board, get_board_cluster
 import numpy as np
 
 
@@ -55,6 +56,11 @@ def detect_main_themes(
         raw_name = board.get("board_name", "")
         board["board_name_raw"] = raw_name
         board["board_name"] = normalize_board_name(raw_name)
+
+    candidates = [
+        board for board in candidates
+        if classify_board(board.get("board_name", "")).category == "industrial"
+    ]
 
     # 计算每个候选板块的观察池命中数
     for board in candidates:
@@ -168,6 +174,17 @@ def detect_main_themes(
             "beginner_explain": beginner_explain,
             "sustainability_risk": sustainability_risk,
         })
+
+    # 按主线簇去重，避免证券/券商/非银金融重复占位。
+    deduped = {}
+    for theme in themes:
+        cluster = get_board_cluster(theme.get("name", "")) or theme.get("name", "")
+        candidate = dict(theme)
+        candidate["name"] = cluster
+        current = deduped.get(cluster)
+        if current is None or candidate.get("score", 0) > current.get("score", 0):
+            deduped[cluster] = candidate
+    themes = list(deduped.values())
 
     # 排序，取前 3
     themes.sort(key=lambda x: x["score"], reverse=True)
