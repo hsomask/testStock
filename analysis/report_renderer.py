@@ -9,6 +9,7 @@ import numpy as np
 from analysis.utils import fmt_num, fmt_pct, fmt_yi
 from analysis.explainer import explain_market_status
 from analysis.board_alias import normalize_board_name
+from analysis.board_classifier import classify_board, dedup_board_directions
 from analysis.report_insights import (
     check_weak_market, weak_market_conclusion,
     assess_profit_effect, compute_market_width,
@@ -358,6 +359,9 @@ def _board_stage_map(board_trend_summary):
                 "signal": item.get("life_cycle_signal") or "-",
                 "score": item.get("trend_score"),
             }
+            info = classify_board(name)
+            if info.cluster:
+                stage_map.setdefault(info.cluster, stage_map[name])
     return stage_map
 
 
@@ -389,10 +393,11 @@ def _extract_observation_directions(board_ratio_changes):
             change = float(raw) * 100 if pd.notna(raw) else 0
             directions.append((name, change))
 
-    directions.sort(key=lambda x: x[1], reverse=True)
-    main = [(n, c) for n, c in directions if c > 0][:5]
-    receding = [(n, c) for n, c in directions if c < 0][:5]
-    return directions, main, receding
+    positives = dedup_board_directions([(n, c) for n, c in directions if c > 0], limit=5)
+    negatives = dedup_board_directions([(n, c) for n, c in directions if c < 0], limit=5)
+    combined = positives + negatives
+    combined.sort(key=lambda x: x[1], reverse=True)
+    return combined, positives, negatives
 
 
 def _theme_action(stage, signal, width_weak):
@@ -864,32 +869,25 @@ def render_unified_report(
                         lines.append(f"> 过滤动态标签后，产业概念仅 {len(industrial)} 个，不强行补位。")
                         lines.append("")
 
-        # 动态/风格标签
-        all_non_ind = {}
-        for ratio_key in ["concept_ratio_3d_up", "concept_ratio_3d_down"]:
-            df = board_ratio_changes.get(ratio_key)
-            if df is not None and not df.empty:
-                for _, row in df.iterrows():
-                    name = str(row.get("board_name", ""))
-                    cat = classify_concept_label(name)
-                    if cat != "industrial":
-                        change = row.get("ratio_change_3d", row.get("ratio_change_5d", 0))
-                        cat_label = label_category_name(cat)
-                        if name not in all_non_ind or abs(change) > abs(all_non_ind[name][0]):
-                            all_non_ind[name] = (change, cat_label)
-
-        if all_non_ind:
-            lines.append("### 短线情绪/风格标签变化 TOP5")
+        if obs_main or receding:
+            lines.append("### 资金流向结论")
             lines.append("")
-            lines.append("> 这些不是产业主线，只反映短线情绪、市场热度、交易风格或资金属性的变化。")
-            lines.append("")
-            lines.append("| 标签 | 类型 | 变化 | 看法 |")
-            lines.append("|------|------|------|------|")
-            sorted_tags = sorted(all_non_ind.items(), key=lambda x: abs(x[1][0]), reverse=True)
-            for name, (change, cat_label) in sorted_tags[:5]:
-                change_str = f"{change * 100:+.2f}个百分点"
-                explain = explain_non_industrial_label(name, cat_label)
-                lines.append(f"| {name} | {cat_label} | {change_str} | {explain} |")
+            lines.append("| 项目 | 方向 | 动作 |")
+            lines.append("|------|------|------|")
+            if obs_main:
+                main_names = "、".join(n for n, _ in obs_main[:3])
+                main_action = "只看核心低吸" if width_weak else "围绕核心分歧低吸"
+                lines.append(f"| 主攻观察 | {main_names} | {main_action} |")
+            if receding:
+                receding_names = "、".join(n for n, _ in receding[:3])
+                lines.append(f"| 退潮回避 | {receding_names} | 降低追高优先级 |")
+            if width_weak:
+                exec_action = "市场宽度偏弱，资金流入方向也只做观察，不扩散普买"
+            elif s_stage in ("高潮", "过热"):
+                exec_action = "情绪偏热，只等分歧承接，不追加速"
+            else:
+                exec_action = "优先验证资金流入方向的持续性"
+            lines.append(f"| 明日执行 | 结合主线与宽度 | {exec_action} |")
             lines.append("")
     else:
         lines.append("暂无资金流向数据")
@@ -996,7 +994,7 @@ def render_unified_report(
     lines.append("")
 
     # 板块风险：从资金流出方向提取
-    receding_list = [(n, c) for n, c in obs_directions if c < 0][:5] if obs_directions else []
+    receding_list = receding[:5] if receding else []
     if receding_list:
         lines.append("### 6.2 板块风险")
         receding_names = "、".join(n for n, _ in receding_list[:5])
