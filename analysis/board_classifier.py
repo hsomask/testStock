@@ -100,6 +100,22 @@ CLUSTER_ALIASES = [
     ]),
 ]
 
+INDEX_STYLE_PATTERNS = [
+    "成份", "成分", "创业成份", "创业板成份", "科创成份",
+]
+
+BROAD_LABEL_PATTERNS = [
+    "风格",
+]
+
+CLUSTER_PATTERNS = [
+    ("金融/券商", ["证券", "券商", "非银", "金融", "保险", "银行"]),
+    ("半导体", ["半导体", "芯片", "中芯", "集成电路", "先进封装", "存储"]),
+    ("机器人", ["机器人", "减速器"]),
+    ("AI/算力", ["人工智能", "算力", "服务器", "数据中心", "云计算", "东数西算"]),
+    ("汽车链", ["汽车", "车联网", "车路云", "新能源车", "特斯拉", "无人驾驶", "智能驾驶"]),
+]
+
 
 def classify_board(name: str) -> BoardInfo:
     raw = str(name or "").strip()
@@ -119,6 +135,12 @@ def classify_board(name: str) -> BoardInfo:
 def _category_for(name: str) -> str:
     if not name:
         return INDUSTRIAL
+    for kw in INDEX_STYLE_PATTERNS:
+        if kw in name:
+            return INDEX_STYLE
+    for kw in BROAD_LABEL_PATTERNS:
+        if kw in name:
+            return BROAD_LABEL
     for kw in DYNAMIC_SENTIMENT_KEYWORDS:
         if kw in name:
             return DYNAMIC_SENTIMENT
@@ -167,6 +189,10 @@ def get_board_cluster(name: str) -> str | None:
     for cluster, aliases in CLUSTER_ALIASES:
         for alias in aliases:
             if alias == display or alias in display:
+                return cluster
+    for cluster, patterns in CLUSTER_PATTERNS:
+        for pattern in patterns:
+            if pattern in display:
                 return cluster
     return display or None
 
