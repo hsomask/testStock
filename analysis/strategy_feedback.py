@@ -7,7 +7,7 @@ import psycopg2
 from data.config import DATABASE_DSN
 
 
-DEFAULT_WINDOW_DAYS = 20
+DEFAULT_WINDOW_DAYS = 5
 
 
 def _sql_date(date_text):
@@ -18,8 +18,8 @@ def _sql_date(date_text):
 
 
 def _status_for(sample_count, win_rate, avg_return, failed_rate, avg_drawdown):
-    if sample_count < 8:
-        return "normal", "样本不足8条，暂不做强弱降级"
+    if sample_count < 5:
+        return "normal", "近5日样本不足5条，暂不做强弱降级"
 
     win = win_rate or 0
     avg = avg_return or 0
@@ -27,12 +27,12 @@ def _status_for(sample_count, win_rate, avg_return, failed_rate, avg_drawdown):
     dd = avg_drawdown or 0
 
     if failed >= 0.45 or (avg <= -0.015 and dd <= -0.05):
-        return "blocked", "策略短期需要回避"
+        return "blocked", "近5日失败率/回撤偏高，策略短期需要回避"
     if win < 0.45 or avg < -0.01:
-        return "weak", "策略近期偏弱，候选需要降级"
+        return "weak", "近5日胜率或平均收益偏弱，候选需要降级"
     if win >= 0.60 and failed <= 0.25 and avg >= 0:
-        return "hot", "策略反馈较好"
-    return "normal", "策略反馈中性，暂不调整"
+        return "hot", "近5日策略反馈较好"
+    return "normal", "近5日策略反馈中性，暂不调整"
 
 
 def _score_for(win_rate, avg_return, strong_rate, failed_rate, avg_drawdown):

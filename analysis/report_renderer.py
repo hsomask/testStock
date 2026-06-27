@@ -361,14 +361,39 @@ def _stock_watch_point(stock, role):
     return "规则入池，等待确认"
 
 
+def _feedback_limit_text(stock):
+    sample = stock.get("feedback_sample_count")
+    win_rate = stock.get("feedback_win_rate_1d")
+    failed_rate = stock.get("feedback_failed_rate")
+    reason = str(stock.get("feedback_reason") or "")
+    parts = []
+    if sample:
+        parts.append(f"近5日样本{sample}")
+    if win_rate is not None:
+        try:
+            parts.append(f"胜率{float(win_rate):.0%}")
+        except Exception:
+            pass
+    if failed_rate is not None:
+        try:
+            parts.append(f"失败率{float(failed_rate):.0%}")
+        except Exception:
+            pass
+    if reason:
+        parts.append(reason)
+    if parts:
+        return "策略反馈偏弱（" + "，".join(parts[:4]) + "）"
+    return "策略反馈偏弱，先降级"
+
+
 def _stock_limit_point(stock, trade_mode, layer):
     reason = str(stock.get("reason") or "")
     if "位置偏高" in reason or "不追高" in reason:
         return "位置偏高，不追高"
     if stock.get("feedback_status") == "weak" or "策略反馈" in reason:
-        return "策略反馈偏弱，先降级"
+        return _feedback_limit_text(stock)
     if trade_mode in ("防守", "空仓"):
-        return "环境偏防守，只能轻观察"
+        return "空仓模式仅复盘" if trade_mode == "空仓" else "环境偏防守，只能轻观察"
     if layer == "low_buy":
         return "破止损位退出"
     return "条件不足，等确认"
@@ -381,6 +406,85 @@ def _watch_sort_key(stock):
     strategy_score = 0 if strategy in ("板块联动", "滚雪球趋势") else 1
     feedback_score = 1 if stock.get("feedback_status") == "weak" else 0
     return (role_score, strategy_score, feedback_score, str(stock.get("name", "")))
+
+
+def _display_direction(stock):
+    direction = str(stock.get("primary_direction") or "").strip()
+    return direction if direction and direction != "-" else "-"
+
+
+def _price_col_name(trade_mode):
+    return "复盘价位" if trade_mode == "空仓" else "买点"
+
+
+def _watch_hidden_note(trade_mode, hidden):
+    if trade_mode == "空仓":
+        return f"> 空仓模式下仅展开核心复盘标的，另有 {hidden} 只备选不展开。"
+    return f"> 防守模式下仅展开核心观察，另有 {hidden} 只备选不展开。"
+
+
+def _high_risk_reason(stock):
+    reason = str(stock.get("reason") or "")
+    risk_reasons = str(stock.get("risk_reasons") or "")
+    text = "；".join(x.strip(" 1234567890.-、") for x in risk_reasons.replace("\n", "；").split("；") if x.strip())
+    combined = "；".join(x for x in [reason, text] if x)
+    if "涨幅" in combined or "接近涨停" in combined:
+        return "位置/涨幅过高"
+    if "量比" in combined:
+        return "量比异常"
+    if "换手" in combined:
+        return "换手过高"
+    if "板块" in combined:
+        return "板块持续性不足"
+    if "策略反馈" in combined:
+        return _feedback_limit_text(stock)
+    if combined:
+        return _short_text(combined, 24)
+    risk = str(stock.get("risk_level") or "")
+    return "风险等级高" if risk == "高" else "风险偏高"
+
+
+def _strategy_feedback_risk_lines(trade_plan, max_items=3):
+    if not trade_plan or not trade_plan.get("plans"):
+        return []
+    by_strategy = {}
+    for items in trade_plan.get("plans", {}).values():
+        for st in items or []:
+            status = st.get("feedback_status")
+            if status not in ("weak", "blocked"):
+                continue
+            strategy = str(st.get("strategy") or "-")
+            current = by_strategy.setdefault(strategy, {
+                "count": 0,
+                "status": status,
+                "sample": st.get("feedback_sample_count"),
+                "win": st.get("feedback_win_rate_1d"),
+                "failed": st.get("feedback_failed_rate"),
+                "reason": st.get("feedback_reason"),
+            })
+            current["count"] += 1
+            if status == "blocked":
+                current["status"] = "blocked"
+    rows = sorted(by_strategy.items(), key=lambda x: (x[1]["status"] != "blocked", -x[1]["count"], x[0]))
+    lines = []
+    for strategy, item in rows[:max_items]:
+        parts = [f"{strategy} 近5日反馈偏弱"]
+        if item.get("sample"):
+            parts.append(f"样本{item['sample']}")
+        if item.get("win") is not None:
+            try:
+                parts.append(f"胜率{float(item['win']):.0%}")
+            except Exception:
+                pass
+        if item.get("failed") is not None:
+            try:
+                parts.append(f"失败率{float(item['failed']):.0%}")
+            except Exception:
+                pass
+        if item.get("reason"):
+            parts.append(str(item["reason"]))
+        lines.append("，".join(parts))
+    return lines
 
 
 def _feedback_summary(t1_data):
@@ -421,14 +525,25 @@ def _quality_split_rows(quality):
     obs_ma = next((it for it in items if "观察池均线" in str(it.get("item", ""))), None)
     market_ma = next((it for it in items if "全市场均线" in str(it.get("item", ""))), None)
     board_map = next((it for it in items if "个股板块映射" in str(it.get("item", ""))), None)
+    if board_map:
+        board_map_status = board_map.get("status", "未知")
+        board_map_detail = board_map.get("detail", "板块映射未统计")
+    elif quality.get("has_stock_board_map"):
+        days_old = quality.get("stock_board_map_days_old")
+        board_map_status = "正常"
+        board_map_detail = "映射表可用"
+        if days_old is not None:
+            board_map_detail += f"，最近更新 {days_old} 天前"
+    else:
+        board_map_status = "缺失"
+        board_map_detail = "未检测到 stock_board_map，个股方向可能降级"
     return [
         ("基础行情可信度", f"{confidence} / 100", "反映个股/板块基础行情是否可用"),
         ("观察池指标覆盖", obs_ma.get("status", "未知") if obs_ma else "未知",
          obs_ma.get("detail", "观察池均线覆盖未统计") if obs_ma else "观察池均线覆盖未统计"),
         ("全市场预筛覆盖", market_ma.get("status", "未知") if market_ma else "未知",
          market_ma.get("detail", "全市场均线覆盖未统计") if market_ma else "全市场均线覆盖未统计"),
-        ("板块映射可信度", board_map.get("status", "未知") if board_map else "未知",
-         board_map.get("detail", "板块映射未统计") if board_map else "板块映射未统计"),
+        ("板块映射可信度", board_map_status, board_map_detail),
     ]
 
 
@@ -719,7 +834,8 @@ def render_unified_report(
     lines.append("**今日执行：**")
     lines.append(f"- 只看：{watch_focus}")
     lines.append(f"- 回避：{avoid_focus}")
-    lines.append(f"- 买点：{buy_rule}")
+    focus_label = "复盘价位" if trade_mode == "空仓" else "买点"
+    lines.append(f"- {focus_label}：{buy_rule}")
     lines.append(f"- 放弃信号：{fail_signal}")
     lines.append("")
     lines.append("| 项目 | 结论 |")
@@ -1141,15 +1257,26 @@ def render_unified_report(
         lines.append(f"- 多只候选来自 N字异动/二次起爆（{n_count}只），一旦市场宽度继续走弱，容易冲高回落。")
     if caution_count > 0:
         lines.append(f"- 谨慎观察层 {caution_count} 只股票不应和可观察层同等对待。")
+    for item in _strategy_feedback_risk_lines(trade_plan):
+        lines.append(f"- {item}，相关候选自动降级。")
     lines.append("")
 
-    # 数据风险
-    lines.append("### 6.4 数据风险")
-    lines.append(f"- 报告可信度：{quality.get('confidence_score', 0)} / 100")
-    if profit["downgraded"]:
-        lines.append(f"- 赚钱效应为降级判断（{profit.get('note', '').strip('。')}）")
-    for issue in quality.get("issues", [])[:3]:
-        lines.append(f"- {issue}")
+    # 明日失效条件：比数据日志更适合放在风险区。
+    lines.append("### 6.4 明日失效条件")
+    if trade_mode == "空仓":
+        lines.append("- 若市场宽度仍未修复，继续只复盘不主动开仓。")
+    elif trade_mode == "防守":
+        lines.append("- 若核心方向无法承接，候选低吸继续降级为观察。")
+    else:
+        lines.append("- 若主线冲高回落，降低追涨和扩散交易优先级。")
+    if width["green_ratio"] > 0.6:
+        lines.append("- 绿盘占比未降至 60% 以下前，不做扩散普买。")
+    if obs_main:
+        names = "、".join(n for n, _ in obs_main[:3])
+        lines.append(f"- {names} 若跌出主线观察，相关个股只保留复盘价值。")
+    feedback_lines = _strategy_feedback_risk_lines(trade_plan, max_items=1)
+    if feedback_lines:
+        lines.append(f"- {feedback_lines[0]}，同策略新票继续先降级。")
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -1161,6 +1288,8 @@ def render_unified_report(
     lines.append("")
     if not quality.get("has_volume_ratio", True):
         lines.append("> 当前数据源缺少量比字段，量比相关筛选已自动降级。")
+    if trade_mode == "空仓":
+        lines.append("> 当前为空仓模式，表内价位仅用于复盘观察，不代表今日可买。")
     lines.append("")
 
     # ── 以 trade_plan 为准 ──
@@ -1204,15 +1333,16 @@ def render_unified_report(
         }
 
         # 7.1 候选低吸
+        price_col = _price_col_name(trade_mode)
         lines.append(f"### 7.1 候选低吸（{len(low_buy)}只）")
         lines.append("")
         if low_buy:
-            lines.append("| 股票 | 策略 | 角色 | 买点 | 目标 | 止损 | 仓位 | 看点 | 限制 |")
-            lines.append("|------|------|------|------|------|------|------|------|------|")
+            lines.append(f"| 股票 | 策略 | 方向 | 角色 | {price_col} | 目标 | 止损 | 仓位 | 看点 | 限制 |")
+            lines.append("|------|------|------|------|------|------|------|------|------|------|")
             for st in low_buy:
                 role = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
                 lines.append(
-                    f"| {st.get('name','')} | {st.get('strategy','')} | {role} | "
+                    f"| {st.get('name','')} | {st.get('strategy','')} | {_display_direction(st)} | {role} | "
                     f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
                     f"≤{pos['single_pct']}成 | {_stock_watch_point(st, role)} | {_stock_limit_point(st, trade_mode, 'low_buy')} |"
                 )
@@ -1228,18 +1358,18 @@ def render_unified_report(
         lines.append(watch_title)
         lines.append("")
         if watch_display:
-            lines.append("| 股票 | 策略 | 角色 | 买点 | 目标 | 止损 | 看点 | 限制 |")
-            lines.append("|------|------|------|------|------|------|------|------|")
+            lines.append(f"| 股票 | 策略 | 方向 | 角色 | {price_col} | 目标 | 止损 | 看点 | 限制 |")
+            lines.append("|------|------|------|------|------|------|------|------|------|")
             for st in watch_display:
                 role = st.get("display_role") or assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
                 lines.append(
-                    f"| {st.get('name','')} | {st.get('strategy','')} | {role} | "
+                    f"| {st.get('name','')} | {st.get('strategy','')} | {_display_direction(st)} | {role} | "
                     f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
                     f"{_stock_watch_point(st, role)} | {_stock_limit_point(st, trade_mode, 'watch')} |"
                 )
             if watch_hidden:
                 lines.append("")
-                lines.append(f"> 防守模式下仅展开核心观察，另有 {watch_hidden} 只备选不展开。")
+                lines.append(_watch_hidden_note(trade_mode, watch_hidden))
         else:
             lines.append("暂无")
         lines.append("")
@@ -1248,12 +1378,12 @@ def render_unified_report(
         lines.append(f"### 7.3 交易条件不满足（{len(cond_fail)}只）")
         lines.append("")
         if cond_fail:
-            lines.append("| 股票 | 策略 | 买点 | 目标 | 止损 | 不买原因 |")
-            lines.append("|------|------|------|------|------|----------|")
+            lines.append(f"| 股票 | 策略 | 方向 | {price_col} | 目标 | 止损 | 不买原因 |")
+            lines.append("|------|------|------|------|------|------|----------|")
             for st in cond_fail:
                 role = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
                 lines.append(
-                    f"| {st.get('name','')} | {st.get('strategy','')} | "
+                    f"| {st.get('name','')} | {st.get('strategy','')} | {_display_direction(st)} | "
                     f"{_entry_zone(st)} | {_target_price(st)} | {_stop_price(st)} | "
                     f"{_decision_summary(st, role, trade_mode, 'cond_fail')} |"
                 )
@@ -1268,7 +1398,7 @@ def render_unified_report(
             lines.append("| 股票 | 策略来源 | 高风险原因 | 只复盘不买原因 |")
             lines.append("|------|----------|------------|----------------|")
             for st in high_risk:
-                lines.append(f"| {st.get('name','')} | {st.get('strategy','')} | {st.get('risk_level','-')} | 风险偏高，仅复盘 |")
+                lines.append(f"| {st.get('name','')} | {st.get('strategy','')} | {_high_risk_reason(st)} | 风险偏高，仅复盘 |")
         else:
             lines.append("暂无")
         lines.append("")

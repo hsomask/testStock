@@ -57,6 +57,7 @@ from analysis.report_renderer import render_daily_report, save_report
 from analysis.evaluation_report_reader import load_t1_evaluation_summary
 from analysis.data_quality import check_data_quality
 from analysis.theme_detector import detect_main_themes
+from analysis.candidate_snapshot import save_candidate_feature_snapshot
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
@@ -74,6 +75,16 @@ def get_board_ratio_changes():
     except Exception as e:
         logger.exception(f"板块历史读取失败：{e}")
         return None
+
+
+def refresh_strategy_feedback(trade_date):
+    """Refresh short-window strategy feedback before trade-plan generation."""
+    try:
+        from analysis.strategy_feedback import compute_strategy_feedback
+        stats = compute_strategy_feedback(as_of_date=trade_date, window_days=5, save_db=True)
+        print(f"策略反馈已刷新：近5日 {len(stats)} 条")
+    except Exception as e:
+        logger.warning(f"策略反馈刷新失败，继续生成日报：{e}")
 
 
 def build_summary_json(trade_date, market_result, sentiment_result, themes,
@@ -529,6 +540,9 @@ def main():
         # 账户过滤
         filtered_result, excluded_result = filter_tradeable_stocks(selector_result)
 
+        # P5 第一阶段：基于最近 evaluation 刷新策略反馈，供 trade_plan 自动降级使用。
+        refresh_strategy_feedback(trade_date)
+
         # 生成交易计划
         trade_plan = generate_trade_plan(
             trade_date, market_result, quality, themes,
@@ -540,6 +554,21 @@ def main():
         summary = build_summary_json(trade_date, market_result, sentiment_result,
                                      themes, quality, selector_result)
         save_summary_json(summary, trade_date)
+
+        # ML 旁路地基：保存日报生成当下的最终候选特征快照。
+        try:
+            snapshot_count = save_candidate_feature_snapshot(
+                trade_date=trade_date,
+                trade_plan=trade_plan,
+                selector_result=selector_result,
+                market=market_result,
+                sentiment=sentiment_result,
+                quality=quality,
+                db_conn=db_conn,
+            )
+            print(f"候选特征快照写入完成：{snapshot_count} 条")
+        except Exception as e:
+            logger.warning(f"候选特征快照写入失败，继续生成日报：{e}")
 
         # 写入 stock_signal
         save_stock_signals(selector_result, trade_date, db_conn)

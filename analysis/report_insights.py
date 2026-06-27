@@ -183,12 +183,14 @@ def weak_market_conclusion(triggers, checked, green_ratio, lb_ratio):
     """弱市不做结论 — 更直观表达"""
     if checked < 2:
         return "部分触发", "检查项不足，无法完整判断"
+    if green_ratio > 0.8:
+        return "宽度极弱", "全市场普跌明显，只复盘不主动开仓"
     if green_ratio > 0.7 and lb_ratio <= 1:
         return "弱市信号较强", "原则上只观察或极轻仓"
     if green_ratio > 0.6 and lb_ratio > 3:
-        return "部分触发", "不是全面弱市，而是结构分化；只看核心方向，不普买"
+        return "部分触发", "未全面弱市，但宽度偏弱；只复盘核心方向，不扩散普买"
     if triggers <= 1:
-        return "未触发明显弱市", "可正常观察"
+        return "未触发明显弱市", "轻仓观察"
     return "部分触发", "结构分化，轻仓观察"
 
 
