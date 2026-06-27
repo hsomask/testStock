@@ -403,3 +403,55 @@ CREATE TABLE IF NOT EXISTS strategy_feedback_stats (
     updated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE (trade_date, strategy, window_days)
 );
+
+
+-- ML 候选特征快照表
+-- 保存日报生成当下的最终 trade_plan 分层和候选特征，用于后续旁路机器学习训练。
+CREATE TABLE IF NOT EXISTS candidate_feature_snapshot (
+    id SERIAL PRIMARY KEY,
+    trade_date DATE NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT,
+    strategy TEXT NOT NULL,
+    rule_layer TEXT,
+    primary_direction TEXT,
+
+    market_status TEXT,
+    market_score NUMERIC,
+    trade_mode TEXT,
+    position_cap NUMERIC,
+    sentiment_score NUMERIC,
+    sentiment_stage TEXT,
+    data_confidence NUMERIC,
+
+    close_price NUMERIC,
+    pct_chg NUMERIC,
+    pct_5d NUMERIC,
+    pct_20d NUMERIC,
+    volume_ratio NUMERIC,
+    turnover NUMERIC,
+    ma5 NUMERIC,
+    ma10 NUMERIC,
+    ma20 NUMERIC,
+
+    risk_level TEXT,
+    action_signal TEXT,
+    entry_reason TEXT,
+    risk_reasons TEXT,
+
+    observe_low NUMERIC,
+    observe_high NUMERIC,
+    pressure_price NUMERIC,
+    invalid_price NUMERIC,
+
+    strategy_feedback_score NUMERIC,
+    strategy_feedback_status TEXT,
+    strategy_feedback_win_rate_1d NUMERIC,
+    strategy_feedback_failed_rate NUMERIC,
+    strategy_feedback_sample_count INTEGER,
+
+    feature_json JSONB,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE (trade_date, code, strategy)
+);

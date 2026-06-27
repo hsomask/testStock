@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import psycopg2
+from analysis.board_classifier import classify_board, get_board_cluster
+from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
 
@@ -130,7 +133,7 @@ def _gen_entry_notes():
 def _load_strategy_feedback():
     try:
         from analysis.strategy_feedback import load_latest_strategy_feedback
-        return load_latest_strategy_feedback(window_days=20)
+        return load_latest_strategy_feedback(window_days=5)
     except Exception:
         return {}
 
@@ -154,7 +157,7 @@ def _apply_strategy_feedback_downgrade(category, reason, strategy, feedback_map)
     win_rate = _fmt_feedback_pct(feedback.get("win_rate_1d"))
     failed_rate = _fmt_feedback_pct(feedback.get("failed_rate"))
     feedback_reason = feedback.get("reason") or "策略近期反馈偏弱"
-    note = f"策略反馈降级：近20日样本{sample}，胜率{win_rate}，失败率{failed_rate}，{feedback_reason}"
+    note = f"策略反馈降级：近5日样本{sample}，胜率{win_rate}，失败率{failed_rate}，{feedback_reason}"
 
     if status == "weak" and category == "候选低吸":
         return "只观察", f"{reason}；{note}", feedback
@@ -163,11 +166,94 @@ def _apply_strategy_feedback_downgrade(category, reason, strategy, feedback_map)
     return category, reason, feedback
 
 
+def _theme_clusters(themes):
+    clusters = []
+    for t in themes or []:
+        name = t.get("name") if isinstance(t, dict) else t
+        info = classify_board(str(name or ""))
+        if info.category == "industrial":
+            cluster = get_board_cluster(info.display_name) or info.display_name
+            if cluster not in clusters:
+                clusters.append(cluster)
+    return clusters
+
+
+def _load_board_direction_map(codes, preferred_clusters=None):
+    if not DATABASE_DSN or not codes:
+        return {}
+    preferred = list(preferred_clusters or [])
+    try:
+        conn = psycopg2.connect(DATABASE_DSN)
+        sql = """
+            SELECT code, board_type, board_name
+            FROM stock_board_map
+            WHERE code = ANY(%s)
+        """
+        mp_df = pd.read_sql(sql, conn, params=(list(codes),))
+        conn.close()
+    except Exception:
+        return {}
+    result = {}
+    for code, group in mp_df.groupby("code"):
+        industrial = []
+        for _, item in group.iterrows():
+            info = classify_board(str(item.get("board_name", "")))
+            if info.category != "industrial":
+                continue
+            cluster = get_board_cluster(info.display_name) or info.display_name
+            industrial.append((cluster, str(item.get("board_type", ""))))
+        if not industrial:
+            continue
+        chosen = None
+        for cluster in preferred:
+            if any(x[0] == cluster for x in industrial):
+                chosen = cluster
+                break
+        if chosen is None:
+            industry = [x[0] for x in industrial if x[1] == "行业"]
+            chosen = industry[0] if industry else industrial[0][0]
+        result[str(code)] = chosen
+    return result
+
+
+def _pick_primary_direction(row, direction_map=None, preferred_clusters=None):
+    candidates = []
+    for field in ("hot_board_hits", "industry_tags", "concept_tags"):
+        value = row.get(field, [])
+        if isinstance(value, str):
+            value = [x.strip() for x in value.split("、") if x.strip()]
+        if isinstance(value, (list, tuple, set)):
+            candidates.extend(value)
+    for name in candidates:
+        info = classify_board(str(name))
+        if info.category == "industrial":
+            cluster = get_board_cluster(info.display_name) or info.display_name
+            if not preferred_clusters or cluster in preferred_clusters:
+                return cluster
+    code = str(row.get("code", ""))
+    if direction_map and direction_map.get(code):
+        return direction_map[code]
+    for name in candidates:
+        info = classify_board(str(name))
+        if info.category == "industrial":
+            return get_board_cluster(info.display_name) or info.display_name
+    return "-"
+
+
 def generate_trade_plan(trade_date, market_result, quality, themes,
                          filtered_result, excluded_result):
     """生成交易计划"""
     restrictions = _market_restrictions(market_result, quality)
     strategy_feedback = _load_strategy_feedback()
+    all_codes = set()
+    for pool_df in filtered_result.values():
+        if pool_df is not None and not pool_df.empty and "code" in pool_df.columns:
+            all_codes.update(str(x) for x in pool_df["code"].dropna().tolist())
+    for ex in excluded_result or []:
+        if ex.get("code"):
+            all_codes.add(str(ex.get("code")))
+    preferred_clusters = _theme_clusters(themes)
+    direction_map = _load_board_direction_map(all_codes, preferred_clusters)
 
     plans = {
         "候选低吸": [],
@@ -184,6 +270,7 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
             "name": ex["name"],
             "strategy": ex["strategy"],
             "reason": ex["exclude_reason"],
+            "primary_direction": direction_map.get(str(ex.get("code", "")), "-"),
         })
 
     # 分类每只股票
@@ -215,9 +302,14 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                 "pressure_price": round(float(row["pressure_price"]), 2) if pd.notna(row.get("pressure_price")) else None,
                 "invalid_price": round(float(row["invalid_price"]), 2) if pd.notna(row.get("invalid_price")) else None,
                 "reason": reason,
+                "primary_direction": _pick_primary_direction(row, direction_map, preferred_clusters),
+                "risk_reasons": str(row.get("risk_reasons", "")),
                 "feedback_status": feedback.get("status"),
                 "feedback_score": feedback.get("feedback_score"),
                 "feedback_reason": feedback.get("reason"),
+                "feedback_sample_count": feedback.get("sample_count"),
+                "feedback_win_rate_1d": feedback.get("win_rate_1d"),
+                "feedback_failed_rate": feedback.get("failed_rate"),
             })
 
     # 组装输出

@@ -86,15 +86,20 @@ def analyze_market(stock_df, index_df):
 
     status = classify_market_status(score)
 
-    # 高度分化判断：上涨少但涨停不少 → 局部热点活跃
-    if up_ratio < 0.30 and limit_up >= 50:
+    # 高度分化判断：上涨少但涨停不少 → 局部热点活跃；若绿盘过高，
+    # 对日报用户更应提示为弱势分化/普跌结构，避免“分化”显得过于乐观。
+    if up_ratio < 0.25 and green_ratio > 0.75:
+        status = "弱势分化"
+    elif up_ratio < 0.30 and limit_up >= 50:
         status = "分化"
     elif up_ratio < 0.50 and down_count > up_count:
         status = "宽度偏弱"
 
     indices = get_main_indices(index_df)
 
-    if status == "分化":
+    if status == "弱势分化":
+        summary = "市场普跌但局部热点仍活跃，短线生态与全市场赚钱效应背离，不宜开新仓。"
+    elif status == "分化":
         summary = "市场宽度偏弱但局部热点活跃，注意区分方向，不要普买。"
     elif status == "宽度偏弱":
         summary = "市场宽度偏弱，下跌多于上涨，操作上应精选方向，控制仓位。"
