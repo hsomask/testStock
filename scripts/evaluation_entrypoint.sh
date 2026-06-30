@@ -7,12 +7,14 @@ AS_OF_DATE="${AS_OF_DATE:-$(date +%Y%m%d)}"
 SEND_EVAL_EMAIL="${SEND_EVAL_EMAIL:-0}"
 EVAL_TIME_BUDGET="${EVAL_TIME_BUDGET:-300}"
 EVAL_DEEP="${EVAL_DEEP:-0}"
+ML_DATASET_MIN_COVERAGE="${ML_DATASET_MIN_COVERAGE:-0.9}"
 
 echo "=== Evaluation EntryPoint ==="
 echo "AS_OF_DATE=${AS_OF_DATE}"
 echo "SEND_EVAL_EMAIL=${SEND_EVAL_EMAIL}"
 echo "EVAL_TIME_BUDGET=${EVAL_TIME_BUDGET}"
 echo "EVAL_DEEP=${EVAL_DEEP}"
+echo "ML_DATASET_MIN_COVERAGE=${ML_DATASET_MIN_COVERAGE}"
 echo ""
 
 echo "[1/4] Scheduler check and K-line coverage guard"
@@ -115,6 +117,16 @@ python -m analysis.watchlist_evaluation \
 echo ""
 echo "[2b/4] Update strategy feedback"
 python -m analysis.strategy_feedback --date "$AS_OF_DATE" --window 20
+
+echo ""
+echo "[2c/4] Build ML dataset sidecar"
+set +e
+python -m analysis.ml_dataset_builder --as-of "$AS_OF_DATE" --min-coverage "$ML_DATASET_MIN_COVERAGE"
+ML_STATUS=$?
+set -e
+if [ "$ML_STATUS" -ne 0 ]; then
+    echo "[WARN] ML dataset builder failed, continue evaluation workflow."
+fi
 
 echo ""
 echo "[3/4] Query latest evaluation"
