@@ -75,12 +75,10 @@ def _fetch_signals(cur, signal_date):
         (sql_signal,),
     )
     rows = []
-    seen_codes = set()
     for row in cur.fetchall():
         code = str(row[0]).strip()
-        if not code or code in seen_codes:
+        if not code:
             continue
-        seen_codes.add(code)
         rows.append({
             "code": code,
             "name": row[1] or "",
@@ -193,6 +191,10 @@ def _summarize_details(signals, details, signal_date, as_of_date, attempted, fil
     if coverage < 0.80:
         warnings.append("coverage_below_80_defer_formal_evaluation")
 
+    missing_codes = sorted({item["code"] for item in details if not item["ok"]})
+    upstream_lag_codes = sorted({item["code"] for item in details if item["reason"] == "upstream_lag"})
+    suspended_codes = sorted({item["code"] for item in details if item["reason"] == "suspended_or_no_trade"})
+
     return {
         "status": status,
         "signal_date": signal_date,
@@ -209,11 +211,9 @@ def _summarize_details(signals, details, signal_date, as_of_date, attempted, fil
         "strategy_coverage": finalize_group(strategy_stats),
         "risk_coverage": finalize_group(risk_stats),
         "layer_coverage": finalize_group(layer_stats),
-        "missing_codes": [item["code"] for item in details if not item["ok"]],
-        "upstream_lag_codes": [item["code"] for item in details if item["reason"] == "upstream_lag"],
-        "suspended_or_no_trade_codes": [
-            item["code"] for item in details if item["reason"] == "suspended_or_no_trade"
-        ],
+        "missing_codes": missing_codes,
+        "upstream_lag_codes": upstream_lag_codes,
+        "suspended_or_no_trade_codes": suspended_codes,
         "errors": errors[:20],
         "warnings": warnings,
         "details": details,
@@ -277,7 +277,10 @@ def ensure_signal_kline_coverage(signal_date, as_of_date, time_budget=300, deep=
                 break
 
             rounds_used.append(days)
+            missing_by_code = {}
             for item in missing:
+                missing_by_code.setdefault(item["code"], item)
+            for item in missing_by_code.values():
                 if time.monotonic() - started >= time_budget:
                     errors.append({"code": "_budget", "error": "time_budget_exceeded"})
                     break
