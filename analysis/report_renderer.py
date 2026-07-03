@@ -172,6 +172,18 @@ def _fmt_pct(val):
     return f"{val * 100:.2f}%"
 
 
+def _learning_sample_status(coverage):
+    try:
+        cov = float(coverage or 0)
+    except Exception:
+        cov = 0
+    if cov >= 0.90:
+        return "高质量样本", "1.0", "进入高质量训练集"
+    if cov >= 0.80:
+        return "低权重样本", "0.5", "仅低权重反馈，暂不作为高质量训练样本"
+    return "不进入学习", "0", "覆盖率不足，等待回补后重跑 evaluation"
+
+
 def _get_limitup_metrics(market, sentiment=None):
     metrics = {}
     if isinstance(market, dict):
@@ -823,7 +835,10 @@ def render_unified_report(
     lines.append("")
     lines.append("**交易纪律：**")
     lines.append(f"- 当前模式：{trade_mode}")
-    lines.append(f"- 仓位上限：{pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
+    if trade_mode == "空仓":
+        lines.append(f"- 实盘建议：不开新仓；模拟观察仓位最多 {pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
+    else:
+        lines.append(f"- 仓位上限：{pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
     lines.append(f"- 可以做：{can_do}")
     lines.append(f"- 不要做：{avoid_do}")
     lines.append(f"- 最重要验证：{validation_items[0] if validation_items else '观察池分层是否继续有效'}")
@@ -843,7 +858,11 @@ def render_unified_report(
     lines.append(f"| 市场综合评分 | {m_score:.1f} / 100 |")
     lines.append(f"| 市场状态 | {m_status} |")
     lines.append(f"| 短线情绪阶段 | {s_stage} |")
-    lines.append(f"| 总仓位上限 | {pos['max_pct']}成 |")
+    if trade_mode == "空仓":
+        lines.append(f"| 实盘仓位 | 不开新仓 |")
+        lines.append(f"| 模拟观察仓位上限 | {pos['max_pct']}成 |")
+    else:
+        lines.append(f"| 总仓位上限 | {pos['max_pct']}成 |")
     lines.append(f"| 单票上限 | {pos['single_pct']}成 |")
     lines.append(f"| 数据可信度 | {quality.get('confidence_score', 0)} / 100 |")
     lines.append("")
@@ -881,6 +900,12 @@ def render_unified_report(
         lines.append(f"| 快照覆盖率 | {_fmt_pct(td.get('snapshot_coverage'))} |")
         if td.get('kline_coverage') is not None:
             lines.append(f"| K线覆盖率 | {_fmt_pct(td.get('kline_coverage'))} |")
+            sample_status, sample_weight, sample_action = _learning_sample_status(td.get('kline_coverage'))
+            lines.append(f"| 学习样本状态 | {sample_status} |")
+            lines.append(f"| 学习权重 | {sample_weight} |")
+            lines.append(f"| 学习处理 | {sample_action} |")
+        else:
+            lines.append(f"| 学习样本状态 | 不进入学习 |")
         lines.append(f"| 复盘口径 | 快照复盘（降级） |")
         lines.append("")
         _render_snapshot_stocks(lines, td)
@@ -901,6 +926,10 @@ def render_unified_report(
         lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
+        lines.append(f"| 学习样本状态 | {sample_status} |")
+        lines.append(f"| 学习权重 | {sample_weight} |")
+        lines.append(f"| 学习处理 | {sample_action} |")
         lines.append("")
         lines.append("> 覆盖不足时不展示胜率、平均收益和强结论。")
         lines.append("")
@@ -916,6 +945,10 @@ def render_unified_report(
         lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
+        lines.append(f"| 学习样本状态 | {sample_status} |")
+        lines.append(f"| 学习权重 | {sample_weight} |")
+        lines.append(f"| 学习处理 | {sample_action} |")
         lines.append(f"| 平均次日收益 | {_fmt_pct(td.get('avg_return_1d'))} |")
         lines.append(f"| 次日胜率 | {_fmt_pct(td.get('win_rate_1d'))} |")
         lines.append(f"| 分层倒挂 | {'**是**' if td.get('inversion') else '否'} |")
@@ -945,6 +978,10 @@ def render_unified_report(
         lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
+        sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
+        lines.append(f"| 学习样本状态 | {sample_status} |")
+        lines.append(f"| 学习权重 | {sample_weight} |")
+        lines.append(f"| 学习处理 | {sample_action} |")
         lines.append(f"| 平均次日收益 | {_fmt_pct(td.get('avg_return_1d'))} |")
         lines.append(f"| 次日胜率 | {_fmt_pct(td.get('win_rate_1d'))} |")
         lines.append(f"| 分层倒挂 | {'**是**' if td.get('inversion') else '否'} |")
@@ -1445,7 +1482,10 @@ def render_unified_report(
         if not r.get("allow_real_trade", True):
             lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
             lines.append("")
-        lines.append(f"- 实盘：{'允许' if r.get('allow_real_trade') else '仅模拟'} | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        if r.get("allow_real_trade", True):
+            lines.append(f"- 实盘：允许 | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        else:
+            lines.append(f"- 实盘：不建议开仓 | 模拟观察：最多 {r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
         if tp_display_counts:
             lines.append(
                 f"- 候选低吸：{tp_display_counts['候选低吸']} | 只观察：{tp_display_counts['只观察']} | "
