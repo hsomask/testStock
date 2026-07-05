@@ -363,6 +363,9 @@ def _execution_focus(trade_mode, obs_main, receding, width_weak, s_stage):
 
 
 def _stock_watch_point(stock, role):
+    display_reason = str(stock.get("display_reason") or "")
+    if display_reason and any(key in display_reason for key in ("非今日主线", "场景反馈", "策略反馈")):
+        return display_reason
     strategy = str(stock.get("strategy", ""))
     if role == "主线核心" or strategy in ("板块联动", "滚雪球趋势"):
         return "主线相关，优先看承接"
@@ -399,6 +402,11 @@ def _feedback_limit_text(stock):
 
 
 def _stock_limit_point(stock, trade_mode, layer):
+    display_reason = str(stock.get("display_reason") or "")
+    if display_reason:
+        if layer == "low_buy" and display_reason.startswith("主线一致"):
+            return "破止损位退出"
+        return display_reason
     reason = str(stock.get("reason") or "")
     if "位置偏高" in reason or "不追高" in reason:
         return "位置偏高，不追高"
@@ -529,6 +537,59 @@ def _feedback_summary(t1_data):
         if names:
             lines.append(f"表现较好样本：{names}。")
     return lines[:3]
+
+
+def _correction_summary_lines(trade_plan):
+    if not trade_plan or not trade_plan.get("plans"):
+        return []
+    counters = {
+        "非今日主线": 0,
+        "高位/过热": 0,
+        "策略反馈": 0,
+        "场景反馈": 0,
+        "数据可信度": 0,
+    }
+    downgraded = 0
+    blocked = 0
+    examples = []
+    for items in trade_plan.get("plans", {}).values():
+        for item in items or []:
+            base = item.get("base_layer")
+            final = item.get("final_layer")
+            tags = item.get("correction_tags") or []
+            if isinstance(tags, str):
+                tags = [x.strip() for x in tags.replace("；", ",").split(",") if x.strip()]
+            if base and final and base != final:
+                downgraded += 1
+                if final == "交易条件不满足":
+                    blocked += 1
+                if len(examples) < 3:
+                    examples.append(str(item.get("name") or ""))
+            tag_text = "；".join(str(x) for x in tags)
+            if "非今日主线" in tag_text:
+                counters["非今日主线"] += 1
+            if any(x in tag_text for x in ("高位追强", "短线偏高", "量能过热", "波段偏高")):
+                counters["高位/过热"] += 1
+            if "策略反馈" in tag_text:
+                counters["策略反馈"] += 1
+            if "场景反馈" in tag_text:
+                counters["场景反馈"] += 1
+            if "数据可信度不足" in tag_text:
+                counters["数据可信度"] += 1
+
+    if downgraded <= 0:
+        return ["- 今日未触发明显纠偏降级。"]
+
+    parts = [f"降级 {downgraded} 只"]
+    if blocked:
+        parts.append(f"其中强降级 {blocked} 只")
+    reason_parts = [f"{k}{v}只" for k, v in counters.items() if v > 0]
+    lines = ["- " + "，".join(parts) + "。"]
+    if reason_parts:
+        lines.append("- 主要原因：" + "、".join(reason_parts) + "。")
+    if examples:
+        lines.append("- 示例：" + "、".join(x for x in examples if x) + "。")
+    return lines
 
 
 def _quality_split_rows(quality):
@@ -1205,7 +1266,10 @@ def render_unified_report(
                 stage_info = board_stage_map.get(name, {})
                 stage = stage_info.get("stage") or "资金流出"
                 signal = stage_info.get("signal") or "退潮观察"
-                action = _theme_action(stage, signal, True)
+                if "退潮" not in f"{stage}{signal}" and "失败" not in f"{stage}{signal}":
+                    stage = "资金流出"
+                    signal = "退潮观察"
+                action = "回避" if chg < -0.8 else _theme_action(stage, signal, True)
                 lines.append(f"| {name} | {stage} / {signal} | {chg_str} | {action} |")
             lines.append("")
 
@@ -1315,6 +1379,13 @@ def render_unified_report(
     if feedback_lines:
         lines.append(f"- {feedback_lines[0]}，同策略新票继续先降级。")
     lines.append("")
+
+    correction_lines = _correction_summary_lines(trade_plan)
+    if correction_lines:
+        lines.append("### 6.5 纠偏摘要")
+        for item in correction_lines:
+            lines.append(item)
+        lines.append("")
     lines.append("---")
     lines.append("")
 

@@ -24,6 +24,7 @@ from data.config import (
     EMAIL_TO,
 )
 from analysis.data_fetcher import is_trade_day
+from data.config import REPORT_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,18 @@ def _yn(val):
     return "是" if val else "否"
 
 
+def _load_json_report(name, as_of_date):
+    path = REPORT_DIR / "evaluation" / f"{name}_{as_of_date}.json"
+    if not path.exists():
+        path = REPORT_DIR / "evaluation" / f"{name}_latest.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def build_email_body(summary):
     """生成邮件正文"""
     s = summary
@@ -190,9 +203,35 @@ def build_email_body(summary):
         for msg in messages:
             lines.append(f"    - {msg}")
 
+    correction = _load_json_report("correction_effectiveness", str(s.get("as_of_date", "")).replace("-", "")[:8])
+    if correction:
+        cs = correction.get("summary", {})
+        lines += [
+            "",
+            "## 4. 纠偏效果",
+            "",
+            f"  - 被纠偏降级: {cs.get('downgraded', 0)}",
+            f"  - 避坑: {cs.get('pit_avoided', 0)}",
+            f"  - 误杀: {cs.get('false_negative', 0)}",
+            f"  - 降级组平均T+1: {_pct(cs.get('downgraded_avg_return'))}",
+            f"  - 保留候选平均T+1: {_pct(cs.get('kept_candidate_avg_return'))}",
+            f"  - 判断: {cs.get('effectiveness', 'N/A')}",
+        ]
+
+    snapshot = _load_json_report("snapshot_integrity", str(s.get("signal_date", "")).replace("-", "")[:8])
+    if snapshot:
+        lines += [
+            "",
+            "## 5. 快照完整性",
+            "",
+            f"  - 快照数: {snapshot.get('total_snapshots', 0)}",
+            f"  - 状态: {snapshot.get('status', 'N/A')}",
+            f"  - 最低字段覆盖: {_pct(snapshot.get('min_field_coverage'))}",
+        ]
+
     lines += [
         "",
-        "## 4. 建议动作",
+        "## 6. 建议动作",
         "",
     ]
     cov1d = s.get("coverage_1d") or 0

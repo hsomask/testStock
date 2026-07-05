@@ -117,7 +117,7 @@ def fetch_signals(conn, start_date, end_date):
         "id", "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
         "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
-        "pct_5d", "pct_20d", "hot_board_hits",
+        "pct_5d", "pct_20d", "hot_board_hits", "entry_reasons", "risk_reasons",
     ]
     select_cols = [c for c in desired if c in existing_cols]
 
@@ -162,7 +162,7 @@ def fetch_signals_for_date(conn, signal_date):
         "id", "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
         "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
-        "pct_5d", "pct_20d", "hot_board_hits",
+        "pct_5d", "pct_20d", "hot_board_hits", "entry_reasons", "risk_reasons",
     ]
     select_cols = [c for c in desired if c in existing_cols]
 
@@ -278,6 +278,9 @@ def compute_feedback(signal, metrics, status):
     pct_20d = _safe_float(signal.get("pct_20d"))
     volume_ratio = _safe_float(signal.get("volume_ratio"))
     next_close = _safe_float(metrics.get("next_1d_close"))
+    entry_reasons = str(signal.get("entry_reasons") or signal.get("entry_reason") or "")
+    risk_reasons = str(signal.get("risk_reasons") or "")
+    strategy = str(signal.get("strategy") or "")
 
     if pct_chg is not None and pct_chg >= 9.5:
         tags.append("gap_or_chase_risk")
@@ -293,6 +296,15 @@ def compute_feedback(signal, metrics, status):
         tags.append("short_term_extended")
     if pct_20d is not None and pct_20d >= 50:
         tags.append("swing_position_extended")
+
+    if "策略反馈降级" in entry_reasons or "策略反馈偏弱" in entry_reasons:
+        tags.append("strategy_recently_weak")
+    if "非今日主线" in entry_reasons or "非今日主线" in risk_reasons:
+        tags.append("non_mainline_no_support")
+    if "纠偏降级" in entry_reasons:
+        tags.append("correction_downgraded")
+    if strategy in ("N字异动", "一次起爆", "二次起爆") and label in ("weak", "failed"):
+        tags.append("short_pattern_failed")
 
     if next_close is not None:
         broken = []
@@ -315,6 +327,10 @@ def compute_feedback(signal, metrics, status):
         "weak_volume": "信号日量能不足，承接确认偏弱",
         "short_term_extended": "5日涨幅偏大，短线位置偏高",
         "swing_position_extended": "20日涨幅偏大，波段位置偏高",
+        "strategy_recently_weak": "策略近期反馈偏弱，继续作为降级因子",
+        "non_mainline_no_support": "非今日主线，次日承接不足",
+        "correction_downgraded": "信号已被纠偏降级，后续继续验证降级是否有效",
+        "short_pattern_failed": "短线形态策略次日未兑现，需分市场环境继续观察",
         "weak_follow_without_clear_context": "次日走弱，现有字段未定位到单一原因",
         "pattern_confirmed": "次日反馈验证了信号有效性",
     }

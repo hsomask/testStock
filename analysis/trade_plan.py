@@ -9,6 +9,11 @@ from pathlib import Path
 from datetime import datetime
 import psycopg2
 from analysis.board_classifier import classify_board, get_board_cluster
+from analysis.correction_engine import (
+    evaluate_candidate,
+    load_context_feedback,
+    load_strategy_feedback,
+)
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
@@ -72,10 +77,6 @@ def _classify_stock(row):
     # 获取今日涨幅
     today_pct = row.get("pct_chg", np.nan)
 
-    # 0. 滚雪球趋势 + 可信度 < 70 → 强制只观察
-    # （strategy 从 row 传入，无法在此函数参数中获取，由调用方传入）
-    # 此逻辑在 generate_trade_plan 中处理
-
     # 1. 高风险回避（仅 signal/risk 触发）
     if action == "回避" or risk == "高":
         return "高风险回避", "信号/风险等级预警"
@@ -128,42 +129,6 @@ def _gen_entry_notes():
         "4. 所属板块不能明显走弱；"
         "5. 大盘不能继续恶化。"
     )
-
-
-def _load_strategy_feedback():
-    try:
-        from analysis.strategy_feedback import load_latest_strategy_feedback
-        return load_latest_strategy_feedback(window_days=5)
-    except Exception:
-        return {}
-
-
-def _fmt_feedback_pct(value):
-    try:
-        if value is None or pd.isna(value):
-            return "-"
-        return f"{float(value):.1%}"
-    except Exception:
-        return "-"
-
-
-def _apply_strategy_feedback_downgrade(category, reason, strategy, feedback_map):
-    feedback = feedback_map.get(strategy) or {}
-    status = feedback.get("status")
-    if status not in ("weak", "blocked"):
-        return category, reason, feedback
-
-    sample = feedback.get("sample_count") or 0
-    win_rate = _fmt_feedback_pct(feedback.get("win_rate_1d"))
-    failed_rate = _fmt_feedback_pct(feedback.get("failed_rate"))
-    feedback_reason = feedback.get("reason") or "策略近期反馈偏弱"
-    note = f"策略反馈降级：近5日样本{sample}，胜率{win_rate}，失败率{failed_rate}，{feedback_reason}"
-
-    if status == "weak" and category == "候选低吸":
-        return "只观察", f"{reason}；{note}", feedback
-    if status == "blocked" and category in ("候选低吸", "只观察"):
-        return "交易条件不满足", f"{reason}；{note}", feedback
-    return category, reason, feedback
 
 
 def _theme_clusters(themes):
@@ -244,7 +209,8 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                          filtered_result, excluded_result):
     """生成交易计划"""
     restrictions = _market_restrictions(market_result, quality)
-    strategy_feedback = _load_strategy_feedback()
+    strategy_feedback = load_strategy_feedback(window_days=5)
+    context_feedback = load_context_feedback()
     all_codes = set()
     for pool_df in filtered_result.values():
         if pool_df is not None and not pool_df.empty and "code" in pool_df.columns:
@@ -280,14 +246,24 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
         for _, row in pool_df.iterrows():
             code = str(row.get("code", ""))
             name = str(row.get("name", ""))
-            category, reason = _classify_stock(row)
-            category, reason, feedback = _apply_strategy_feedback_downgrade(
-                category, reason, pool_name, strategy_feedback
+            primary_direction = _pick_primary_direction(row, direction_map, preferred_clusters)
+            base_category, base_reason = _classify_stock(row)
+            decision = evaluate_candidate(
+                base_layer=base_category,
+                base_reason=base_reason,
+                row=row,
+                strategy=pool_name,
+                primary_direction=primary_direction,
+                preferred_clusters=preferred_clusters,
+                market_status=market_result.get("status"),
+                data_confidence=quality.get("confidence_score"),
+                strategy_feedback_map=strategy_feedback,
+                context_feedback_map=context_feedback,
             )
-            # 滚雪球趋势 + 可信度 < 70 → 强制只观察
-            if pool_name == "滚雪球趋势" and quality.get("confidence_score", 0) < 70 and category == "候选低吸":
-                category = "只观察"
-                reason = "报告可信度低于70，只观察，不生成候选低吸"
+            category = decision["final_layer"]
+            reason = decision["reason"]
+            feedback = decision.get("strategy_feedback") or {}
+            context_item = decision.get("context_feedback") or {}
             close = row.get("close", np.nan)
             plans[category].append({
                 "code": code,
@@ -302,7 +278,19 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                 "pressure_price": round(float(row["pressure_price"]), 2) if pd.notna(row.get("pressure_price")) else None,
                 "invalid_price": round(float(row["invalid_price"]), 2) if pd.notna(row.get("invalid_price")) else None,
                 "reason": reason,
-                "primary_direction": _pick_primary_direction(row, direction_map, preferred_clusters),
+                "primary_direction": primary_direction,
+                "base_layer": decision.get("base_layer"),
+                "final_layer": category,
+                "decision_score": decision.get("decision_score"),
+                "direction_fit_score": decision.get("direction_fit_score"),
+                "entry_quality": decision.get("entry_quality"),
+                "correction_level": decision.get("correction_level"),
+                "correction_tags": decision.get("correction_tags"),
+                "decision_reasons": decision.get("decision_reasons"),
+                "display_reason": decision.get("display_reason"),
+                "correction_engine_version": decision.get("correction_engine_version"),
+                "strategy_feedback_version": decision.get("strategy_feedback_version"),
+                "context_feedback_version": decision.get("context_feedback_version"),
                 "risk_reasons": str(row.get("risk_reasons", "")),
                 "feedback_status": feedback.get("status"),
                 "feedback_score": feedback.get("feedback_score"),
@@ -310,6 +298,9 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                 "feedback_sample_count": feedback.get("sample_count"),
                 "feedback_win_rate_1d": feedback.get("win_rate_1d"),
                 "feedback_failed_rate": feedback.get("failed_rate"),
+                "context_feedback_status": context_item.get("status") if context_item else None,
+                "context_feedback_reason": context_item.get("reason") if context_item else None,
+                "context_feedback_sample_count": context_item.get("sample_count") if context_item else None,
             })
 
     # 组装输出

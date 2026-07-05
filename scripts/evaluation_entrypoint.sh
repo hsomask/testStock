@@ -119,13 +119,43 @@ echo "[2b/4] Update strategy feedback"
 python -m analysis.strategy_feedback --date "$AS_OF_DATE" --window 20
 
 echo ""
-echo "[2c/4] Build ML dataset sidecar"
+echo "[2c/4] Update context feedback"
+set +e
+python -m analysis.context_feedback --as-of "$AS_OF_DATE" --window 20
+CTX_STATUS=$?
+set -e
+if [ "$CTX_STATUS" -ne 0 ]; then
+    echo "[WARN] context feedback failed, continue evaluation workflow."
+fi
+
+echo ""
+echo "[2d/4] Check candidate snapshot integrity"
+set +e
+python -m analysis.snapshot_integrity_check --date "$SIGNAL_DATE"
+SNAPSHOT_STATUS=$?
+set -e
+if [ "$SNAPSHOT_STATUS" -ne 0 ]; then
+    echo "[WARN] snapshot integrity check failed, continue evaluation workflow."
+fi
+
+echo ""
+echo "[2e/4] Build ML dataset sidecar"
 set +e
 python -m analysis.ml_dataset_builder --as-of "$AS_OF_DATE" --min-coverage "$ML_DATASET_MIN_COVERAGE"
 ML_STATUS=$?
 set -e
 if [ "$ML_STATUS" -ne 0 ]; then
     echo "[WARN] ML dataset builder failed, continue evaluation workflow."
+fi
+
+echo ""
+echo "[2f/4] Audit correction effectiveness"
+set +e
+python -m analysis.correction_effectiveness --as-of "$AS_OF_DATE" --min-coverage 0.8
+CORRECTION_STATUS=$?
+set -e
+if [ "$CORRECTION_STATUS" -ne 0 ]; then
+    echo "[WARN] correction effectiveness audit failed, continue evaluation workflow."
 fi
 
 echo ""
