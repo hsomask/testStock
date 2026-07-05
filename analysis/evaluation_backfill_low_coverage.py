@@ -188,7 +188,16 @@ def backfill_low_coverage(
                     _run_module("analysis.strategy_feedback", ["--date", as_of_date, "--window", "20"])
                 )
                 item["commands"].append(
+                    _run_module("analysis.context_feedback", ["--as-of", as_of_date, "--window", "20"])
+                )
+                item["commands"].append(
+                    _run_module("analysis.snapshot_integrity_check", ["--date", signal_date])
+                )
+                item["commands"].append(
                     _run_module("analysis.ml_dataset_builder", ["--as-of", as_of_date, "--min-coverage", "0.9"])
+                )
+                item["commands"].append(
+                    _run_module("analysis.correction_effectiveness", ["--as-of", as_of_date, "--min-coverage", "0.8"])
                 )
             else:
                 item["action"] = "would_rerun_evaluation"

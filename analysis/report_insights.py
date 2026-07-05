@@ -354,12 +354,25 @@ def assign_stock_role(stock, pool_name, market, themes):
     pct = safe_float(stock.get("pct_chg", 0))
     pct_5d = safe_float(stock.get("pct_5d", np.nan))
     pct_20d = safe_float(stock.get("pct_20d", np.nan))
+    final_layer = str(stock.get("final_layer") or "").strip()
+    correction_level = str(stock.get("correction_level") or "").strip()
+    entry_quality = str(stock.get("entry_quality") or "").strip()
+    direction_fit = safe_float(stock.get("direction_fit_score"))
 
-    if risk in ("高", "高风险") or action in ("回避",):
+    if final_layer == "高风险回避" or risk in ("高", "高风险") or action in ("回避",):
         return "高风险回避"
+    if final_layer == "交易条件不满足" and entry_quality in ("高位追强", "短线偏高", "量能过热", "波段偏高"):
+        return "短线偏高"
+    if correction_level == "blocked":
+        return "独立观察"
 
     theme_names = [str(t.get("name", "")) for t in (themes or []) if t.get("name")]
     has_effective_theme = bool(theme_names)
+    primary_direction = str(stock.get("primary_direction") or "").strip()
+    if direction_fit is not None and direction_fit < 80:
+        has_effective_theme = False
+    elif primary_direction and primary_direction != "-" and theme_names and primary_direction not in theme_names:
+        has_effective_theme = False
 
     if pd_notna(pct_20d) and pct_20d >= 50:
         return "中位风险"

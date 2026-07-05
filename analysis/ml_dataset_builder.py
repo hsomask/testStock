@@ -31,6 +31,10 @@ FEATURE_COLUMNS = [
     "close_price", "pct_chg", "pct_5d", "pct_20d", "volume_ratio",
     "turnover", "ma5", "ma10", "ma20",
     "observe_low", "observe_high", "pressure_price", "invalid_price",
+    "base_layer", "final_layer", "decision_score",
+    "direction_fit_score", "entry_quality", "correction_level",
+    "correction_tags", "display_reason",
+    "correction_engine_version", "strategy_feedback_version", "context_feedback_version",
     "strategy_feedback_score", "strategy_feedback_status",
     "strategy_feedback_win_rate_1d", "strategy_feedback_failed_rate",
     "strategy_feedback_sample_count",
@@ -40,13 +44,16 @@ FEATURE_COLUMNS = [
 TARGET_COLUMNS = [
     "next_1d_return", "next_3d_return", "max_3d_return", "max_3d_drawdown",
     "feedback_label", "feedback_score", "attribution_text",
+    "failure_reason_group",
     "success_label", "strong_label", "weak_label", "failed_label",
+    "was_downgraded", "downgrade_reason_group", "correction_result",
+    "correction_effective_label", "false_negative_label",
 ]
 
 
 QUALITY_COLUMNS = [
     "coverage_1d", "evaluated_1d", "total_signals", "quality_weight",
-    "train_eligible", "confidence_level", "conclusion_level",
+    "sample_quality_tier", "train_eligible", "confidence_level", "conclusion_level",
 ]
 
 
@@ -84,6 +91,79 @@ def _quality_weight(coverage):
     if cov >= 0.80:
         return 0.5
     return 0.0
+
+
+def _quality_tier(coverage):
+    try:
+        cov = float(coverage or 0)
+    except Exception:
+        cov = 0
+    if cov >= 0.95:
+        return "gold"
+    if cov >= 0.90:
+        return "silver"
+    if cov >= 0.80:
+        return "bronze"
+    return "invalid"
+
+
+def _as_bool_downgraded(row):
+    base = str(row.get("base_layer") or "")
+    final = str(row.get("final_layer") or row.get("rule_layer") or "")
+    return bool(base and final and base != final)
+
+
+def _downgrade_reason_group(tags):
+    text = str(tags or "")
+    if "非今日主线" in text:
+        return "non_mainline"
+    if any(x in text for x in ("高位追强", "短线偏高", "量能过热", "波段偏高")):
+        return "entry_risk"
+    if "策略反馈" in text:
+        return "strategy_feedback"
+    if "场景反馈" in text:
+        return "context_feedback"
+    if "数据可信度不足" in text:
+        return "data_quality"
+    return "none"
+
+
+def _correction_result(row):
+    if not _as_bool_downgraded(row):
+        return "not_downgraded"
+    ret = row.get("next_1d_return")
+    try:
+        ret = float(ret)
+    except Exception:
+        return "unknown"
+    if ret <= -0.03:
+        return "pit_avoided_strong"
+    if ret < 0:
+        return "pit_avoided"
+    if ret >= 0.03:
+        return "false_negative_strong"
+    if ret > 0:
+        return "false_negative"
+    return "neutral"
+
+
+def _failure_reason_group(text):
+    value = str(text or "")
+    if "非今日主线" in value or "承接不足" in value:
+        return "non_mainline_no_support"
+    if "追高" in value or "涨幅接近涨停" in value or "涨幅偏高" in value:
+        return "high_position_pullback"
+    if "策略近期反馈偏弱" in value or "短线形态策略" in value:
+        return "strategy_decay"
+    if "量比过高" in value or "短线高潮" in value:
+        return "market_emotion_reversal"
+    if "跌破关键均线" in value:
+        return "ma_breakdown"
+    if "K线覆盖不足" in value or "数据不足" in value:
+        return "data_insufficient"
+    if value:
+        return "other"
+    return "unknown"
 
 
 def _load_dataset(as_of=None, min_coverage=0.90):
@@ -159,6 +239,17 @@ def _load_dataset(as_of=None, min_coverage=0.90):
             c.observe_high,
             c.pressure_price,
             c.invalid_price,
+            c.feature_json #>> '{{plan,base_layer}}' AS base_layer,
+            c.feature_json #>> '{{plan,final_layer}}' AS final_layer,
+            c.feature_json #>> '{{plan,decision_score}}' AS decision_score,
+            c.feature_json #>> '{{plan,direction_fit_score}}' AS direction_fit_score,
+            c.feature_json #>> '{{plan,entry_quality}}' AS entry_quality,
+            c.feature_json #>> '{{plan,correction_level}}' AS correction_level,
+            c.feature_json #>> '{{plan,correction_tags}}' AS correction_tags,
+            c.feature_json #>> '{{plan,display_reason}}' AS display_reason,
+            c.feature_json #>> '{{plan,correction_engine_version}}' AS correction_engine_version,
+            c.feature_json #>> '{{plan,strategy_feedback_version}}' AS strategy_feedback_version,
+            c.feature_json #>> '{{plan,context_feedback_version}}' AS context_feedback_version,
             c.strategy_feedback_score,
             c.strategy_feedback_status,
             c.strategy_feedback_win_rate_1d,
@@ -199,6 +290,7 @@ def _load_dataset(as_of=None, min_coverage=0.90):
     df["trade_date"] = df["trade_date"].map(_yyyymmdd)
     df["as_of_date"] = df["as_of_date"].map(_yyyymmdd)
     df["quality_weight"] = df["coverage_1d"].map(_quality_weight)
+    df["sample_quality_tier"] = df["coverage_1d"].map(_quality_tier)
     df["train_eligible"] = (df["coverage_1d"].fillna(0).astype(float) >= float(min_coverage)).astype(int)
 
     ret = pd.to_numeric(df["next_1d_return"], errors="coerce")
@@ -206,6 +298,12 @@ def _load_dataset(as_of=None, min_coverage=0.90):
     df["strong_label"] = (ret >= 0.02).astype(int)
     df["weak_label"] = (ret <= -0.02).astype(int)
     df["failed_label"] = (ret <= -0.03).astype(int)
+    df["failure_reason_group"] = df["attribution_text"].map(_failure_reason_group)
+    df["was_downgraded"] = df.apply(lambda row: 1 if _as_bool_downgraded(row) else 0, axis=1)
+    df["downgrade_reason_group"] = df["correction_tags"].map(_downgrade_reason_group)
+    df["correction_result"] = df.apply(_correction_result, axis=1)
+    df["correction_effective_label"] = df["correction_result"].isin(["pit_avoided", "pit_avoided_strong"]).astype(int)
+    df["false_negative_label"] = df["correction_result"].isin(["false_negative", "false_negative_strong"]).astype(int)
 
     ordered = [c for c in FEATURE_COLUMNS + TARGET_COLUMNS + QUALITY_COLUMNS if c in df.columns]
     extras = [c for c in df.columns if c not in ordered]

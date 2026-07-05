@@ -7,6 +7,11 @@ import numpy as np
 import pandas as pd
 import psycopg2
 
+from analysis.correction_engine import (
+    CONTEXT_FEEDBACK_VERSION,
+    CORRECTION_ENGINE_VERSION,
+    STRATEGY_FEEDBACK_VERSION,
+)
 from data.config import DATABASE_DSN
 
 
@@ -189,6 +194,9 @@ def save_candidate_feature_snapshot(
             "sentiment_score": sentiment.get("score"),
             "sentiment_stage": sentiment.get("stage") or sentiment.get("status"),
             "data_confidence": quality.get("confidence_score"),
+            "correction_engine_version": CORRECTION_ENGINE_VERSION,
+            "strategy_feedback_version": STRATEGY_FEEDBACK_VERSION,
+            "context_feedback_version": CONTEXT_FEEDBACK_VERSION,
         }
 
         cur = conn.cursor()
