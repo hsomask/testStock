@@ -13,6 +13,7 @@ from analysis.correction_engine import (
     evaluate_candidate,
     load_context_feedback,
     load_strategy_feedback,
+    terminal_decision,
 )
 from data.config import DATABASE_DSN
 
@@ -231,12 +232,32 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
 
     # 不可交易过滤
     for ex in excluded_result:
+        primary_direction = direction_map.get(str(ex.get("code", "")), "-")
+        decision = terminal_decision(
+            layer="不可交易过滤",
+            reason=ex["exclude_reason"],
+            row=ex,
+            primary_direction=primary_direction,
+            preferred_clusters=preferred_clusters,
+        )
         plans["不可交易过滤"].append({
             "code": ex["code"],
             "name": ex["name"],
             "strategy": ex["strategy"],
-            "reason": ex["exclude_reason"],
-            "primary_direction": direction_map.get(str(ex.get("code", "")), "-"),
+            "reason": decision["reason"],
+            "primary_direction": primary_direction,
+            "base_layer": decision["base_layer"],
+            "final_layer": decision["final_layer"],
+            "decision_score": decision["decision_score"],
+            "direction_fit_score": decision["direction_fit_score"],
+            "entry_quality": decision["entry_quality"],
+            "correction_level": decision["correction_level"],
+            "correction_tags": decision["correction_tags"],
+            "decision_reasons": decision["decision_reasons"],
+            "display_reason": decision["display_reason"],
+            "correction_engine_version": decision["correction_engine_version"],
+            "strategy_feedback_version": decision["strategy_feedback_version"],
+            "context_feedback_version": decision["context_feedback_version"],
         })
 
     # 分类每只股票

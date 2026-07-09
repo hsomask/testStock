@@ -16,6 +16,13 @@ from data.config import DATABASE_DSN, REPORT_DIR
 
 
 EVAL_DIR = REPORT_DIR / "evaluation"
+LAYER_RANK = {
+    "候选低吸": 0,
+    "只观察": 1,
+    "交易条件不满足": 2,
+    "高风险回避": 3,
+    "不可交易过滤": 4,
+}
 
 
 def _connect():
@@ -85,6 +92,76 @@ def _correction_result(ret, was_downgraded):
     if value > 0:
         return "false_negative"
     return "neutral"
+
+
+def _has_text(value):
+    return value is not None and not pd.isna(value) and bool(str(value).strip())
+
+
+def _eligible_correction_rows(df):
+    if df.empty:
+        return df.copy()
+    mask = (
+        df["correction_engine_version"].map(_has_text)
+        & df["base_layer"].map(_has_text)
+        & df["final_layer"].map(_has_text)
+    )
+    return df.loc[mask].copy()
+
+
+def _limit_to_latest_dates(df, window_days):
+    if df.empty or not window_days:
+        return df.copy(), []
+    dates = sorted({_yyyymmdd(value) for value in df["as_of_date"] if _yyyymmdd(value)})
+    selected = dates[-int(window_days):]
+    keys = df["as_of_date"].map(_yyyymmdd)
+    return df.loc[keys.isin(selected)].copy(), selected
+
+
+def _best_layer(values):
+    layers = [str(value) for value in values if _has_text(value)]
+    return min(layers, key=lambda value: LAYER_RANK.get(value, 99)) if layers else None
+
+
+def _stock_level_rows(df):
+    if df.empty:
+        return df.copy()
+    rows = []
+    for (_, _, _), group in df.groupby(["trade_date", "as_of_date", "code"], dropna=False):
+        first = group.iloc[0]
+        base_layer = _best_layer(group["base_layer"])
+        final_layer = _best_layer(group["final_layer"])
+        tags = []
+        for value in group["correction_tags"]:
+            text = str(value or "")
+            for tag in ("非今日主线", "高位追强", "短线偏高", "量能过热", "波段偏高",
+                        "策略反馈", "场景反馈", "数据可信度不足"):
+                if tag in text and tag not in tags:
+                    tags.append(tag)
+        strategies = sorted({str(value) for value in group["strategy"] if _has_text(value)})
+        versions = sorted({
+            str(value) for value in group["correction_engine_version"] if _has_text(value)
+        })
+        was_downgraded = (
+            _has_text(base_layer)
+            and _has_text(final_layer)
+            and LAYER_RANK.get(final_layer, 99) > LAYER_RANK.get(base_layer, 99)
+        )
+        item = first.to_dict()
+        item.update({
+            "strategy": " / ".join(strategies),
+            "base_layer": base_layer,
+            "final_layer": final_layer,
+            "correction_tags": " / ".join(tags),
+            "correction_engine_version": " / ".join(versions),
+            "was_downgraded": bool(was_downgraded),
+        })
+        item["downgrade_reason_group"] = _downgrade_reason_group(item["correction_tags"])
+        item["correction_result"] = _correction_result(
+            item.get("next_1d_return"), item["was_downgraded"]
+        )
+        rows.append(item)
+    return pd.DataFrame(rows)
 
 
 def _load_rows(as_of=None, min_coverage=0.80):
@@ -195,19 +272,31 @@ def _build_summary(df):
         }
     ret = pd.to_numeric(df["next_1d_return"], errors="coerce")
     downgraded = df[df["was_downgraded"]]
-    kept_candidate = df[(~df["was_downgraded"]) & (df["final_layer"].fillna(df["rule_layer"]) == "候选低吸")]
+    kept_candidate = df[
+        (~df["was_downgraded"])
+        & (df["base_layer"] == "候选低吸")
+        & (df["final_layer"] == "候选低吸")
+    ]
     pit = downgraded[downgraded["correction_result"].isin(["pit_avoided", "pit_avoided_strong"])]
     false = downgraded[downgraded["correction_result"].isin(["false_negative", "false_negative_strong"])]
     down_avg = _safe_mean(downgraded["next_1d_return"]) if not downgraded.empty else None
     kept_avg = _safe_mean(kept_candidate["next_1d_return"]) if not kept_candidate.empty else None
     effectiveness = "sample_insufficient"
-    if len(downgraded) >= 3:
-        if down_avg is not None and kept_avg is not None and down_avg < kept_avg:
+    if len(downgraded) >= 3 and down_avg is not None and kept_avg is not None:
+        if down_avg < kept_avg:
             effectiveness = "effective"
-        elif down_avg is not None and kept_avg is not None and down_avg > kept_avg:
+        elif down_avg > kept_avg:
             effectiveness = "too_conservative"
         else:
             effectiveness = "neutral"
+    pit_rate = _safe_rate(
+        downgraded["correction_result"].isin(["pit_avoided", "pit_avoided_strong"])
+    )
+    false_rate = _safe_rate(
+        downgraded["correction_result"].isin(["false_negative", "false_negative_strong"])
+    )
+    net_benefit = kept_avg - down_avg if kept_avg is not None and down_avg is not None else None
+    sample_status = "可信" if len(df) >= 100 else ("观察期" if len(df) >= 30 else "样本不足")
     return {
         "total": int(len(df)),
         "downgraded": int(len(downgraded)),
@@ -217,6 +306,10 @@ def _build_summary(df):
         "downgraded_avg_return": down_avg,
         "kept_candidate_avg_return": kept_avg,
         "overall_avg_return": _safe_mean(ret),
+        "pit_avoid_rate": pit_rate,
+        "false_negative_rate": false_rate,
+        "correction_net_benefit": net_benefit,
+        "sample_status": sample_status,
         "effectiveness": effectiveness,
     }
 
@@ -238,30 +331,50 @@ def _group_summary(df):
     return sorted(rows, key=lambda x: (-x["sample_count"], x["reason_group"]))
 
 
-def build_correction_effectiveness(as_of=None, min_coverage=0.80, save=True):
-    df = _load_rows(as_of=as_of, min_coverage=min_coverage)
+def _version_summary(df):
+    rows = []
+    if df.empty:
+        return rows
+    for version, group in df.groupby("correction_engine_version", dropna=False):
+        summary = _build_summary(group)
+        rows.append({
+            "version": str(version or "unknown"),
+            "sample_count": summary.get("total", 0),
+            "downgraded": summary.get("downgraded", 0),
+            "pit_avoid_rate": summary.get("pit_avoid_rate"),
+            "false_negative_rate": summary.get("false_negative_rate"),
+            "downgraded_avg_return": summary.get("downgraded_avg_return"),
+        })
+    return sorted(rows, key=lambda item: item["version"])
+
+
+def build_correction_effectiveness(as_of=None, min_coverage=0.80, window_days=5, save=True):
+    loaded_df = _load_rows(as_of=as_of, min_coverage=min_coverage)
+    eligible_df = _eligible_correction_rows(loaded_df)
+    eligible_df, window_dates = _limit_to_latest_dates(eligible_df, window_days)
+    if window_dates:
+        loaded_keys = loaded_df["as_of_date"].map(_yyyymmdd)
+        loaded_df = loaded_df.loc[loaded_keys.isin(window_dates)].copy()
+    df = _stock_level_rows(eligible_df)
     as_of_date = str(as_of or datetime.now().strftime("%Y%m%d")).replace("-", "")[:8]
     if not df.empty:
         df["trade_date"] = df["trade_date"].map(_yyyymmdd)
         df["as_of_date"] = df["as_of_date"].map(_yyyymmdd)
         df["sample_quality_tier"] = df["coverage_1d"].map(_quality_tier)
-        df["final_layer"] = df["final_layer"].fillna(df["rule_layer"])
-        df["was_downgraded"] = df.apply(
-            lambda row: bool(row.get("base_layer") and row.get("final_layer") and row.get("base_layer") != row.get("final_layer")),
-            axis=1,
-        )
-        df["downgrade_reason_group"] = df["correction_tags"].map(_downgrade_reason_group)
-        df["correction_result"] = df.apply(
-            lambda row: _correction_result(row.get("next_1d_return"), row.get("was_downgraded")),
-            axis=1,
-        )
 
     downgraded_df = df[df["was_downgraded"]] if not df.empty else df
     result = {
         "as_of_date": as_of_date,
         "min_coverage": float(min_coverage),
+        "window_days": int(window_days),
+        "window_dates": window_dates,
+        "source_rows": int(len(loaded_df)),
+        "eligible_rows": int(len(df)),
+        "eligible_strategy_rows": int(len(eligible_df)),
+        "excluded_legacy_rows": int(len(loaded_df) - len(eligible_df)),
         "summary": _build_summary(df),
         "by_reason": _group_summary(downgraded_df),
+        "by_version": _version_summary(df),
         "details": _details(downgraded_df),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -306,12 +419,21 @@ def render_markdown(result):
         "",
         "## 1. 总览",
         "",
+        f"- 来源记录：{result.get('source_rows', summary.get('total', 0))}",
+        f"- 统计窗口：最近 {result.get('window_days', 5)} 个评价日",
+        f"- 有效股票样本：{result.get('eligible_rows', summary.get('total', 0))}",
+        f"- 策略明细行：{result.get('eligible_strategy_rows', summary.get('total', 0))}",
+        f"- 排除旧格式记录：{result.get('excluded_legacy_rows', 0)}",
         f"- 总样本：{summary.get('total', 0)}",
         f"- 被纠偏降级：{summary.get('downgraded', 0)}",
         f"- 避坑：{summary.get('pit_avoided', 0)}",
         f"- 误杀：{summary.get('false_negative', 0)}",
+        f"- 避坑率：{_fmt_pct(summary.get('pit_avoid_rate'))}",
+        f"- 误杀率：{_fmt_pct(summary.get('false_negative_rate'))}",
         f"- 降级组平均T+1：{_fmt_pct(summary.get('downgraded_avg_return'))}",
         f"- 保留候选平均T+1：{_fmt_pct(summary.get('kept_candidate_avg_return'))}",
+        f"- 纠偏净收益：{_fmt_pct(summary.get('correction_net_benefit'))}",
+        f"- 样本状态：{summary.get('sample_status')}",
         f"- 判断：{summary.get('effectiveness')}",
         "",
         "## 2. 按原因拆分",
@@ -324,7 +446,20 @@ def render_markdown(result):
             f"| {row['reason_group']} | {row['sample_count']} | {_fmt_pct(row.get('avg_next_1d_return'))} | "
             f"{_fmt_pct(row.get('win_rate'))} | {row['pit_avoided']} | {row['false_negative']} |"
         )
-    lines.extend(["", "## 3. 明细", ""])
+    lines.extend([
+        "",
+        "## 3. 按版本拆分",
+        "",
+        "| 引擎版本 | 股票样本 | 降级 | 避坑率 | 误杀率 | 降级组T+1 |",
+        "|----------|----------|------|--------|--------|-----------|",
+    ])
+    for row in result.get("by_version", []):
+        lines.append(
+            f"| {row['version']} | {row['sample_count']} | {row['downgraded']} | "
+            f"{_fmt_pct(row.get('pit_avoid_rate'))} | {_fmt_pct(row.get('false_negative_rate'))} | "
+            f"{_fmt_pct(row.get('downgraded_avg_return'))} |"
+        )
+    lines.extend(["", "## 4. 明细", ""])
     if result.get("details"):
         lines.append("| 日期 | 股票 | 策略 | 原始 | 最终 | 原因组 | T+1 | 结果 |")
         lines.append("|------|------|------|------|------|--------|-----|------|")
@@ -356,6 +491,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--as-of", type=str, default=None)
     parser.add_argument("--min-coverage", type=float, default=0.80)
+    parser.add_argument("--window-days", type=int, default=5)
     parser.add_argument("--no-save", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
@@ -363,6 +499,7 @@ def main():
     result = build_correction_effectiveness(
         as_of=args.as_of,
         min_coverage=args.min_coverage,
+        window_days=args.window_days,
         save=not args.no_save,
     )
     if args.json:

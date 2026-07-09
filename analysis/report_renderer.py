@@ -823,6 +823,74 @@ def _snapshot_feedback_text(item, positive=False):
     return "风险原因待正式 evaluation 确认"
 
 
+def _correction_effectiveness_lines(data):
+    if not data:
+        return []
+    summary = data.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    if total <= 0:
+        return []
+
+    def pct(value):
+        return _fmt_pct(value) if value is not None else "-"
+
+    judgment_map = {
+        "effective": "纠偏有效",
+        "too_conservative": "纠偏偏保守",
+        "neutral": "暂未拉开差距",
+        "sample_insufficient": "样本不足，暂不下结论",
+        "no_data": "暂无有效样本",
+    }
+    lines = [
+        f"### 1.1 纠偏效果（近{int(data.get('window_days') or 5)}个评价日）",
+        "",
+        "| 指标 | 结果 | 判断 |",
+        "|------|------|------|",
+        f"| 股票级有效样本 | {total}只 | {summary.get('sample_status', '观察期')} |",
+        f"| 被降级股票 | {summary.get('downgraded', 0)}只 | - |",
+        f"| 避坑率 | {pct(summary.get('pit_avoid_rate'))} | "
+        f"{'有效' if (summary.get('pit_avoid_rate') or 0) >= 0.6 else '继续观察'} |",
+        f"| 误杀率 | {pct(summary.get('false_negative_rate'))} | "
+        f"{'偏高' if (summary.get('false_negative_rate') or 0) > 0.3 else '可接受'} |",
+        f"| 降级组平均收益 | {pct(summary.get('downgraded_avg_return'))} | - |",
+        f"| 对照组平均收益 | {pct(summary.get('kept_candidate_avg_return'))} | "
+        f"{'暂无对照组' if summary.get('kept_candidate_avg_return') is None else '可比较'} |",
+        f"| 纠偏净收益 | {pct(summary.get('correction_net_benefit'))} | "
+        f"{judgment_map.get(summary.get('effectiveness'), '观察中')} |",
+        "",
+    ]
+
+    reasons = (data.get("by_reason") or [])[:3]
+    if reasons:
+        reason_labels = {
+            "non_mainline": "非今日主线",
+            "entry_risk": "高位/过热",
+            "strategy_feedback": "策略反馈偏弱",
+            "context_feedback": "场景反馈偏弱",
+            "data_quality": "数据可信度不足",
+            "other": "其他",
+        }
+        lines += [
+            "| 主要纠偏原因 | 股票数 | 避坑率 | 误杀率 |",
+            "|--------------|--------|--------|--------|",
+        ]
+        for item in reasons:
+            sample = int(item.get("sample_count") or 0)
+            pit_rate = (item.get("pit_avoided") or 0) / sample if sample else None
+            false_rate = (item.get("false_negative") or 0) / sample if sample else None
+            label = reason_labels.get(item.get("reason_group"), item.get("reason_group", "-"))
+            lines.append(f"| {label} | {sample} | {pct(pit_rate)} | {pct(false_rate)} |")
+        lines.append("")
+
+    if summary.get("kept_candidate_avg_return") is None:
+        conclusion = "当前没有合格对照组，只能确认降级股票后续整体偏弱，暂不能计算纠偏净收益。"
+    else:
+        conclusion = judgment_map.get(summary.get("effectiveness"), "纠偏效果继续观察。")
+    lines.append(f"> {conclusion}")
+    lines.append("")
+    return lines
+
+
 def render_unified_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
@@ -1084,6 +1152,10 @@ def render_unified_report(
         for item in feedback_lines:
             lines.append(f"- {item}")
         lines.append("")
+
+    lines.extend(_correction_effectiveness_lines(
+        (t1_data or {}).get("correction_effectiveness")
+    ))
 
     # ══════════════════════════════════════
     # 2. 市场与交易环境
