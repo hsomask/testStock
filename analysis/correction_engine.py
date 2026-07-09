@@ -10,7 +10,7 @@ import math
 import pandas as pd
 
 
-CORRECTION_ENGINE_VERSION = "2026-07-05-v1"
+CORRECTION_ENGINE_VERSION = "2026-07-09-v2"
 STRATEGY_FEEDBACK_VERSION = "strategy-feedback-v1"
 CONTEXT_FEEDBACK_VERSION = "context-feedback-v1"
 BAD_ENTRY_QUALITIES = {"高位追强", "短线偏高", "量能过热", "波段偏高"}
@@ -245,6 +245,31 @@ def display_reason(final_layer, correction_level, tags, reason):
     if correction_level in ("weak", "blocked"):
         return "反馈偏弱，先观察"
     return "条件不足，等确认"
+
+
+def terminal_decision(*, layer, reason, row=None, primary_direction="-", preferred_clusters=None):
+    """Normalize a terminal decision that must not enter correction rules."""
+    if row is None:
+        row = {}
+    score = direction_fit_score(primary_direction, preferred_clusters or [])
+    quality = entry_quality(row)
+    return {
+        "base_layer": layer,
+        "final_layer": layer,
+        "reason": reason,
+        "display_reason": reason,
+        "decision_score": 0.0,
+        "direction_fit_score": score,
+        "entry_quality": quality,
+        "correction_level": "terminal",
+        "correction_tags": [layer],
+        "decision_reasons": [reason],
+        "correction_engine_version": CORRECTION_ENGINE_VERSION,
+        "strategy_feedback_version": STRATEGY_FEEDBACK_VERSION,
+        "context_feedback_version": CONTEXT_FEEDBACK_VERSION,
+        "strategy_feedback": {},
+        "context_feedback": {},
+    }
 
 
 def evaluate_candidate(

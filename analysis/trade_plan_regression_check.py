@@ -58,7 +58,12 @@ def _build_plan():
         quality,
         [{"name": "机器人"}],
         {"板块联动": df},
-        [],
+        [{
+            "code": "000005",
+            "name": "不可交易",
+            "strategy": "板块联动",
+            "exclude_reason": "上市未满30日",
+        }],
     )
 
 
@@ -85,6 +90,7 @@ def run_checks():
     failures.append(_assert("非主线被降级", rows["非主线"][0] == "只观察", rows["非主线"]))
     failures.append(_assert("高位追强被降级", rows["高位追强"][0] == "只观察", rows["高位追强"]))
     failures.append(_assert("高风险保持回避", rows["高风险"][0] == "高风险回避", rows["高风险"]))
+    failures.append(_assert("不可交易保持过滤", rows["不可交易"][0] == "不可交易过滤", rows["不可交易"]))
 
     required = [
         "base_layer", "final_layer", "decision_score", "direction_fit_score",

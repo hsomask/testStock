@@ -54,7 +54,10 @@ from analysis.limitup_metrics import compute_intraday_limitup_metrics
 from analysis.limitup_stats_reader import load_limitup_daily_stats
 from analysis.selector import run_all_selectors
 from analysis.report_renderer import render_daily_report, save_report
-from analysis.evaluation_report_reader import load_t1_evaluation_summary
+from analysis.evaluation_report_reader import (
+    load_correction_effectiveness_summary,
+    load_t1_evaluation_summary,
+)
 from analysis.data_quality import check_data_quality
 from analysis.theme_detector import detect_main_themes
 from analysis.candidate_snapshot import save_candidate_feature_snapshot
@@ -378,6 +381,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
     """生成单个模式的报告并保存，返回报告文本"""
     # 读取 T+1 evaluation 结果
     t1_data = load_t1_evaluation_summary(trade_date)
+    t1_data["correction_effectiveness"] = load_correction_effectiveness_summary(trade_date)
 
     report = render_daily_report(
         trade_date=trade_date,

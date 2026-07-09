@@ -13,6 +13,21 @@ logger = logging.getLogger(__name__)
 EVAL_DIR = REPORT_DIR / "evaluation"
 
 
+def load_correction_effectiveness_summary(as_of_date):
+    """Read the correction sidecar for the same report date only."""
+    path = EVAL_DIR / f"correction_effectiveness_{as_of_date}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if str(data.get("as_of_date", "")).replace("-", "")[:8] != as_of_date:
+            return None
+        return data
+    except Exception as exc:
+        logger.warning("Failed to read correction effectiveness %s: %s", path, exc)
+        return None
+
+
 def _infer_signal_date(as_of_date):
     """从 stock_signal 推断上一个交易日"""
     if not DATABASE_DSN:
