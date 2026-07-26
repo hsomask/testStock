@@ -9,6 +9,7 @@ import pandas as pd
 
 
 REQUIRED_INTRADAY_COLUMNS = {"code", "close", "high", "pre_close"}
+NEAR_LIMIT_UP_PROXIMITY = 0.90
 
 
 def infer_limit_ratio(code: str, name: str = "") -> float:
@@ -29,6 +30,27 @@ def infer_limit_ratio(code: str, name: str = "") -> float:
     if plain_code.startswith(("8", "4", "920")):
         return 0.30
     return 0.10
+
+
+def near_limit_up_threshold_pct(
+    code: str,
+    name: str = "",
+    proximity: float = NEAR_LIMIT_UP_PROXIMITY,
+) -> float:
+    """Return one board-aware threshold for the shared 'near limit-up' concept."""
+    return infer_limit_ratio(code, name) * 100 * proximity
+
+
+def is_near_limit_up(
+    pct_chg,
+    code: str,
+    name: str = "",
+    proximity: float = NEAR_LIMIT_UP_PROXIMITY,
+) -> bool:
+    try:
+        return float(pct_chg) >= near_limit_up_threshold_pct(code, name, proximity)
+    except (TypeError, ValueError):
+        return False
 
 
 def _ensure_pre_close(df: pd.DataFrame) -> pd.Series:
@@ -135,7 +157,11 @@ def compute_intraday_limitup_metrics(stock_df: pd.DataFrame) -> dict:
     sealed = int(scoped["is_limit_up"].sum())
     failed = int(scoped["is_failed_limit_up"].sum())
     limit_down = int(scoped["is_limit_down"].sum())
+    is_20cm = np.isclose(pd.to_numeric(scoped["limit_ratio"], errors="coerce"), 0.20)
+    limit_up_20cm = int((scoped["is_limit_up"] & is_20cm).sum())
+    limit_down_20cm = int((scoped["is_limit_down"] & is_20cm).sum())
     failed_rate = failed / touched if touched else 0.0
+    internally_consistent = touched == sealed + failed
 
     return {
         "data_status": "ok",
@@ -146,7 +172,10 @@ def compute_intraday_limitup_metrics(stock_df: pd.DataFrame) -> dict:
         "sealed_limit_up_count": sealed,
         "failed_limit_up_count": failed,
         "failed_limit_up_rate": round(failed_rate, 4),
+        "internally_consistent": internally_consistent,
         "limit_up_count": sealed,
         "limit_down_count": limit_down,
+        "limit_up_20cm_count": limit_up_20cm,
+        "limit_down_20cm_count": limit_down_20cm,
         "data_source": "stock_df_intraday",
     }

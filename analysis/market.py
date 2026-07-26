@@ -1,6 +1,12 @@
 import numpy as np
 import pandas as pd
 
+from analysis.market_facts import (
+    build_market_facts,
+    project_limitup_metrics,
+    project_limitup_stats,
+)
+
 
 def get_main_indices(index_df):
     result = []
@@ -48,24 +54,27 @@ def classify_market_status(score):
         return "弱势"
 
 
-def analyze_market(stock_df, index_df):
-    df = stock_df.copy()
+def analyze_market(stock_df, index_df, market_facts=None):
+    """Score the market from canonical facts; never infer facts locally."""
+    facts = market_facts or build_market_facts(stock_df, strict=False)
+    breadth = facts.get("breadth") or {}
+    limitup = facts.get("limitup") or {}
+    liquidity = facts.get("liquidity") or {}
 
-    up_count = int((df["pct_chg"] > 0).sum())
-    down_count = int((df["pct_chg"] < 0).sum())
-    flat_count = int((df["pct_chg"] == 0).sum())
+    up_count = int(breadth.get("up_count", 0))
+    down_count = int(breadth.get("down_count", 0))
+    flat_count = int(breadth.get("flat_count", 0))
+    limit_up = int(limitup.get("sealed_count", 0))
+    limit_down = int(limitup.get("limit_down_count", 0))
+    total_amount = float(liquidity.get("total_amount_100m", 0) or 0)
+    stock_count = int(facts.get("stock_count", len(stock_df)))
+    limitup_metrics = project_limitup_metrics(facts)
+    limitup_stats = project_limitup_stats(facts)
 
-    limit_up = int((df["pct_chg"] >= 9.8).sum())
-    limit_down = int((df["pct_chg"] <= -9.8).sum())
+    limit_up_20cm = int(limitup.get("limit_up_20cm_count", 0))
+    limit_down_20cm = int(limitup.get("limit_down_20cm_count", 0))
 
-    limit_up_20cm = int((df["pct_chg"] >= 19.5).sum())
-    limit_down_20cm = int((df["pct_chg"] <= -19.5).sum())
-
-    total_amount = df["amount"].sum() / 1e8
-
-    up_ratio = up_count / max(len(df), 1)
-    limit_up_ratio = limit_up / max(len(df), 1)
-    down_ratio = down_count / max(len(df), 1)
+    up_ratio = up_count / max(stock_count, 1)
 
     # 市场综合评分（宽度+涨停+成交额综合）
     score = (
@@ -77,7 +86,7 @@ def analyze_market(stock_df, index_df):
     )
     # Penalize poor market breadth so high volume/limit-up activity does not
     # produce an overly bullish score when most stocks are falling.
-    green_ratio = down_count / max(len(df), 1)
+    green_ratio = float(breadth.get("green_ratio", down_count / max(stock_count, 1)))
     if green_ratio > 0.60:
         score -= min((green_ratio - 0.60) / 0.20, 1) * 12
     if down_count > up_count:
@@ -120,6 +129,9 @@ def analyze_market(stock_df, index_df):
         "limit_down": limit_down,
         "limit_up_20cm": limit_up_20cm,
         "limit_down_20cm": limit_down_20cm,
+        "market_facts": facts,
+        "limitup_metrics": limitup_metrics,
+        "limitup_stats": limitup_stats,
         "score": round(score, 1),
         "status": status,
         "summary": summary,

@@ -32,14 +32,16 @@ def table_exists(cur, table_name):
 def fetch_summaries(cur, mode, days, latest_only=False):
     """查询 watchlist_evaluation_summary"""
     limit = "LIMIT 1" if latest_only else f"LIMIT {days * 2}"
+    source = "canonical_daily_evaluation_summary" if mode == "daily" else "watchlist_evaluation_summary"
+    ordering = "signal_date DESC, as_of_date DESC" if mode == "daily" else "generated_at DESC"
     cur.execute(
         f"SELECT generated_at, eval_mode, signal_date, as_of_date, eval_start_date, eval_end_date, "
         f"total_signals, evaluated_1d, coverage_1d, evaluated_3d, coverage_3d, "
         f"confidence_level, conclusion_level, layer_inversion_warning, risk_warning, "
         f"price_fetch_failed, diagnostics_json, summary_json "
-        f"FROM watchlist_evaluation_summary "
+        f"FROM {source} "
         f"WHERE eval_mode = %s "
-        f"ORDER BY generated_at DESC {limit}",
+        f"ORDER BY {ordering} {limit}",
         (mode,),
     )
     rows = cur.fetchall()

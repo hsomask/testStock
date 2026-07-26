@@ -88,11 +88,16 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
                 "code": code, "name": row[1], "entry_close": float(row[2]) if row[2] else None,
                 "risk_level": row[3] or "", "action_signal": row[4] or "", "strategy": row[5] or "",
             }
+        cur.execute(
+            "SELECT COUNT(*) FROM stock_signal WHERE trade_date = %s",
+            (sql_signal,),
+        )
+        total_strategy_signals = int(cur.fetchone()[0] or 0)
         cur.close()
         conn.close()
 
-        total_signals = len(signal_stocks)
-        if total_signals == 0:
+        distinct_stock_count = len(signal_stocks)
+        if distinct_stock_count == 0:
             return None
 
         # 2. 读取当日全市场行情快照（东方财富，与 K 线源分离）
@@ -143,7 +148,7 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
             })
 
         snapshot_covered = sum(1 for e in evaluated if e["pct_chg"] is not None)
-        snapshot_coverage = snapshot_covered / total_signals if total_signals > 0 else 0
+        snapshot_coverage = snapshot_covered / distinct_stock_count if distinct_stock_count > 0 else 0
 
         if snapshot_coverage < 0.8:
             return None
@@ -163,7 +168,8 @@ def build_snapshot_t1_recap(signal_date, as_of_date):
             "message": "K线覆盖不足，使用当日行情快照生成降级复盘，仅供观察。",
             "signal_date": signal_date,
             "as_of_date": as_of_date,
-            "total_signals": total_signals,
+            "total_signals": total_strategy_signals,
+            "distinct_stock_count": distinct_stock_count,
             "snapshot_covered": snapshot_covered,
             "snapshot_coverage": snapshot_coverage,
             "kline_coverage": kline_cov,

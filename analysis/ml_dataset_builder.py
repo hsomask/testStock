@@ -24,6 +24,8 @@ ML_DIR = REPORT_DIR / "ml"
 
 
 FEATURE_COLUMNS = [
+    "signal_id", "decision_id", "source_run_id", "evaluation_run_id",
+    "signal_schema_version", "snapshot_schema_version", "decision_schema_version",
     "trade_date", "as_of_date", "code", "name", "strategy", "rule_layer",
     "primary_direction", "risk_level", "action_signal",
     "market_status", "market_score", "trade_mode", "position_cap",
@@ -174,6 +176,8 @@ def _load_dataset(as_of=None, min_coverage=0.90):
             "candidate_feature_snapshot",
             "watchlist_evaluation_result",
             "watchlist_evaluation_summary",
+            "canonical_daily_evaluation_summary",
+            "canonical_daily_evaluation_result",
         ]
         missing = [name for name in required if not _table_exists(cur, name)]
         cur.close()
@@ -197,7 +201,7 @@ def _load_dataset(as_of=None, min_coverage=0.90):
                 confidence_level,
                 conclusion_level,
                 generated_at
-            FROM watchlist_evaluation_summary s
+            FROM canonical_daily_evaluation_summary s
             WHERE eval_mode = 'daily'
               AND coverage_1d >= %s
               {asof_filter}
@@ -210,12 +214,19 @@ def _load_dataset(as_of=None, min_coverage=0.90):
             ORDER BY signal_date, as_of_date, generated_at DESC
         )
         SELECT
+            c.signal_id,
+            c.decision_id,
+            c.source_run_id,
+            r.evaluation_run_id,
+            c.signal_schema_version,
+            c.snapshot_schema_version,
+            c.decision_schema_version,
             c.trade_date,
             s.as_of_date,
             c.code,
             COALESCE(c.name, r.name) AS name,
             c.strategy,
-            c.rule_layer,
+            c.canonical_final_layer AS rule_layer,
             c.primary_direction,
             COALESCE(c.risk_level, r.risk_level) AS risk_level,
             COALESCE(c.action_signal, r.action_signal) AS action_signal,
@@ -240,7 +251,10 @@ def _load_dataset(as_of=None, min_coverage=0.90):
             c.pressure_price,
             c.invalid_price,
             c.feature_json #>> '{{plan,base_layer}}' AS base_layer,
-            c.feature_json #>> '{{plan,final_layer}}' AS final_layer,
+            COALESCE(
+                c.canonical_final_layer,
+                c.feature_json #>> '{{plan,final_layer}}'
+            ) AS final_layer,
             c.feature_json #>> '{{plan,decision_score}}' AS decision_score,
             c.feature_json #>> '{{plan,direction_fit_score}}' AS direction_fit_score,
             c.feature_json #>> '{{plan,entry_quality}}' AS entry_quality,
@@ -270,12 +284,11 @@ def _load_dataset(as_of=None, min_coverage=0.90):
         FROM candidate_feature_snapshot c
         JOIN latest_summary s
           ON s.signal_date = TO_CHAR(c.trade_date, 'YYYYMMDD')
-        JOIN watchlist_evaluation_result r
-          ON r.eval_mode = 'daily'
+        JOIN canonical_daily_evaluation_result r
+          ON r.signal_id = c.signal_id
+         AND r.eval_mode = 'daily'
          AND r.signal_trade_date = s.signal_date
          AND r.as_of_date = s.as_of_date
-         AND r.code = c.code
-         AND COALESCE(r.strategy, '') = COALESCE(c.strategy, '')
         WHERE r.next_1d_return IS NOT NULL
           AND COALESCE(r.price_status, 'ok') = 'ok'
         ORDER BY c.trade_date, c.code, c.strategy, s.as_of_date

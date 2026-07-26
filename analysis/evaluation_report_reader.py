@@ -13,6 +13,13 @@ logger = logging.getLogger(__name__)
 EVAL_DIR = REPORT_DIR / "evaluation"
 
 
+def _coverage_value(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def load_correction_effectiveness_summary(as_of_date):
     """Read the correction sidecar for the same report date only."""
     path = EVAL_DIR / f"correction_effectiveness_{as_of_date}.json"
@@ -61,10 +68,13 @@ def _try_db(as_of_date):
             "SELECT signal_date, as_of_date, total_signals, evaluated_1d, coverage_1d, "
             "evaluated_3d, coverage_3d, avg_next_1d_return, win_rate_1d, "
             "confidence_level, conclusion_level, layer_inversion_warning, risk_warning, "
-            "diagnostics_json, summary_json "
-            "FROM watchlist_evaluation_summary "
-            "WHERE eval_mode = 'daily' AND as_of_date = %s "
-            "ORDER BY generated_at DESC LIMIT 1",
+            "diagnostics_json, summary_json, "
+            "(SELECT COUNT(DISTINCT r.code) FROM canonical_daily_evaluation_result r "
+            " WHERE r.eval_mode = 'daily' "
+            " AND r.signal_trade_date = s.signal_date AND r.as_of_date = s.as_of_date) "
+            "FROM canonical_daily_evaluation_summary s "
+            "WHERE s.eval_mode = 'daily' AND s.as_of_date = %s "
+            "ORDER BY s.generated_at DESC LIMIT 1",
             (as_of_date,),
         )
         row = cur.fetchone()
@@ -77,7 +87,7 @@ def _try_db(as_of_date):
                 "avg_next_1d_return", "win_rate_1d",
                 "confidence_level", "conclusion_level",
                 "layer_inversion_warning", "risk_warning",
-                "diagnostics_json", "summary_json",
+                "diagnostics_json", "summary_json", "distinct_stock_count",
             ], row))
     except Exception:
         pass
@@ -113,6 +123,7 @@ def _try_file(as_of_date):
             "risk_warning": d.get("risk_diagnostics", {}).get("risk_warning", False),
             "diagnostics_json": json.dumps(d, ensure_ascii=False),
             "summary_json": json.dumps(s, ensure_ascii=False),
+            "distinct_stock_count": s.get("distinct_stock_count", 0),
         }
     except Exception:
         return None
@@ -146,7 +157,7 @@ def _try_top_bottom(as_of_date, signal_date):
         # Top 3 by 1d return
         cur.execute(
             "SELECT name, watchlist_layer, next_1d_return, strategy, feedback_label, attribution_text "
-            "FROM watchlist_evaluation_result "
+            "FROM canonical_daily_evaluation_result "
             "WHERE eval_mode = 'daily' AND as_of_date = %s "
             "AND next_1d_return IS NOT NULL "
             "ORDER BY next_1d_return DESC LIMIT 10",
@@ -156,7 +167,7 @@ def _try_top_bottom(as_of_date, signal_date):
         # Bottom 3
         cur.execute(
             "SELECT name, watchlist_layer, next_1d_return, strategy, feedback_label, attribution_text "
-            "FROM watchlist_evaluation_result "
+            "FROM canonical_daily_evaluation_result "
             "WHERE eval_mode = 'daily' AND as_of_date = %s "
             "AND next_1d_return IS NOT NULL "
             "ORDER BY next_1d_return ASC LIMIT 10",
@@ -188,7 +199,7 @@ def load_t1_evaluation_summary(as_of_date):
     kline_cov_from_status = None
 
     # 读 status 文件获取 signal_date 和 K 线覆盖率
-    if not row or (row.get("coverage_1d") or 0) < 0.8:
+    if not row or _coverage_value(row.get("coverage_1d")) < 0.8:
         status_path = EVAL_DIR / f"evaluation_status_{as_of_date}.json"
         if status_path.exists():
             try:
@@ -199,7 +210,7 @@ def load_t1_evaluation_summary(as_of_date):
                 pass
 
     # 2. official: K 线覆盖率 >= 80%
-    if row and (row.get("coverage_1d") or 0) >= 0.8:
+    if row and _coverage_value(row.get("coverage_1d")) >= 0.8:
         signal_date = row.get("signal_date", "")
         top, bottom = _try_top_bottom(as_of_date, signal_date)
         diag = {}
@@ -213,6 +224,7 @@ def load_t1_evaluation_summary(as_of_date):
             "message": None,
             "signal_date": signal_date, "as_of_date": row.get("as_of_date", as_of_date),
             "total_signals": row.get("total_signals", 0),
+            "distinct_stock_count": row.get("distinct_stock_count", 0),
             "evaluated_1d": row.get("evaluated_1d", 0),
             "coverage_1d": row.get("coverage_1d", 0),
             "avg_return_1d": row.get("avg_next_1d_return"),
@@ -235,7 +247,7 @@ def load_t1_evaluation_summary(as_of_date):
 
     # 4. defer: 快照也不足
     kline_cov = kline_cov_from_status or (row.get("coverage_1d") if row else None)
-    if kline_cov is not None and kline_cov < 0.8:
+    if kline_cov is not None and _coverage_value(kline_cov) < 0.8:
         return {
             "available": False, "status": "defer",
             "message": "今日 T+1 复盘因 K 线和快照覆盖均不足暂缓。",

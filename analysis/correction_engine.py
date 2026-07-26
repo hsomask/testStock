@@ -9,6 +9,8 @@ import math
 
 import pandas as pd
 
+from analysis.limitup_metrics import is_near_limit_up
+
 
 CORRECTION_ENGINE_VERSION = "2026-07-09-v2"
 STRATEGY_FEEDBACK_VERSION = "strategy-feedback-v1"
@@ -68,7 +70,11 @@ def entry_quality(row):
     low = safe_float(row.get("observe_low"))
     high = safe_float(row.get("observe_high"))
 
-    if pct_chg is not None and pct_chg >= 9:
+    if pct_chg is not None and is_near_limit_up(
+        pct_chg,
+        row.get("code", ""),
+        row.get("name", ""),
+    ):
         return "高位追强"
     if pct_5d is not None and pct_5d >= 20:
         return "短线偏高"

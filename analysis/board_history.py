@@ -315,6 +315,7 @@ def get_all_ratio_changes():
             if change_df.empty:
                 result[f"{label}_ratio_{window}d_up"] = pd.DataFrame()
                 result[f"{label}_ratio_{window}d_down"] = pd.DataFrame()
+                result[f"{label}_ratio_{window}d_all"] = pd.DataFrame()
                 continue
 
             col_name = f"ratio_change_{window}d"
@@ -326,6 +327,10 @@ def get_all_ratio_changes():
 
             result[f"{label}_ratio_{window}d_up"] = up
             result[f"{label}_ratio_{window}d_down"] = down
+            # Full ranked data is presentation-only. Existing consumers keep
+            # using the top-10 _up/_down keys, so stock selection and theme
+            # detection behavior remain unchanged.
+            result[f"{label}_ratio_{window}d_all"] = change_df.copy()
 
     return result
 

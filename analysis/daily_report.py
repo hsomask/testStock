@@ -10,6 +10,7 @@ A 股每日分析报告主入口
 import argparse
 import json
 import logging
+import uuid
 import time
 import warnings
 from datetime import datetime
@@ -50,7 +51,7 @@ def load_board_trend_summary(trade_date):
 from analysis.market import analyze_market
 from analysis.board import analyze_boards
 from analysis.sentiment import analyze_sentiment
-from analysis.limitup_metrics import compute_intraday_limitup_metrics
+from analysis.market_facts import build_market_facts
 from analysis.limitup_stats_reader import load_limitup_daily_stats
 from analysis.selector import run_all_selectors
 from analysis.report_renderer import render_daily_report, save_report
@@ -61,6 +62,11 @@ from analysis.evaluation_report_reader import (
 from analysis.data_quality import check_data_quality
 from analysis.theme_detector import detect_main_themes
 from analysis.candidate_snapshot import save_candidate_feature_snapshot
+from analysis.signal_identity import (
+    SIGNAL_ID_SCHEMA_VERSION,
+    build_decision_id,
+    build_signal_id,
+)
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
@@ -193,7 +199,31 @@ def _num_or_none(x):
         return None
 
 
-def save_stock_signals(selector_result, trade_date, db_conn=None):
+def _decision_signal_lookup(trade_plan):
+    lookup = {}
+    decision = (trade_plan or {}).get("decision") or {}
+    plans = decision.get("plans") or (trade_plan or {}).get("plans") or {}
+    for layer, items in plans.items():
+        for item in items or []:
+            code = str(item.get("code", "") or "")
+            strategies = item.get("matched_strategies") or [item.get("strategy")]
+            for strategy in strategies:
+                strategy = str(strategy or "").strip()
+                if code and strategy:
+                    lookup[(code, strategy)] = {
+                        "final_decision_layer": layer,
+                        "decision_schema_version": decision.get("schema_version"),
+                    }
+    return lookup
+
+
+def save_stock_signals(
+    selector_result,
+    trade_date,
+    db_conn=None,
+    source_run_id=None,
+    trade_plan=None,
+):
     """写入观察池股票信号到 stock_signal 表"""
     conn = db_conn if db_conn and not db_conn.closed else _get_db_conn()
     if conn is None:
@@ -208,17 +238,30 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
 
     cur = conn.cursor()
     written = 0
-    failed = 0
+    decision_lookup = _decision_signal_lookup(trade_plan)
 
-    for pool_name, pool_df in selector_result.items():
-        if pool_df is None or pool_df.empty:
-            continue
-        for _, row in pool_df.iterrows():
-            code = str(row.get("code", ""))
-            name = str(row.get("name", ""))
-            try:
+    try:
+        # A daily rerun is authoritative for that trade date. Replace the
+        # complete strategy-signal set in one transaction so removed
+        # candidates from an earlier run cannot survive as stale signals.
+        cur.execute(
+            "DELETE FROM stock_signal WHERE trade_date = %s",
+            (trade_date,),
+        )
+
+        for pool_name, pool_df in selector_result.items():
+            if pool_df is None or pool_df.empty:
+                continue
+            for _, row in pool_df.iterrows():
+                code = str(row.get("code", ""))
+                name = str(row.get("name", ""))
+                signal_id = build_signal_id(trade_date, code, pool_name)
+                decision_id = build_decision_id(trade_date, code)
+                decision_item = decision_lookup.get((code, str(pool_name))) or {}
                 cur.execute("""
                     INSERT INTO stock_signal (
+                        signal_id, signal_schema_version, source_run_id,
+                        decision_id, decision_schema_version, final_decision_layer,
                         trade_date, code, name, strategy, signal_type,
                         hot_board_hits,
                         close_price, pct_chg, volume_ratio, turnover,
@@ -226,6 +269,8 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                         observe_low, observe_high, pressure_price, invalid_price,
                         risk_level, action_signal, entry_reasons, risk_reasons
                     ) VALUES (
+                        %s, %s, %s,
+                        %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s,
                         %s, %s, %s, %s,
@@ -235,6 +280,12 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                     )
                     ON CONFLICT (trade_date, code, strategy)
                     DO UPDATE SET
+                        signal_id = EXCLUDED.signal_id,
+                        signal_schema_version = EXCLUDED.signal_schema_version,
+                        source_run_id = EXCLUDED.source_run_id,
+                        decision_id = EXCLUDED.decision_id,
+                        decision_schema_version = EXCLUDED.decision_schema_version,
+                        final_decision_layer = EXCLUDED.final_decision_layer,
                         name = EXCLUDED.name,
                         signal_type = EXCLUDED.signal_type,
                         hot_board_hits = EXCLUDED.hot_board_hits,
@@ -254,8 +305,15 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                         risk_level = EXCLUDED.risk_level,
                         action_signal = EXCLUDED.action_signal,
                         entry_reasons = EXCLUDED.entry_reasons,
-                        risk_reasons = EXCLUDED.risk_reasons
+                        risk_reasons = EXCLUDED.risk_reasons,
+                        updated_at = NOW()
                 """, (
+                    signal_id,
+                    SIGNAL_ID_SCHEMA_VERSION,
+                    source_run_id,
+                    decision_id,
+                    decision_item.get("decision_schema_version"),
+                    decision_item.get("final_decision_layer"),
                     trade_date,
                     code,
                     name,
@@ -281,20 +339,20 @@ def save_stock_signals(selector_result, trade_date, db_conn=None):
                     str(row.get("risk_reasons", "")),
                 ))
                 written += 1
-            except Exception as e:
-                failed += 1
-                print(f"[错误] 写入 stock_signal 失败：{code} {name} {e}")
-                logger.exception(f"写入 stock_signal 失败：{code} {name}")
-
-    conn.commit()
-    cur.close()
-    if conn is not db_conn:
-        conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("stock_signal 同日信号集合写入失败，已整体回滚")
+        raise
+    finally:
+        cur.close()
+        if conn is not db_conn:
+            conn.close()
 
     if total_candidates > 0 and written == 0:
         print("[警告] selector_result 有数据，但 stock_signal 未写入任何记录，请检查表结构和数据库权限。")
     else:
-        print(f"stock_signal 写入完成：成功 {written} 条，失败 {failed} 条")
+        print(f"stock_signal 同日信号集合替换完成：{written} 条")
 
 
 def save_data_quality_log(trade_date, quality, data_status, db_conn=None):
@@ -336,26 +394,33 @@ def save_data_quality_log(trade_date, quality, data_status, db_conn=None):
 
 
 def log_job_start(job_name, trade_date):
-    """记录任务开始，返回记录 ID"""
+    """记录任务开始，返回数据库行和跨表 run_id。"""
     conn = _get_db_conn()
     if conn is None:
         return None
+    run_id = str(uuid.uuid4())
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO job_run_log (job_name, trade_date, status) VALUES (%s, %s, 'running') RETURNING id",
-        (job_name, trade_date)
+        """
+        INSERT INTO job_run_log (
+            run_id, run_schema_version, job_name, trade_date, status
+        ) VALUES (%s, 'pipeline_run_v1', %s, %s, 'running')
+        RETURNING id
+        """,
+        (run_id, job_name, trade_date),
     )
     job_id = cur.fetchone()[0]
     conn.commit()
     cur.close()
     conn.close()
-    return job_id
+    return {"id": job_id, "run_id": run_id}
 
 
-def log_job_end(job_id, status="success", error_message=None):
+def log_job_end(job_run, status="success", error_message=None):
     """记录任务结束"""
-    if job_id is None:
+    if job_run is None:
         return
+    job_id = job_run.get("id") if isinstance(job_run, dict) else job_run
     conn = _get_db_conn()
     if conn is None:
         return
@@ -461,7 +526,8 @@ def main():
     except Exception as e:
         logger.exception(f"数据库连接失败：{e}")
 
-    job_id = log_job_start("daily_report", trade_date)
+    job_run = log_job_start("daily_report", trade_date)
+    source_run_id = job_run.get("run_id") if isinstance(job_run, dict) else None
 
     try:
         # 数据获取（只执行一次）
@@ -479,16 +545,22 @@ def main():
         }
 
         # 数据分析（只执行一次）
-        market_result = analyze_market(stock_df, index_df)
+        limitup_stats = load_limitup_daily_stats(trade_date)
+        market_facts = build_market_facts(
+            stock_df,
+            trade_date=trade_date,
+            limitup_daily_stats=limitup_stats,
+            strict=True,
+        )
+        market_result = analyze_market(stock_df, index_df, market_facts=market_facts)
         industry_result = analyze_boards(industry_df, board_type="行业")
         concept_result = analyze_boards(concept_df, board_type="概念")
-        sentiment_result = analyze_sentiment(stock_df, industry_df, concept_df)
-        limitup_metrics = compute_intraday_limitup_metrics(stock_df)
-        limitup_stats = load_limitup_daily_stats(trade_date)
-        market_result["limitup_metrics"] = limitup_metrics
-        market_result["limitup_stats"] = limitup_stats
-        sentiment_result["limitup_metrics"] = limitup_metrics
-        sentiment_result["limitup_stats"] = limitup_stats
+        sentiment_result = analyze_sentiment(
+            stock_df,
+            industry_df,
+            concept_df,
+            market_facts=market_facts,
+        )
 
         market_score = market_result["score"]
 
@@ -559,6 +631,15 @@ def main():
                                      themes, quality, selector_result)
         save_summary_json(summary, trade_date)
 
+        # 原始策略信号先落库；快照随后通过同一个稳定 signal_id 建立血缘。
+        save_stock_signals(
+            selector_result,
+            trade_date,
+            db_conn,
+            source_run_id=source_run_id,
+            trade_plan=trade_plan,
+        )
+
         # ML 旁路地基：保存日报生成当下的最终候选特征快照。
         try:
             snapshot_count = save_candidate_feature_snapshot(
@@ -569,13 +650,11 @@ def main():
                 sentiment=sentiment_result,
                 quality=quality,
                 db_conn=db_conn,
+                source_run_id=source_run_id,
             )
             print(f"候选特征快照写入完成：{snapshot_count} 条")
         except Exception as e:
             logger.warning(f"候选特征快照写入失败，继续生成日报：{e}")
-
-        # 写入 stock_signal
-        save_stock_signals(selector_result, trade_date, db_conn)
 
         # 生成报告（每个 mode 一份）
         for m in modes:
@@ -589,11 +668,11 @@ def main():
                 report_context=report_context,
             )
 
-        log_job_end(job_id, "success")
+        log_job_end(job_run, "success")
 
     except Exception as e:
         logger.exception(f"日报生成失败：{e}")
-        log_job_end(job_id, "failed", str(e))
+        log_job_end(job_run, "failed", str(e))
         raise
 
     finally:

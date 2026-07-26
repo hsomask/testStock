@@ -8,6 +8,7 @@ SEND_EVAL_EMAIL="${SEND_EVAL_EMAIL:-0}"
 EVAL_TIME_BUDGET="${EVAL_TIME_BUDGET:-300}"
 EVAL_DEEP="${EVAL_DEEP:-0}"
 ML_DATASET_MIN_COVERAGE="${ML_DATASET_MIN_COVERAGE:-0.9}"
+EVAL_V2_BACKFILL_DAYS="${EVAL_V2_BACKFILL_DAYS:-0}"
 
 echo "=== Evaluation EntryPoint ==="
 echo "AS_OF_DATE=${AS_OF_DATE}"
@@ -15,7 +16,19 @@ echo "SEND_EVAL_EMAIL=${SEND_EVAL_EMAIL}"
 echo "EVAL_TIME_BUDGET=${EVAL_TIME_BUDGET}"
 echo "EVAL_DEEP=${EVAL_DEEP}"
 echo "ML_DATASET_MIN_COVERAGE=${ML_DATASET_MIN_COVERAGE}"
+echo "EVAL_V2_BACKFILL_DAYS=${EVAL_V2_BACKFILL_DAYS}"
 echo ""
+
+echo "[0/4] Ensure evaluation schema"
+python -m analysis.init_db
+
+if [ "$EVAL_V2_BACKFILL_DAYS" -gt 0 ]; then
+    echo "[0b/4] Rebuild legacy T+1 lifecycle rows"
+    python -m analysis.evaluation_v2_backfill \
+        --as-of "$AS_OF_DATE" \
+        --days "$EVAL_V2_BACKFILL_DAYS" \
+        --apply
+fi
 
 echo "[1/4] Scheduler check and K-line coverage guard"
 
@@ -36,9 +49,11 @@ PYTHONIOENCODING=utf-8 python -m analysis.evaluation_scheduler_check \
 
 STATUS=$(PYTHONIOENCODING=utf-8 python -c "import json; print(json.load(open('$CHECK_FILE', encoding='utf-8')).get('status','error'))")
 SIGNAL_DATE=$(PYTHONIOENCODING=utf-8 python -c "import json; print(json.load(open('$CHECK_FILE', encoding='utf-8')).get('signal_date',''))")
+EVALUATION_AS_OF_DATE=$(PYTHONIOENCODING=utf-8 python -c "import json; d=json.load(open('$CHECK_FILE', encoding='utf-8')); print(d.get('evaluation_as_of_date') or d.get('as_of_date',''))")
 
 echo "status=${STATUS}"
 echo "signal_date=${SIGNAL_DATE}"
+echo "evaluation_as_of_date=${EVALUATION_AS_OF_DATE}"
 
 if [ "$STATUS" = "skip" ]; then
     echo "[SKIP] Scheduler check returned skip, exiting."
@@ -69,6 +84,9 @@ status_data = {
     'status': 'defer' if is_defer else ('ready' if coverage >= 0.9 else 'low_weight'),
     'as_of_date': sc.get('as_of_date', '$AS_OF_DATE'),
     'signal_date': sc.get('signal_date', ''),
+    'evaluation_as_of_date': sc.get('evaluation_as_of_date', ''),
+    'target_1d_date': sc.get('target_1d_date'),
+    'target_3d_date': sc.get('target_3d_date'),
     'reason': defer_reason,
     'message': message,
     'coverage_scope': sc.get('coverage_scope', 'signal_pool'),
@@ -106,20 +124,32 @@ if [ -z "$SIGNAL_DATE" ]; then
 fi
 
 echo ""
+echo "[1b/4] Signal lineage pre-evaluation gate"
+python -m analysis.signal_lineage_check --date "$SIGNAL_DATE" --strict
+
+echo ""
 echo "[2/4] Run watchlist_evaluation --save-db"
 
 python -m analysis.watchlist_evaluation \
     --mode daily \
     --signal-date "$SIGNAL_DATE" \
-    --as-of "$AS_OF_DATE" \
+    --as-of "$EVALUATION_AS_OF_DATE" \
     --save-db
 
 echo ""
-echo "[2b/4] Update strategy feedback"
+echo "[2a/4] Signal lineage post-evaluation gate"
+python -m analysis.signal_lineage_check --date "$SIGNAL_DATE" --strict
+
+echo ""
+echo "[2b/4] Patch mature T+3 fields"
+python -m analysis.evaluation_maturity_backfill --as-of "$AS_OF_DATE" --days 30 --apply
+
+echo ""
+echo "[2c/4] Update strategy feedback"
 python -m analysis.strategy_feedback --date "$AS_OF_DATE" --window 20
 
 echo ""
-echo "[2c/4] Update context feedback"
+echo "[2d/4] Update context feedback"
 set +e
 python -m analysis.context_feedback --as-of "$AS_OF_DATE" --window 20
 CTX_STATUS=$?
@@ -129,7 +159,7 @@ if [ "$CTX_STATUS" -ne 0 ]; then
 fi
 
 echo ""
-echo "[2d/4] Check candidate snapshot integrity"
+echo "[2e/4] Check candidate snapshot integrity"
 set +e
 python -m analysis.snapshot_integrity_check --date "$SIGNAL_DATE"
 SNAPSHOT_STATUS=$?
@@ -139,7 +169,7 @@ if [ "$SNAPSHOT_STATUS" -ne 0 ]; then
 fi
 
 echo ""
-echo "[2e/4] Build ML dataset sidecar"
+echo "[2f/4] Build ML dataset sidecar"
 set +e
 python -m analysis.ml_dataset_builder --as-of "$AS_OF_DATE" --min-coverage "$ML_DATASET_MIN_COVERAGE"
 ML_STATUS=$?
@@ -149,7 +179,7 @@ if [ "$ML_STATUS" -ne 0 ]; then
 fi
 
 echo ""
-echo "[2f/4] Audit correction effectiveness"
+echo "[2g/4] Audit correction effectiveness"
 set +e
 python -m analysis.correction_effectiveness --as-of "$AS_OF_DATE" --min-coverage 0.8
 CORRECTION_STATUS=$?

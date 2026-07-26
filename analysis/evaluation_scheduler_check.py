@@ -21,6 +21,7 @@ import psycopg2
 from data.config import DATABASE_DSN
 from analysis.data_fetcher import is_trade_day
 from analysis.ensure_signal_kline_coverage import ensure_signal_kline_coverage
+from analysis.evaluation_time import resolve_evaluation_horizons
 
 
 def get_db_conn():
@@ -79,6 +80,7 @@ def _status_message(defer_reason):
         "upstream_kline_lag": "今日 T+1 复盘因上游 K 线延迟暂缓，部分股票历史行情未更新到评价日。",
         "observer_pool_price_not_ready": "今日 T+1 复盘因观察池价格覆盖不足暂缓。",
         "no_signal_pool": "未找到昨日观察池，今日 T+1 复盘暂缓。",
+        "not_mature_1d": "信号尚未到达下一交易日，T+1复盘暂缓。",
     }
     return msg_map.get(defer_reason, "今日 T+1 复盘暂缓。")
 
@@ -134,7 +136,19 @@ def build_scheduler_result(args):
                 "signal_count": 0,
             }
 
-        existing_count = check_existing_evaluation(cur, signal_date, as_of_date)
+        time_model = resolve_evaluation_horizons(signal_date, as_of_date)
+        if not time_model["t1_mature"]:
+            return {
+                "status": "defer",
+                "reason": "not_mature_1d",
+                "as_of_date": as_of_date,
+                "signal_date": signal_date,
+                "target_1d_date": time_model["t1_date"],
+                "target_3d_date": time_model["t3_date"],
+                "is_trade_day": True,
+            }
+        evaluation_as_of_date = time_model["t1_date"]
+        existing_count = check_existing_evaluation(cur, signal_date, evaluation_as_of_date)
         summary_table_exists = existing_count >= 0
         if existing_count < 0:
             warnings.append("watchlist_evaluation_summary 表不存在，请先运行 python -m analysis.init_db")
@@ -149,7 +163,7 @@ def build_scheduler_result(args):
 
     coverage_result = ensure_signal_kline_coverage(
         signal_date,
-        as_of_date,
+        evaluation_as_of_date,
         time_budget=args.time_budget,
         deep=args.deep,
         min_coverage=0.80,
@@ -168,7 +182,7 @@ def build_scheduler_result(args):
     recommended = []
     if not defer_evaluation:
         recommended = [
-            f"python -m analysis.watchlist_evaluation --mode daily --signal-date {signal_date} --as-of {as_of_date} --save-db",
+            f"python -m analysis.watchlist_evaluation --mode daily --signal-date {signal_date} --as-of {evaluation_as_of_date} --save-db",
             "python -m analysis.evaluation_query --latest",
         ]
 
@@ -190,6 +204,10 @@ def build_scheduler_result(args):
         "status": status,
         "signal_date": signal_date,
         "as_of_date": as_of_date,
+        "evaluation_as_of_date": evaluation_as_of_date,
+        "target_1d_date": time_model["t1_date"],
+        "target_3d_date": time_model["t3_date"],
+        "evaluation_phase": "t1",
         "is_trade_day": True,
         "signal_count": sig_cnt,
         "stock_signal_rows": signal_count,

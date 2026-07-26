@@ -50,7 +50,7 @@ def find_latest_file(pattern):
 def build_trade_plan_section(tp):
     """从 trade_plan JSON 组装邮件摘要"""
     r = tp.get("market_restrictions", {})
-    s = tp.get("summary", {})
+    s = (tp.get("decision") or {}).get("summary") or tp.get("summary", {})
     parts = ["## 明日交易计划"]
     if not r.get("allow_real_trade", True):
         parts.append("**当前仅适合模拟观察，不建议实盘买入。**")

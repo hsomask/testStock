@@ -2,165 +2,180 @@
 
 ## 项目信息
 
-- 项目名称：stock-ai-system
-- 本地路径：D:\code\stock-ai-system
-- 服务器路径：/root/stock-ai-system
-- 开发分支：dev
-- 部署分支：main
-- 主要技术栈：Python / Docker / MySQL
-- 最近提交：4a6c2cf 完善纠偏效果统计与日报展示
+- 项目：testStock / stock-ai-system
+- GitHub：`https://github.com/hsomask/testStock.git`
+- 本地路径：`D:\code\testStock`
+- 开发分支：`dev`
+- 技术栈：Python / Docker / PostgreSQL
+- 当前状态：第一、第二、第三阶段主体已完成；等待下一交易日run_id现场冒烟；代码尚未提交
 
-## 当前目标
+## 阶段行为等价门禁
 
-- 日报系统持续优化：观察池、T+1 evaluation、纠偏效果、学习样本，为后续 ML 做准备。
+每个新阶段开始前必须先完成行为等价审计，未通过或未确认时不得进入实施。
 
-## 本轮改动范围
+固定检查项：
 
-- 修改模块：
-  -
-- 新增模块：
-  -
-- 删除或废弃模块：
-  -
-- 是否涉及 SQL：否 / 是，脚本：
-- 是否涉及 crontab：否 / 是，说明：
+1. 使用同一版本输入、配置和交易日比较旧基线与新候选。
+2. 对比原始候选的股票、策略、评分、排序和入选原因。
+3. 对比最终层级、过滤原因、交易模式和仓位限制。
+4. 对比 `stock_signal`、候选快照、评价和ML样本的数量与唯一键。
+5. 将差异分类为行为等价、明确口径修正、非预期变化或不可复现。
+6. 非预期变化必须先修复；明确口径修正必须先确认。
 
-## 当前状态
+门禁命令：
 
-- 本地分支：
-- 是否已推送 dev：
-- 是否已合并 main：
-- 服务器是否已 pull：
-- 今日是否已跑日报：
-- 当前做到哪里：
-- 是否有未提交改动：
+```bash
+python -m analysis.behavior_equivalence_audit
+```
 
-## 已完成
+第三阶段前置审计报告：
 
--
+- `reports/audit/behavior_equivalence_phase3_precheck_20260725.md`
+- 当前结论：`pass`
+- 原始 selector：通过。
+- 最终层级归并：通过，真实快照最终层级差异为0。
+- 接近涨停90%板块感知定义、统一市场事实、T+1/T+3隔离已由用户确认接受。
+- 历史市场评分因未保存全市场历史日截面无法完整重放，该限制已记录并接受。
+- 机器可读确认记录：`config/behavior_policy.json`。
 
-## 正在处理
+## 已完成的架构收敛
 
--
+### 第一阶段：市场事实与最终决策
 
-## 待处理
+- `analysis/market_facts.py` 是唯一市场事实入口。
+- 涨停口径按主板、ST、创业板、科创板、北交所区分。
+- 强制满足：`触板数 = 封板数 + 炸板数`。
+- `market.py`、`sentiment.py` 只消费同一个 `MarketFacts`。
+- `analysis/daily_decision.py` 是唯一最终决策入口。
+- 同一股票最终只能处于一个层级：
+  `不可交易过滤 > 高风险回避 > 交易条件不满足 > 只观察 > 候选低吸`。
+- renderer 不再自行去重、跨层排斥或重算交易模式。
 
--
+### 第二阶段：Evaluation 时间模型
 
-## 待验证
+- 版本：`evaluation_v2`。
+- `analysis/evaluation_time.py` 统一计算精确市场交易日 T+1/T+3。
+- T+1 只使用下一交易日数据，首次写入后冻结。
+- T+3 只使用第三个交易日及三日窗口数据，通过字段白名单补齐。
+- 停牌或缺失目标日价格时不得顺延到“下一根K线”。
+- T+1 的 `verification_tag`、`feedback_label`、`feedback_score` 不再读取T+3数据。
+- T+3 使用独立字段：
+  - `verification_tag_3d`
+  - `feedback_label_3d`
+  - `feedback_score_3d`
+  - `attribution_tags_3d`
+  - `attribution_text_3d`
+- 规范读取入口：
+  - `canonical_daily_evaluation_summary`
+  - `canonical_daily_evaluation_result`
+- 策略反馈、场景反馈、纠偏效果、ML、日报读取器、评价邮件和查询工具均消费规范视图。
 
--
+### 第三阶段：信号链路与样本血缘
 
-## 数据与表结构
+- `analysis/signal_identity.py` 统一生成稳定UUIDv5身份。
+- `signal_id` 粒度：交易日 + 股票 + 原始策略。
+- `decision_id` 粒度：交易日 + 股票，同一股票多个策略共享。
+- 日报使用 `source_run_id`，T+1使用 `evaluation_run_id`，T+3使用 `t3_run_id`。
+- `stock_signal.final_decision_layer` 是评价使用的规范最终层。
+- 快照原始 `rule_layer` 保留，`canonical_final_layer` 提供唯一规范层。
+- ML、场景反馈、纠偏效果改用 `signal_id` 关联。
+- `canonical_signal_lineage` 是规范血缘查看入口。
+- 历史回填工具：`analysis/signal_lineage_backfill.py`，默认dry-run。
+- 严格门禁：`analysis/signal_lineage_check.py`。
+- 实施报告：`reports/audit/signal_lineage_phase3_20260725.md`。
 
-- 新增表：
-- 修改表：
-- 需要手动执行 SQL：
-- 关键数据文件：
-  - reports/daily/
-  - reports/evaluation/
-  - reports/ml_dataset/
+## 数据库迁移状态（2026-07-25）
 
-## 关键文件
+- `sql/schema.sql` 的 evaluation_v2 增量字段及规范视图已应用。
+- 25个历史信号日已迁移到 evaluation_v2。
+- 规范明细：935条。
+- T+1有效：930条。
+- T+1验证标签错配：0。
+- T+1反馈标签错配：0。
+- 已到T+3日历成熟：905条。
+- T+3价格完整：900条。
+- T+3价格不足：5条。
+- 未成熟T+3：30条，T+3标签保持NULL。
+- 原有legacy记录保留，不删除；规范视图优先选择v2。
 
-- analysis/daily_report.py
-- analysis/report_renderer.py
-- analysis/trade_plan.py
-- analysis/correction_effectiveness.py
-- analysis/ml_dataset_builder.py
-- scripts/report_with_evaluation_entrypoint.sh
-- scripts/evaluation_entrypoint.sh
+## 当前数据消费结果
+
+- ML样本：601行。
+- `trade_date + code + strategy` 去重后仍为601行，无重复放大。
+- 其中T+3已完整：571行。
+- 场景反馈输入：601行，168个分组。
+- 策略反馈：6个策略组，662个T+1样本。
+
+## 日常执行链路
+
+`scripts/evaluation_entrypoint.sh` 会依次：
+
+1. 幂等初始化数据库结构。
+2. 运行T+1调度和行情覆盖检查。
+3. 生成并保存冻结T+1。
+4. 补齐已成熟T+3字段。
+5. 刷新策略反馈、场景反馈、快照检查、ML和纠偏效果。
+
+默认不重复执行历史T+1迁移。需要迁移legacy时显式设置：
+
+```bash
+EVAL_V2_BACKFILL_DAYS=30 bash scripts/evaluation_entrypoint.sh
+```
 
 ## 关键命令
 
-### 本地验证
-
 ```bash
-python -m analysis.correction_regression_check
+python -m analysis.evaluation_time_regression_check
+python -m analysis.consistency_regression_check
 python -m analysis.trade_plan_regression_check
+python -m analysis.correction_regression_check
 python -m analysis.correction_effectiveness_regression_check
-python -m analysis.ml_dataset_builder --as-of YYYYMMDD --min-coverage 0.9
+python -m analysis.behavior_equivalence_audit
+python -m analysis.signal_identity_regression_check
+python -m analysis.signal_lineage_regression_check
+python -m analysis.signal_lineage_check --date YYYYMMDD --strict
 ```
 
-### 查看最近 evaluation
+历史T+1迁移默认dry-run：
 
 ```bash
-python -m analysis.evaluation_query --days 5
+python -m analysis.evaluation_v2_backfill --as-of YYYYMMDD --days 30
+python -m analysis.evaluation_v2_backfill --as-of YYYYMMDD --days 30 --apply
 ```
 
-### 服务器日报链路
+T+3成熟补齐默认dry-run：
 
 ```bash
-cd /root/stock-ai-system
-docker compose run --rm --entrypoint /bin/bash -e EVAL_TIME_BUDGET=1800 -e EVAL_DEEP=1 stock-report scripts/report_with_evaluation_entrypoint.sh
+python -m analysis.evaluation_maturity_backfill --as-of YYYYMMDD --days 30
+python -m analysis.evaluation_maturity_backfill --as-of YYYYMMDD --days 30 --apply
 ```
 
-### 单独跑 evaluation 检查
+查看规范评价：
 
 ```bash
-cd /root/stock-ai-system
-docker compose run --rm --entrypoint python -e EVAL_TIME_BUDGET=1800 -e EVAL_DEEP=1 stock-report -m analysis.evaluation_scheduler_check --as-of $(date +%Y%m%d) --time-budget 1800 --deep --json
+python -m analysis.evaluation_query --mode daily --days 10
 ```
-
-### Git 同步
-
-```bash
-git status -sb
-git log -1 --oneline
-git pull origin dev
-git push origin dev
-```
-
-## 环境说明
-
-- Python：
-- Docker：
-- 数据库：
-- 服务器 cron：
-- 其他依赖：
-
-## 验证结论
-
-- 最近日报日期：
-- T+1 覆盖率：
-- 学习样本状态：
-- 纠偏效果：
-- 是否可用于日报阅读：
-- 是否可用于 ML 样本：
-
-## 已知问题
-
--
 
 ## 注意事项
 
-- 不要直接在 main 开发。
-- 服务器只部署 main，dev 测试通过后再合并。
-- 观察池、evaluation、ML 数据要看覆盖率，不要只看是否生成文件。
-- 报告里的旧快照可能滞后，必要时以 DB 最新 evaluation 为准。
-- 本文件只记录接手必需信息，不写完整开发流水账。
+- 不要再按 `generated_at` 选择“最新评价”；按规范视图和信号日期读取。
+- 不要用晚于T+1的运行日期重新计算T+1标签。
+- T+3补齐不得更新任何T+1字段。
+- 不要删除legacy评价行，除非另有经过审核的数据清理方案。
+- 报告中的“策略信号数”和“涉及股票数”是不同口径。
+- 当前工作树尚未提交或推送。
 
-## 下次 Codex 接手入口
+## 下一步
 
-1. 先读本文件。
-2. 再看最近日报：C:\Users\hsoluo\Downloads\daily_report_YYYYMMDD.md
-3. 再跑：
-
-```bash
-git status -sb
-git log -1 --oneline
-python -m analysis.evaluation_query --days 5
-```
-
-4. 如果要改代码，优先看：
-   - analysis/daily_report.py
-   - analysis/report_renderer.py
-   - analysis/trade_plan.py
-   - analysis/correction_effectiveness.py
-   - analysis/ml_dataset_builder.py
-
-## 更新时间
-
-- 更新时间：
-- 更新电脑：
-- 更新人：
+- 本地现场冒烟已于 2026-07-25 完成，详见
+  `reports/audit/full_chain_verification_20260725.md`。
+- 两个产业概念资金榜已替换为行业关注度扩散和行业量价结构，
+  详见 `reports/audit/industry_attention_statistics_20260726.md`。
+- 2026-07-24 日报信号/快照均为25条，`source_run_id` 单一且一致。
+- 2026-07-23 信号截至2026-07-24的T+1评价为30/30，
+  明细和汇总 `evaluation_run_id` 单一且一致。
+- 成熟T+3回填已生成独立 `t3_run_id`。
+- 现场发现并修复同日重跑残留旧信号问题；真实重跑后严格血缘通过。
+- 下一步可进入第四阶段LLM旁路接入；LLM不得进入事实计算和最终决策主链。
+- 仍需在服务器dev环境跑一次完整 `evaluation_entrypoint.sh`，验证Linux部署入口。
+- 验证通过后再提交dev，不要直接在main开发。

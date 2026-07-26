@@ -81,6 +81,7 @@ def compute_strategy_feedback(as_of_date=None, window_days=DEFAULT_WINDOW_DAYS, 
 
     as_of_date = as_of_date or datetime.now().strftime("%Y%m%d")
     sql_as_of = _sql_date(as_of_date)
+    evaluation_as_of = str(as_of_date).replace("-", "")[:8]
 
     conn = psycopg2.connect(DATABASE_DSN)
     cur = conn.cursor()
@@ -90,7 +91,7 @@ def compute_strategy_feedback(as_of_date=None, window_days=DEFAULT_WINDOW_DAYS, 
         """
         WITH recent_dates AS (
             SELECT DISTINCT as_of_date
-            FROM watchlist_evaluation_result
+            FROM canonical_daily_evaluation_result
             WHERE eval_mode = 'daily'
               AND as_of_date <= %s
             ORDER BY as_of_date DESC
@@ -106,16 +107,14 @@ def compute_strategy_feedback(as_of_date=None, window_days=DEFAULT_WINDOW_DAYS, 
             AVG(CASE
                 WHEN feedback_label = 'strong_follow'
                      OR next_1d_return >= 0.03
-                     OR max_3d_return >= 0.06
                 THEN 1.0 ELSE 0.0
             END) AS strong_rate,
             AVG(CASE
                 WHEN feedback_label = 'failed'
                      OR next_1d_return <= -0.03
-                     OR max_3d_drawdown <= -0.05
                 THEN 1.0 ELSE 0.0
             END) AS failed_rate
-        FROM watchlist_evaluation_result
+        FROM canonical_daily_evaluation_result
         WHERE eval_mode = 'daily'
           AND as_of_date IN (SELECT as_of_date FROM recent_dates)
           AND next_1d_return IS NOT NULL
@@ -123,7 +122,7 @@ def compute_strategy_feedback(as_of_date=None, window_days=DEFAULT_WINDOW_DAYS, 
         GROUP BY strategy
         ORDER BY strategy
         """,
-        (sql_as_of, int(window_days)),
+        (evaluation_as_of, int(window_days)),
     )
 
     rows = cur.fetchall()
@@ -137,8 +136,8 @@ def compute_strategy_feedback(as_of_date=None, window_days=DEFAULT_WINDOW_DAYS, 
         avg_dd = float(row[5]) if row[5] is not None else None
         strong_rate = float(row[6]) if row[6] is not None else None
         failed_rate = float(row[7]) if row[7] is not None else None
-        status, reason = _status_for(sample_count, win_rate, avg_return, failed_rate, avg_dd)
-        score = _score_for(win_rate, avg_return, strong_rate, failed_rate, avg_dd)
+        status, reason = _status_for(sample_count, win_rate, avg_return, failed_rate, None)
+        score = _score_for(win_rate, avg_return, strong_rate, failed_rate, None)
 
         item = {
             "trade_date": sql_as_of,

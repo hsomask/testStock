@@ -1,6 +1,12 @@
 import pandas as pd
 import numpy as np
 
+from analysis.market_facts import (
+    build_market_facts,
+    project_limitup_metrics,
+    project_limitup_stats,
+)
+
 
 def classify_emotion(row):
     pct = row.get("pct_chg", 0)
@@ -46,12 +52,16 @@ def distribution(df):
     return result
 
 
-def analyze_sentiment(stock_df, industry_df, concept_df):
-    up_count = int((stock_df["pct_chg"] > 0).sum())
-    down_count = int((stock_df["pct_chg"] < 0).sum())
-    limit_up = int((stock_df["pct_chg"] >= 9.8).sum())
-    limit_down = int((stock_df["pct_chg"] <= -9.8).sum())
-    amount = stock_df["amount"].sum() / 1e8
+def analyze_sentiment(stock_df, industry_df, concept_df, market_facts=None):
+    """Score sentiment from the same immutable facts used by market scoring."""
+    facts = market_facts or build_market_facts(stock_df, strict=False)
+    breadth = facts.get("breadth") or {}
+    limitup = facts.get("limitup") or {}
+    liquidity = facts.get("liquidity") or {}
+    up_count = int(breadth.get("up_count", 0))
+    limit_up = int(limitup.get("sealed_count", 0))
+    limit_down = int(limitup.get("limit_down_count", 0))
+    amount = float(liquidity.get("total_amount_100m", 0) or 0)
 
     raw_score = (
         up_count / max(len(stock_df), 1) * 40
@@ -83,6 +93,9 @@ def analyze_sentiment(stock_df, industry_df, concept_df):
         "score": round(score, 1),
         "stage": stage,
         "comment": comment,
+        "market_facts": facts,
+        "limitup_metrics": project_limitup_metrics(facts),
+        "limitup_stats": project_limitup_stats(facts),
         "industry_distribution": distribution(industry_df),
         "concept_distribution": distribution(concept_df),
     }

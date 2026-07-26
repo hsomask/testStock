@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import sys
+import uuid
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,6 +23,9 @@ import psycopg2
 
 from data.config import DATABASE_DSN, REPORT_DIR
 from analysis.data_fetcher import get_stock_history
+from analysis.evaluation_time import EVALUATION_SCHEMA_VERSION, resolve_evaluation_horizons
+from analysis.limitup_metrics import is_near_limit_up
+from analysis.signal_identity import ensure_signal_id
 
 # ── 进程内行情缓存：同一只股票同一次运行只调一次 API ──
 _HIST_CACHE = {}
@@ -51,9 +55,44 @@ def _cache_update(code, hist):
     """手动用 days=500 结果覆盖缓存"""
     _HIST_CACHE[str(code)] = (500, hist)
 
+
+def prime_history_cache_from_db(conn, codes):
+    """Prime evaluation history without API calls or cache writes."""
+    normalized = sorted({str(code or "").strip() for code in codes if str(code or "").strip()})
+    if not normalized:
+        return 0
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT code, trade_date, close, high, low
+        FROM stock_hist_kline
+        WHERE code = ANY(%s)
+        ORDER BY code, trade_date
+        """,
+        (normalized,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    grouped = defaultdict(list)
+    for code, trade_date, close, high, low in rows:
+        grouped[str(code)].append({
+            "date": trade_date,
+            "close": close,
+            "high": high,
+            "low": low,
+        })
+    for code in normalized:
+        _cache_update(code, pd.DataFrame(grouped.get(code, [])))
+    return len(grouped)
+
 logger = logging.getLogger(__name__)
 
-LAYER_FALLBACK_FIELDS = ["watchlist_layer", "action_signal", "signal_type"]
+LAYER_FALLBACK_FIELDS = [
+    "final_decision_layer",
+    "watchlist_layer",
+    "action_signal",
+    "signal_type",
+]
 
 REASON_LABELS = {
     "not_mature_1d": "入选时间太近，尚无 1 个后续交易日",
@@ -64,6 +103,8 @@ REASON_LABELS = {
     "invalid_code": "股票代码无效",
     "invalid_close_price": "入选日收盘价异常",
     "entry_date_not_found": "行情数据中找不到入选日期",
+    "missing_t1_price": "T+1目标交易日缺少该股票价格（可能停牌或数据缺失）",
+    "missing_t3_window_price": "T+1至T+3精确交易日窗口价格不完整",
 }
 
 
@@ -90,7 +131,7 @@ def resolve_layer(signal):
 
 
 def build_signal_key(signal):
-    """统一 signal_key：优先 id，否则 trade_date+code+strategy"""
+    """Legacy persistence key; stable cross-table identity uses signal_id."""
     sid = signal.get("id")
     if sid is not None:
         return str(sid)
@@ -114,7 +155,9 @@ def fetch_signals(conn, start_date, end_date):
     existing_cols = {row[0] for row in cur.fetchall()}
 
     desired = [
-        "id", "trade_date", "code", "name", "strategy", "risk_level",
+        "id", "signal_id", "decision_id", "source_run_id",
+        "final_decision_layer",
+        "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
         "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
         "pct_5d", "pct_20d", "hot_board_hits", "entry_reasons", "risk_reasons",
@@ -159,7 +202,9 @@ def fetch_signals_for_date(conn, signal_date):
     existing_cols = {row[0] for row in cur.fetchall()}
 
     desired = [
-        "id", "trade_date", "code", "name", "strategy", "risk_level",
+        "id", "signal_id", "decision_id", "source_run_id",
+        "final_decision_layer",
+        "trade_date", "code", "name", "strategy", "risk_level",
         "action_signal", "signal_type", "watchlist_layer", "close_price",
         "pct_chg", "volume_ratio", "turnover", "ma5", "ma10", "ma20",
         "pct_5d", "pct_20d", "hot_board_hits", "entry_reasons", "risk_reasons",
@@ -188,32 +233,29 @@ def fetch_signals_for_date(conn, signal_date):
     return signals
 
 
-def compute_verification_tag(next_1d_return, max_3d_drawdown, layer):
-    """根据次日表现和分层判断信号验证标签"""
+def compute_verification_tag(next_1d_return, layer):
+    """T+1 verification uses T+1 facts only and is immutable after first write."""
     if next_1d_return is None:
         return "insufficient"
 
     r1 = next_1d_return
-    dd3 = max_3d_drawdown
 
     if layer in ("观察",):
         if r1 > 0:
             tag = "hit"
-        elif dd3 is not None and dd3 < -0.04:
-            tag = "hit"
         else:
             tag = "miss"
     elif layer in ("谨慎", "谨慎观望"):
-        if abs(r1) <= 0.03 and (dd3 is None or dd3 >= -0.04):
+        if abs(r1) <= 0.03:
             tag = "neutral"
         elif r1 > 0.03:
             tag = "miss"
         else:
             tag = "hit"
     elif layer in ("回避", "高", "高风险"):
-        if r1 < 0 or (dd3 is not None and dd3 < -0.03):
+        if r1 < 0:
             tag = "hit"
-        elif r1 > 0.03 and (dd3 is None or dd3 >= -0.03):
+        elif r1 > 0.03:
             tag = "miss"
         else:
             tag = "neutral"
@@ -227,6 +269,19 @@ def compute_verification_tag(next_1d_return, max_3d_drawdown, layer):
     return tag
 
 
+def compute_t3_verification_tag(next_3d_return, max_3d_drawdown, layer):
+    """Independent T+3 verification; never overwrites the T+1 tag."""
+    if next_3d_return is None:
+        return "insufficient"
+    if layer in ("回避", "高", "高风险", "谨慎", "谨慎观望"):
+        if next_3d_return < 0 or (max_3d_drawdown is not None and max_3d_drawdown <= -0.05):
+            return "hit"
+        return "miss" if next_3d_return > 0.03 else "neutral"
+    if next_3d_return > 0:
+        return "hit"
+    return "miss" if next_3d_return < 0 else "neutral"
+
+
 def _safe_float(value):
     try:
         if value is None or pd.isna(value):
@@ -237,7 +292,7 @@ def _safe_float(value):
 
 
 def compute_feedback(signal, metrics, status):
-    """Build a T+1 feedback label and explainable attribution tags."""
+    """Build an immutable feedback label using T+1 facts only."""
     if not metrics:
         reasons = status.get("missing_reasons", []) if status else []
         return {
@@ -248,17 +303,13 @@ def compute_feedback(signal, metrics, status):
         }
 
     r1 = metrics.get("next_1d_return")
-    r3 = metrics.get("next_3d_return")
-    max3 = metrics.get("max_3d_return")
-    dd3 = metrics.get("max_3d_drawdown")
-
     if r1 is None:
         label = "data_insufficient"
-    elif r1 >= 0.03 or (max3 is not None and max3 >= 0.06):
+    elif r1 >= 0.03:
         label = "strong_follow"
-    elif r1 >= 0 and (dd3 is None or dd3 >= -0.03):
+    elif r1 >= 0:
         label = "walk_strong"
-    elif r1 <= -0.03 or (dd3 is not None and dd3 <= -0.05):
+    elif r1 <= -0.03:
         label = "failed"
     else:
         label = "weak"
@@ -266,10 +317,6 @@ def compute_feedback(signal, metrics, status):
     score = 50.0
     if r1 is not None:
         score += r1 * 500
-    if max3 is not None:
-        score += max3 * 120
-    if dd3 is not None:
-        score += dd3 * 180
     feedback_score = round(max(0, min(100, score)), 1)
 
     tags = []
@@ -282,7 +329,11 @@ def compute_feedback(signal, metrics, status):
     risk_reasons = str(signal.get("risk_reasons") or "")
     strategy = str(signal.get("strategy") or "")
 
-    if pct_chg is not None and pct_chg >= 9.5:
+    if pct_chg is not None and is_near_limit_up(
+        pct_chg,
+        signal.get("code", ""),
+        signal.get("name", ""),
+    ):
         tags.append("gap_or_chase_risk")
     elif pct_chg is not None and pct_chg >= 7:
         tags.append("high_intraday_position")
@@ -351,25 +402,60 @@ def compute_feedback(signal, metrics, status):
     }
 
 
-def evaluate_signal_performance(signal, as_of_date=None):
+def compute_t3_feedback(metrics, status):
+    """Build T+3-only feedback without consulting or changing T+1 fields."""
+    if not metrics or metrics.get("next_3d_return") is None:
+        return {
+            "feedback_label_3d": "data_insufficient",
+            "feedback_score_3d": None,
+            "attribution_tags_3d": ["data_insufficient"],
+            "attribution_text_3d": "T+3尚未成熟或三日价格不完整。",
+        }
+    r3 = float(metrics["next_3d_return"])
+    max3 = metrics.get("max_3d_return")
+    dd3 = metrics.get("max_3d_drawdown")
+    if r3 >= 0.05 or (max3 is not None and max3 >= 0.08):
+        label = "strong_3d"
+    elif r3 > 0:
+        label = "positive_3d"
+    elif r3 <= -0.05 or (dd3 is not None and dd3 <= -0.08):
+        label = "failed_3d"
+    else:
+        label = "weak_3d"
+    score = 50 + r3 * 350
+    if max3 is not None:
+        score += float(max3) * 80
+    if dd3 is not None:
+        score += float(dd3) * 100
+    return {
+        "feedback_label_3d": label,
+        "feedback_score_3d": round(max(0, min(100, score)), 1),
+        "attribution_tags_3d": [label],
+        "attribution_text_3d": f"T+3收益{r3:.2%}，三日内最高/最低表现独立评价。",
+    }
+
+
+def evaluate_signal_performance(signal, as_of_date=None, horizon="full", calendar=None):
     """
     统一单条信号评价函数（range 和 daily 共用）。
     返回 (metrics_dict, status_dict)
 
-    先用 days=80 走 DB 缓存快速路径；如果缓存无后续交易日数据，
-    再用 days=500 触发 API 刷新（绕过 get_stock_history 的
-    len(db_dates) >= days-3 缓存命中条件）。
-
-    如果传入 as_of_date（YYYYMMDD），未来行情窗口会被截断到
-    trade_date < date <= as_of_date，防止未来函数。
+    T+1/T+3 use exact exchange trading dates. A suspended stock therefore has
+    missing horizon data instead of silently shifting to its next available bar.
+    ``horizon='t1'`` prevents a daily T+1 run from computing any T+3 fields.
     """
     code = str(signal.get("code", "")).strip()
     trade_date = signal["trade_date"]
+    as_of_date = as_of_date or datetime.now().strftime("%Y%m%d")
+    time_model = resolve_evaluation_horizons(trade_date, as_of_date, calendar=calendar)
     close_price_raw = signal.get("close_price")
 
     status = {
-        "eligible_1d": False,
-        "eligible_3d": False,
+        "schema_version": EVALUATION_SCHEMA_VERSION,
+        "target_1d_date": time_model["t1_date"],
+        "target_3d_date": time_model["t3_date"],
+        "eligible_1d": time_model["t1_mature"],
+        "eligible_3d": horizon in ("t3", "full") and time_model["t3_mature"],
         "evaluated_1d": False,
         "evaluated_3d": False,
         "missing_reasons": [],
@@ -402,76 +488,83 @@ def evaluate_signal_performance(signal, as_of_date=None):
         status["missing_reasons"].append("price_fetch_failed")
         return None, status
 
-    all_dates = hist["date"].astype(str).str.replace("-", "").str[:8]
+    hist = hist.copy()
+    hist["_evaluation_date"] = hist["date"].astype(str).str.replace("-", "").str[:8]
+    all_dates = hist["_evaluation_date"]
     status["price_dates"] = sorted(all_dates.unique().tolist())
 
     if trade_date in set(all_dates):
         status["entry_close_found"] = True
 
-    # 构建未来行情窗口：trade_date < date <= as_of_date
-    future_mask = all_dates > trade_date
-    if as_of_date:
-        future_mask = future_mask & (all_dates <= as_of_date)
-    future = hist[future_mask].sort_values("date")
+    target_dates = [
+        value for value in (
+            time_model["t1_date"],
+            time_model["t2_date"],
+            time_model["t3_date"],
+        )
+        if value and value <= time_model["run_as_of_date"]
+    ]
+    future = hist[hist["_evaluation_date"].isin(target_dates)].sort_values("_evaluation_date")
 
-    # 如果缓存无后续数据，可能缓存过期，尝试强制 API 刷新一次
-    if future.empty:
+    required_dates = (
+        [time_model["t1_date"]] if horizon == "t1" and time_model["t1_mature"]
+        else target_dates
+    )
+    found_dates = set(future["_evaluation_date"].tolist())
+    if any(value and value not in found_dates for value in required_dates):
         try:
             hist = _cached_get_history(code, days=500)
             if hist is not None and not hist.empty and "date" in hist.columns:
-                all_dates = hist["date"].astype(str).str.replace("-", "").str[:8]
+                hist = hist.copy()
+                hist["_evaluation_date"] = hist["date"].astype(str).str.replace("-", "").str[:8]
+                all_dates = hist["_evaluation_date"]
                 status["price_dates"] = sorted(all_dates.unique().tolist())
                 if trade_date in set(all_dates):
                     status["entry_close_found"] = True
-                future_mask = all_dates > trade_date
-                if as_of_date:
-                    future_mask = future_mask & (all_dates <= as_of_date)
-                future = hist[future_mask].sort_values("date")
+                future = hist[hist["_evaluation_date"].isin(target_dates)].sort_values("_evaluation_date")
                 _cache_update(code, hist)
         except Exception:
             pass
 
-    if status["price_dates"]:
-        status["as_of_close_found"] = True
-
-    future_len = len(future)
-
-    if future_len >= 1:
-        status["eligible_1d"] = True
-    else:
-        if status["entry_close_found"]:
-            status["missing_reasons"].append("not_mature_1d")
-        else:
-            status["missing_reasons"].append("entry_date_not_found")
-
-    if future_len >= 3:
-        status["eligible_3d"] = True
-    else:
-        if future_len >= 1:
-            status["missing_reasons"].append("insufficient_future_days_for_3d")
-        elif status["entry_close_found"]:
+    found_dates = set(future["_evaluation_date"].tolist()) if not future.empty else set()
+    status["as_of_close_found"] = time_model["run_as_of_date"] in set(status["price_dates"])
+    if not status["entry_close_found"]:
+        status["missing_reasons"].append("entry_date_not_found")
+    if not time_model["t1_mature"]:
+        status["missing_reasons"].append("not_mature_1d")
+    elif time_model["t1_date"] not in found_dates:
+        status["missing_reasons"].append("missing_t1_price")
+    if horizon in ("t3", "full"):
+        if not time_model["t3_mature"]:
             status["missing_reasons"].append("not_mature_3d")
-
-    if future.empty:
-        return None, status
+        elif any(value not in found_dates for value in target_dates[:3]):
+            status["missing_reasons"].append("missing_t3_window_price")
 
     # 1d
-    row_1d = future.iloc[0]
     next_1d_return = None
     next_1d_close = None
-    try:
-        next_1d_close = float(row_1d["close"])
-        next_1d_return = next_1d_close / close_price - 1
-        status["evaluated_1d"] = True
-    except (TypeError, ValueError):
-        pass
+    t1_rows = future[future["_evaluation_date"] == time_model["t1_date"]]
+    if time_model["t1_mature"] and not t1_rows.empty:
+        try:
+            next_1d_close = float(t1_rows.iloc[0]["close"])
+            next_1d_return = next_1d_close / close_price - 1
+            status["evaluated_1d"] = True
+        except (TypeError, ValueError):
+            pass
 
     # 3d
     next_3d_return = None
     max_3d_return = None
     max_3d_drawdown = None
-    if future_len >= 3:
-        window = future.iloc[:3]
+    exact_window = future[future["_evaluation_date"].isin(target_dates[:3])]
+    exact_window = exact_window.sort_values("_evaluation_date")
+    if (
+        horizon in ("t3", "full")
+        and time_model["t3_mature"]
+        and len(exact_window) == 3
+        and set(exact_window["_evaluation_date"]) == set(target_dates[:3])
+    ):
+        window = exact_window
         try:
             next_3d_return = float(window.iloc[2]["close"]) / close_price - 1
             status["evaluated_3d"] = True
@@ -495,8 +588,10 @@ def evaluate_signal_performance(signal, as_of_date=None):
         "next_3d_return": next_3d_return,
         "max_3d_return": max_3d_return,
         "max_3d_drawdown": max_3d_drawdown,
+        "target_1d_date": time_model["t1_date"],
+        "target_3d_date": time_model["t3_date"],
     }
-    return metrics, status
+    return (metrics if status["evaluated_1d"] or status["evaluated_3d"] else None), status
 
 
 def safe_mean(values):
@@ -1016,7 +1111,7 @@ def resolve_date_range(args):
     return start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
 
 
-def evaluate_records(signals, as_of_date=None):
+def evaluate_records(signals, as_of_date=None, horizon="full", calendar=None):
     """对信号列表逐条评价，返回 records + 汇总计数"""
     records = []
     eligible_1d = 0
@@ -1026,7 +1121,12 @@ def evaluate_records(signals, as_of_date=None):
     missing_reasons = Counter()
 
     for i, sig in enumerate(signals):
-        metrics, status = evaluate_signal_performance(sig, as_of_date=as_of_date)
+        metrics, status = evaluate_signal_performance(
+            sig,
+            as_of_date=as_of_date,
+            horizon=horizon,
+            calendar=calendar,
+        )
         layer = resolve_layer(sig)
         strategy = str(sig.get("strategy", "unknown") or "unknown").strip()
         risk = str(sig.get("risk_level", "unknown") or "unknown").strip()
@@ -1043,12 +1143,27 @@ def evaluate_records(signals, as_of_date=None):
             missing_reasons[reason] += 1
 
         r1 = metrics["next_1d_return"] if metrics else None
+        r3 = metrics["next_3d_return"] if metrics else None
         dd3 = metrics["max_3d_drawdown"] if metrics else None
-        vtag = compute_verification_tag(r1, dd3, layer)
+        vtag = compute_verification_tag(r1, layer)
+        vtag3 = compute_t3_verification_tag(r3, dd3, layer) if horizon in ("t3", "full") else None
         feedback = compute_feedback(sig, metrics, status)
+        feedback3 = (
+            compute_t3_feedback(metrics, status)
+            if horizon in ("t3", "full")
+            else {
+                "feedback_label_3d": None,
+                "feedback_score_3d": None,
+                "attribution_tags_3d": None,
+                "attribution_text_3d": None,
+            }
+        )
 
         record = {
             "signal_key": build_signal_key(sig),
+            "signal_id": ensure_signal_id(sig),
+            "decision_id": sig.get("decision_id"),
+            "source_run_id": sig.get("source_run_id"),
             "trade_date": sig["trade_date"],
             "code": str(sig.get("code", "")),
             "name": str(sig.get("name", "")),
@@ -1059,10 +1174,12 @@ def evaluate_records(signals, as_of_date=None):
             "metrics": metrics,
             "status": status,
             "verification_tag": vtag,
+            "verification_tag_3d": vtag3,
             "feedback_label": feedback["feedback_label"],
             "feedback_score": feedback["feedback_score"],
             "attribution_tags": feedback["attribution_tags"],
             "attribution_text": feedback["attribution_text"],
+            **feedback3,
             "debug": {
                 "entry_close_found": status["entry_close_found"],
                 "as_of_close_found": status["as_of_close_found"],
@@ -1098,6 +1215,10 @@ def build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, 
     """构建统一结果结构"""
     total = len(records)
     summary = build_summary(total, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons)
+    summary["distinct_stock_count"] = len({
+        str(record.get("code", "")).strip()
+        for record in records if str(record.get("code", "")).strip()
+    })
     overall = aggregate_metrics(records, group_key=None)
     by_strategy = aggregate_metrics(records, group_key="strategy")
     by_layer = aggregate_metrics(records, group_key="watchlist_layer")
@@ -1140,6 +1261,12 @@ def save_evaluation_to_db(result):
     end_date = result.get("end_date") or ""
     signal_date = result.get("signal_date") or ""
     as_of_date = result.get("as_of_date", "") or ""
+    schema_version = result.get("evaluation_schema_version")
+    evaluation_phase = result.get("evaluation_phase")
+    run_as_of_date = result.get("run_as_of_date") or as_of_date
+    target_1d_date = result.get("target_1d_date")
+    target_3d_date = result.get("target_3d_date")
+    evaluation_run_id = result.get("run_id")
 
     try:
         cur = conn.cursor()
@@ -1154,7 +1281,10 @@ def save_evaluation_to_db(result):
                 avg_max_3d_return, avg_max_3d_drawdown,
                 confidence_level, conclusion_level,
                 layer_inversion_warning, risk_warning,
-                diagnostics_json, summary_json
+                diagnostics_json, summary_json,
+                evaluation_schema_version, evaluation_phase, run_as_of_date,
+                target_1d_date, target_3d_date, t1_frozen_at,
+                evaluation_run_id
             ) VALUES (
                 %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
@@ -1163,30 +1293,75 @@ def save_evaluation_to_db(result):
                 %s, %s,
                 %s, %s,
                 %s, %s,
-                %s, %s
+                %s, %s,
+                %s, %s, %s,
+                %s, %s, CASE WHEN %s = 't1' THEN NOW() ELSE NULL END,
+                %s
             )
             ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
             DO UPDATE SET
                 total_signals = EXCLUDED.total_signals,
                 eligible_1d = EXCLUDED.eligible_1d,
                 evaluated_1d = EXCLUDED.evaluated_1d,
-                eligible_3d = EXCLUDED.eligible_3d,
-                evaluated_3d = EXCLUDED.evaluated_3d,
+                eligible_3d = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.eligible_3d
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.eligible_3d ELSE EXCLUDED.eligible_3d END,
+                evaluated_3d = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.evaluated_3d
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.evaluated_3d ELSE EXCLUDED.evaluated_3d END,
                 coverage_1d = EXCLUDED.coverage_1d,
-                coverage_3d = EXCLUDED.coverage_3d,
+                coverage_3d = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.coverage_3d
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.coverage_3d ELSE EXCLUDED.coverage_3d END,
                 price_fetch_failed = EXCLUDED.price_fetch_failed,
                 avg_next_1d_return = EXCLUDED.avg_next_1d_return,
                 win_rate_1d = EXCLUDED.win_rate_1d,
-                avg_next_3d_return = EXCLUDED.avg_next_3d_return,
-                win_rate_3d = EXCLUDED.win_rate_3d,
-                avg_max_3d_return = EXCLUDED.avg_max_3d_return,
-                avg_max_3d_drawdown = EXCLUDED.avg_max_3d_drawdown,
+                avg_next_3d_return = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.avg_next_3d_return
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.avg_next_3d_return ELSE EXCLUDED.avg_next_3d_return END,
+                win_rate_3d = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.win_rate_3d
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.win_rate_3d ELSE EXCLUDED.win_rate_3d END,
+                avg_max_3d_return = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.avg_max_3d_return
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.avg_max_3d_return ELSE EXCLUDED.avg_max_3d_return END,
+                avg_max_3d_drawdown = CASE
+                    WHEN watchlist_evaluation_summary.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                    THEN EXCLUDED.avg_max_3d_drawdown
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                    THEN watchlist_evaluation_summary.avg_max_3d_drawdown ELSE EXCLUDED.avg_max_3d_drawdown END,
                 confidence_level = EXCLUDED.confidence_level,
                 conclusion_level = EXCLUDED.conclusion_level,
                 layer_inversion_warning = EXCLUDED.layer_inversion_warning,
                 risk_warning = EXCLUDED.risk_warning,
                 diagnostics_json = EXCLUDED.diagnostics_json,
                 summary_json = EXCLUDED.summary_json,
+                evaluation_schema_version = EXCLUDED.evaluation_schema_version,
+                evaluation_phase = CASE
+                    WHEN EXCLUDED.evaluation_phase = 't1'
+                         AND watchlist_evaluation_summary.t3_updated_at IS NOT NULL
+                    THEN watchlist_evaluation_summary.evaluation_phase
+                    ELSE EXCLUDED.evaluation_phase END,
+                run_as_of_date = EXCLUDED.run_as_of_date,
+                target_1d_date = EXCLUDED.target_1d_date,
+                target_3d_date = EXCLUDED.target_3d_date,
+                evaluation_run_id = COALESCE(
+                    EXCLUDED.evaluation_run_id,
+                    watchlist_evaluation_summary.evaluation_run_id
+                ),
+                t1_frozen_at = COALESCE(watchlist_evaluation_summary.t1_frozen_at, EXCLUDED.t1_frozen_at),
                 generated_at = NOW()
         """, (
             mode, start_date, end_date, signal_date, as_of_date,
@@ -1202,6 +1377,9 @@ def save_evaluation_to_db(result):
             diag.get("risk_diagnostics", {}).get("risk_warning", False),
             json.dumps(diag, ensure_ascii=False),
             json.dumps(summary, ensure_ascii=False),
+            schema_version, evaluation_phase, run_as_of_date,
+            target_1d_date, target_3d_date, evaluation_phase,
+            evaluation_run_id,
         ))
 
         # ── details ──
@@ -1214,49 +1392,110 @@ def save_evaluation_to_db(result):
             cur.execute("""
                 INSERT INTO watchlist_evaluation_result (
                     eval_mode, eval_start_date, eval_end_date, signal_trade_date, as_of_date,
-                    signal_key, code, name, strategy, watchlist_layer, risk_level,
+                    signal_key, signal_id, decision_id, evaluation_run_id,
+                    code, name, strategy, watchlist_layer, risk_level,
                     action_signal, entry_close,
                     next_1d_return, next_3d_return, max_3d_return, max_3d_drawdown,
                     is_mature_1d, is_mature_3d, price_status, missing_reason, verification_tag,
                     feedback_label, feedback_score, attribution_tags, attribution_text,
-                    confidence_level, conclusion_level
+                    confidence_level, conclusion_level,
+                    evaluation_schema_version, target_1d_date, target_3d_date,
+                    t1_evaluated_at,
+                    verification_tag_3d, feedback_label_3d, feedback_score_3d,
+                    attribution_tags_3d, attribution_text_3d, t3_evaluated_at
                 ) VALUES (
                     %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s,
                     %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
-                    %s, %s
+                    %s, %s,
+                    %s, %s, %s,
+                    CASE WHEN %s = 't1' THEN NOW() ELSE NULL END,
+                    %s, %s, %s,
+                    %s, %s, CASE WHEN %s = 't3' THEN NOW() ELSE NULL END
                 )
                 ON CONFLICT (eval_mode, eval_start_date, eval_end_date, signal_trade_date, signal_key, as_of_date)
                 DO UPDATE SET
-                    entry_close = EXCLUDED.entry_close,
-                    next_1d_return = EXCLUDED.next_1d_return,
-                    next_3d_return = EXCLUDED.next_3d_return,
-                    max_3d_return = EXCLUDED.max_3d_return,
-                    max_3d_drawdown = EXCLUDED.max_3d_drawdown,
-                    is_mature_1d = EXCLUDED.is_mature_1d,
-                    is_mature_3d = EXCLUDED.is_mature_3d,
+                    signal_id = EXCLUDED.signal_id,
+                    decision_id = EXCLUDED.decision_id,
+                    evaluation_run_id = COALESCE(
+                        EXCLUDED.evaluation_run_id,
+                        watchlist_evaluation_result.evaluation_run_id
+                    ),
+                    entry_close = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.entry_close
+                        ELSE COALESCE(watchlist_evaluation_result.entry_close, EXCLUDED.entry_close) END,
+                    next_1d_return = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.next_1d_return
+                        ELSE COALESCE(watchlist_evaluation_result.next_1d_return, EXCLUDED.next_1d_return) END,
+                    next_3d_return = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.next_3d_return
+                        ELSE COALESCE(watchlist_evaluation_result.next_3d_return, EXCLUDED.next_3d_return) END,
+                    max_3d_return = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.max_3d_return
+                        ELSE COALESCE(watchlist_evaluation_result.max_3d_return, EXCLUDED.max_3d_return) END,
+                    max_3d_drawdown = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.max_3d_drawdown
+                        ELSE COALESCE(watchlist_evaluation_result.max_3d_drawdown, EXCLUDED.max_3d_drawdown) END,
+                    is_mature_1d = COALESCE(watchlist_evaluation_result.is_mature_1d, FALSE) OR EXCLUDED.is_mature_1d,
+                    is_mature_3d = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.is_mature_3d
+                        ELSE COALESCE(watchlist_evaluation_result.is_mature_3d, FALSE) OR EXCLUDED.is_mature_3d END,
                     price_status = EXCLUDED.price_status,
                     missing_reason = EXCLUDED.missing_reason,
-                    verification_tag = EXCLUDED.verification_tag,
-                    feedback_label = EXCLUDED.feedback_label,
-                    feedback_score = EXCLUDED.feedback_score,
-                    attribution_tags = EXCLUDED.attribution_tags,
-                    attribution_text = EXCLUDED.attribution_text,
+                    verification_tag = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.verification_tag
+                        ELSE COALESCE(watchlist_evaluation_result.verification_tag, EXCLUDED.verification_tag) END,
+                    feedback_label = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.feedback_label
+                        ELSE COALESCE(watchlist_evaluation_result.feedback_label, EXCLUDED.feedback_label) END,
+                    feedback_score = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.feedback_score
+                        ELSE COALESCE(watchlist_evaluation_result.feedback_score, EXCLUDED.feedback_score) END,
+                    attribution_tags = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.attribution_tags
+                        ELSE COALESCE(watchlist_evaluation_result.attribution_tags, EXCLUDED.attribution_tags) END,
+                    attribution_text = CASE
+                        WHEN watchlist_evaluation_result.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+                        THEN EXCLUDED.attribution_text
+                        ELSE COALESCE(watchlist_evaluation_result.attribution_text, EXCLUDED.attribution_text) END,
                     confidence_level = EXCLUDED.confidence_level,
                     conclusion_level = EXCLUDED.conclusion_level,
+                    evaluation_schema_version = EXCLUDED.evaluation_schema_version,
+                    target_1d_date = EXCLUDED.target_1d_date,
+                    target_3d_date = EXCLUDED.target_3d_date,
+                    t1_evaluated_at = COALESCE(watchlist_evaluation_result.t1_evaluated_at, EXCLUDED.t1_evaluated_at),
+                    verification_tag_3d = COALESCE(watchlist_evaluation_result.verification_tag_3d, EXCLUDED.verification_tag_3d),
+                    feedback_label_3d = COALESCE(watchlist_evaluation_result.feedback_label_3d, EXCLUDED.feedback_label_3d),
+                    feedback_score_3d = COALESCE(watchlist_evaluation_result.feedback_score_3d, EXCLUDED.feedback_score_3d),
+                    attribution_tags_3d = COALESCE(watchlist_evaluation_result.attribution_tags_3d, EXCLUDED.attribution_tags_3d),
+                    attribution_text_3d = COALESCE(watchlist_evaluation_result.attribution_text_3d, EXCLUDED.attribution_text_3d),
+                    t3_evaluated_at = COALESCE(watchlist_evaluation_result.t3_evaluated_at, EXCLUDED.t3_evaluated_at),
                     evaluated_at = NOW()
             """, (
                 mode, start_date, end_date, detail["trade_date"], as_of_date,
-                detail["signal_key"], detail["code"], detail["name"],
+                detail["signal_key"], detail["signal_id"], detail.get("decision_id"),
+                result.get("run_id"),
+                detail["code"], detail["name"],
                 detail["strategy"], detail["watchlist_layer"], detail["risk_level"],
                 detail.get("action_signal") or detail.get("watchlist_layer"),
                 metrics.get("entry_close"),
                 metrics.get("next_1d_return"), metrics.get("next_3d_return"),
                 metrics.get("max_3d_return"), metrics.get("max_3d_drawdown"),
-                status.get("evaluated_1d", False), status.get("evaluated_3d", False),
+                status.get("eligible_1d", False), status.get("eligible_3d", False),
                 "ok" if detail.get("metrics") else "missing",
                 missing_reason,
                 detail.get("verification_tag"),
@@ -1265,6 +1504,16 @@ def save_evaluation_to_db(result):
                 json.dumps(detail.get("attribution_tags") or [], ensure_ascii=False),
                 detail.get("attribution_text"),
                 diag.get("confidence_level"), diag.get("conclusion_level"),
+                schema_version,
+                status.get("target_1d_date") or target_1d_date,
+                status.get("target_3d_date") or target_3d_date,
+                evaluation_phase,
+                detail.get("verification_tag_3d"),
+                detail.get("feedback_label_3d"),
+                detail.get("feedback_score_3d"),
+                json.dumps(detail.get("attribution_tags_3d") or [], ensure_ascii=False),
+                detail.get("attribution_text_3d"),
+                evaluation_phase,
             ))
 
         conn.commit()
@@ -1292,6 +1541,7 @@ def main():
     args = parser.parse_args()
 
     as_of_date = args.as_of if args.as_of else datetime.now().strftime("%Y%m%d")
+    evaluation_run_id = str(uuid.uuid4())
 
     if not DATABASE_DSN:
         print("[ERROR] DATABASE_DSN 未配置")
@@ -1325,19 +1575,33 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
+        time_model = resolve_evaluation_horizons(args.signal_date, as_of_date)
+        if not time_model["t1_mature"]:
+            print(f"[ERROR] T+1 尚未成熟，目标交易日: {time_model['t1_date']}")
+            return
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(
+            signals,
+            as_of_date=as_of_date,
+            horizon="t1",
+        )
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 
         extra = {
             "signal_date": args.signal_date,
-            "as_of_date": as_of_date,
+            "as_of_date": time_model["t1_date"],
+            "run_as_of_date": as_of_date,
+            "target_1d_date": time_model["t1_date"],
+            "target_3d_date": time_model["t3_date"],
+            "evaluation_schema_version": EVALUATION_SCHEMA_VERSION,
+            "evaluation_phase": "t1",
+            "run_id": evaluation_run_id,
             "mode": "daily",
         }
         result = build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons, extra)
         markdown = build_daily_markdown(result)
 
-        suffix = f"{args.signal_date}_{as_of_date}"
+        suffix = f"{args.signal_date}_{time_model['t1_date']}"
         json_path = eval_dir / f"daily_watchlist_evaluation_{suffix}.json"
         md_path = eval_dir / f"daily_watchlist_evaluation_{suffix}.md"
 
@@ -1357,7 +1621,11 @@ def main():
             return
 
         print(f"读取信号: {len(signals)} 条")
-        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(signals, as_of_date=as_of_date)
+        records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons = evaluate_records(
+            signals,
+            as_of_date=as_of_date,
+            horizon="full",
+        )
         total = len(signals)
         print(f"评价完成: 总 {total}, 1d {evaluated_1d}, 3d {evaluated_3d}")
 
@@ -1366,6 +1634,7 @@ def main():
             "end_date": end_date,
             "as_of_date": as_of_date,
             "mode": "range",
+            "run_id": evaluation_run_id,
         }
         result = build_result(records, eligible_1d, eligible_3d, evaluated_1d, evaluated_3d, missing_reasons, extra)
         markdown = build_range_markdown(result)

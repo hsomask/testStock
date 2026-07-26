@@ -53,9 +53,9 @@ def fetch_latest_summary(cur):
         "avg_next_1d_return, win_rate_1d, avg_next_3d_return, win_rate_3d, "
         "confidence_level, conclusion_level, layer_inversion_warning, risk_warning, "
         "diagnostics_json, summary_json, generated_at "
-        "FROM watchlist_evaluation_summary "
+        "FROM canonical_daily_evaluation_summary "
         "WHERE eval_mode = 'daily' "
-        "ORDER BY generated_at DESC LIMIT 1"
+        "ORDER BY signal_date DESC, as_of_date DESC LIMIT 1"
     )
     row = cur.fetchone()
     if not row:
@@ -79,7 +79,7 @@ def fetch_summary_by_date(cur, as_of_date):
         "avg_next_1d_return, win_rate_1d, avg_next_3d_return, win_rate_3d, "
         "confidence_level, conclusion_level, layer_inversion_warning, risk_warning, "
         "diagnostics_json, summary_json, generated_at "
-        "FROM watchlist_evaluation_summary "
+        "FROM canonical_daily_evaluation_summary "
         "WHERE eval_mode = 'daily' AND as_of_date = %s "
         "ORDER BY generated_at DESC LIMIT 1",
         (as_of_date,),
