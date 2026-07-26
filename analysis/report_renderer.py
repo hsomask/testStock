@@ -23,6 +23,16 @@ from analysis.report_insights import (
 from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
+def _decision_plans(trade_plan):
+    decision = (trade_plan or {}).get("decision") or {}
+    return decision.get("plans") or (trade_plan or {}).get("plans") or {}
+
+
+def _decision_counts(trade_plan):
+    decision = (trade_plan or {}).get("decision") or {}
+    return decision.get("summary") or (trade_plan or {}).get("summary") or {}
+
+
 def _get_context_section(report_context, name):
     if not isinstance(report_context, dict):
         return {}
@@ -296,43 +306,26 @@ def _render_snapshot_stocks(lines, td):
         lines.append("")
 
 
-def _dedup_tp_entries(items):
-    """trade_plan 条目按 name 去重，合并 strategy"""
-    if not items:
-        return items
-    seen = {}
-    for st in items:
-        key = st.get("name", st.get("code", ""))
-        if key in seen:
-            existing = seen[key]
-            s = st.get("strategy", "")
-            if s and s not in existing.get("strategy", ""):
-                existing["strategy"] = existing.get("strategy", "") + " / " + s
-        else:
-            seen[key] = dict(st)
-    return list(seen.values())
-
-
 def _short_text(value, max_len=36):
     text = str(value or "").replace("\n", "；").strip()
     return text if len(text) <= max_len else text[:max_len - 1] + "…"
 
 
 def _trading_mode(m_score, width, profit, weak_triggers, trade_plan):
+    decision = (trade_plan or {}).get("decision") or {}
+    mode = decision.get("mode") or {}
+    if mode.get("name"):
+        execution = decision.get("execution") or {}
+        return str(mode["name"]), str(
+            execution.get("summary") or mode.get("summary") or "按统一交易计划执行。"
+        )
     restrictions = trade_plan.get("market_restrictions", {}) if trade_plan else {}
-    pos_cap = restrictions.get("max_position_pct", 0)
-    allow_trade = restrictions.get("allow_real_trade", True)
-    profit_level = str(profit.get("level", ""))
-    green_ratio = width.get("green_ratio", 0)
-    adv_ratio = width.get("adv_ratio", 1)
-
-    if not allow_trade or pos_cap <= 0 or m_score < 45 or weak_triggers >= 3:
-        return "空仓", "亏钱效应或交易限制较强，今日不宜开新仓。"
-    if pos_cap <= 2 or green_ratio > 0.65 or adv_ratio < 0.5 or "弱" in profit_level:
-        return "防守", "市场宽度或赚钱效应偏弱，只看核心方向。"
-    if pos_cap <= 3 or weak_triggers >= 1 or green_ratio > 0.55:
-        return "试错", "有局部机会，但确认度不足，适合小仓观察。"
-    return "进攻", "市场环境相对可用，可围绕主线做分歧低吸。"
+    canonical = restrictions.get("trade_mode")
+    if canonical:
+        return str(canonical), str(
+            restrictions.get("trade_mode_summary") or "按统一交易计划执行。"
+        )
+    return "空仓", "缺少统一决策对象，按最保守模式展示。"
 
 
 def _mode_actions(mode):
@@ -465,10 +458,11 @@ def _high_risk_reason(stock):
 
 
 def _strategy_feedback_risk_lines(trade_plan, max_items=3):
-    if not trade_plan or not trade_plan.get("plans"):
+    plans = _decision_plans(trade_plan)
+    if not plans:
         return []
     by_strategy = {}
-    for items in trade_plan.get("plans", {}).values():
+    for items in plans.values():
         for st in items or []:
             status = st.get("feedback_status")
             if status not in ("weak", "blocked"):
@@ -540,7 +534,8 @@ def _feedback_summary(t1_data):
 
 
 def _correction_summary_lines(trade_plan):
-    if not trade_plan or not trade_plan.get("plans"):
+    plans = _decision_plans(trade_plan)
+    if not plans:
         return []
     counters = {
         "非今日主线": 0,
@@ -552,7 +547,7 @@ def _correction_summary_lines(trade_plan):
     downgraded = 0
     blocked = 0
     examples = []
-    for items in trade_plan.get("plans", {}).values():
+    for items in plans.values():
         for item in items or []:
             base = item.get("base_layer")
             final = item.get("final_layer")
@@ -650,6 +645,86 @@ def _board_stage_map(board_trend_summary):
             if info.cluster:
                 stage_map.setdefault(info.cluster, stage_map[name])
     return stage_map
+
+
+def _industry_ratio_frame(board_ratio_changes, window):
+    """Return the complete industry ratio-change frame when available."""
+    if not board_ratio_changes:
+        return pd.DataFrame()
+    full = board_ratio_changes.get(f"industry_ratio_{window}d_all")
+    if full is not None and not full.empty:
+        return full.copy()
+    frames = [
+        board_ratio_changes.get(f"industry_ratio_{window}d_up"),
+        board_ratio_changes.get(f"industry_ratio_{window}d_down"),
+    ]
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).drop_duplicates("board_name")
+
+
+def _industry_attention_statistics(board_ratio_changes):
+    """Report-only industry breadth and price-confirmation statistics."""
+    cycles = []
+    for window in (3, 5):
+        frame = _industry_ratio_frame(board_ratio_changes, window)
+        column = f"ratio_change_{window}d"
+        if frame.empty or column not in frame.columns:
+            continue
+        changes = pd.to_numeric(frame[column], errors="coerce").dropna()
+        rising = int((changes > 0).sum())
+        falling = int((changes < 0).sum())
+        total = rising + falling
+        expansion = rising / total if total else None
+        if expansion is None:
+            status = "数据不足"
+        elif expansion >= 0.55:
+            status = "关注扩散"
+        elif expansion <= 0.45:
+            status = "关注收缩"
+        else:
+            status = "相对均衡"
+        cycles.append({
+            "window": window,
+            "rising": rising,
+            "falling": falling,
+            "expansion": expansion,
+            "status": status,
+        })
+
+    structure = []
+    frame = _industry_ratio_frame(board_ratio_changes, 3)
+    if (
+        not frame.empty
+        and "ratio_change_3d" in frame.columns
+        and "pct_chg" in frame.columns
+    ):
+        change = pd.to_numeric(frame["ratio_change_3d"], errors="coerce")
+        price = pd.to_numeric(frame["pct_chg"], errors="coerce")
+        valid = change.notna() & price.notna() & change.ne(0) & price.ne(0)
+        change = change[valid]
+        price = price[valid]
+        rising_total = int((change > 0).sum())
+        falling_total = int((change < 0).sum())
+        cases = [
+            ("占比上升且上涨", int(((change > 0) & (price > 0)).sum()),
+             rising_total, "量价共振"),
+            ("占比上升但下跌", int(((change > 0) & (price < 0)).sum()),
+             rising_total, "放量走弱，辨别承接或抛压"),
+            ("占比下降且下跌", int(((change < 0) & (price < 0)).sum()),
+             falling_total, "关注退潮"),
+            ("占比下降但上涨", int(((change < 0) & (price > 0)).sum()),
+             falling_total, "缩量上涨，持续性待确认"),
+        ]
+        for label, count, denominator, reading in cases:
+            structure.append({
+                "label": label,
+                "count": count,
+                "ratio": count / denominator if denominator else None,
+                "reading": reading,
+            })
+    return {"cycles": cycles, "structure": structure}
 
 
 def _extract_observation_directions(board_ratio_changes):
@@ -1024,7 +1099,8 @@ def render_unified_report(
         lines.append("|------|------|")
         lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
         lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
-        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 昨日策略信号 | {td.get('total_signals', 0)}条 |")
+        lines.append(f"| 涉及股票 | {td.get('distinct_stock_count', 0)}只 |")
         lines.append(f"| 快照覆盖数量 | {td.get('snapshot_covered', 0)} |")
         lines.append(f"| 快照覆盖率 | {_fmt_pct(td.get('snapshot_coverage'))} |")
         if td.get('kline_coverage') is not None:
@@ -1052,7 +1128,8 @@ def render_unified_report(
         lines.append("|------|------|")
         lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
         lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
-        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 昨日策略信号 | {td.get('total_signals', 0)}条 |")
+        lines.append(f"| 涉及股票 | {td.get('distinct_stock_count', 0)}只 |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
         sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
@@ -1071,7 +1148,8 @@ def render_unified_report(
         lines.append("|------|------|")
         lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
         lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
-        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 昨日策略信号 | {td.get('total_signals', 0)}条 |")
+        lines.append(f"| 涉及股票 | {td.get('distinct_stock_count', 0)}只 |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
         sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
@@ -1104,7 +1182,8 @@ def render_unified_report(
         lines.append("|------|------|")
         lines.append(f"| 信号日期 | {td.get('signal_date', 'N/A')} |")
         lines.append(f"| 评价日期 | {td.get('as_of_date', 'N/A')} |")
-        lines.append(f"| 昨日观察池数量 | {td.get('total_signals', 0)} |")
+        lines.append(f"| 昨日策略信号 | {td.get('total_signals', 0)}条 |")
+        lines.append(f"| 涉及股票 | {td.get('distinct_stock_count', 0)}只 |")
         lines.append(f"| 实际评价数量 | {td.get('evaluated_1d', 0)} |")
         lines.append(f"| 1日覆盖率 | {_fmt_pct(td.get('coverage_1d'))} |")
         sample_status, sample_weight, sample_action = _learning_sample_status(td.get('coverage_1d'))
@@ -1237,39 +1316,35 @@ def render_unified_report(
                 lines.append(render_ratio_change_table(df, max_rows=5))
                 lines.append("")
 
-        # 概念表格 — 分流为产业概念 + 动态/风格标签
-        for ratio_key, label_prefix in [
-            ("concept_ratio_3d_up", "产业概念 3日流入"),
-            ("concept_ratio_3d_down", "产业概念 3日流出"),
-        ]:
-            df = board_ratio_changes.get(ratio_key)
-            if df is not None and not df.empty:
-                industrial = []
-                non_industrial = []
-                for _, row in df.iterrows():
-                    name = row.get("board_name", "")
-                    cat = classify_concept_label(str(name))
-                    if cat == "industrial":
-                        industrial.append(row)
-                    else:
-                        non_industrial.append(row)
+        attention = _industry_attention_statistics(board_ratio_changes)
+        if attention["cycles"]:
+            lines.append("### 行业关注度扩散")
+            lines.append("| 周期 | 成交占比上升 | 成交占比下降 | 扩散率 | 判断 |")
+            lines.append("|---|---:|---:|---:|---|")
+            for item in attention["cycles"]:
+                expansion = (
+                    f"{item['expansion']:.1%}"
+                    if item["expansion"] is not None else "-"
+                )
+                lines.append(
+                    f"| {item['window']}日 | {item['rising']} | "
+                    f"{item['falling']} | {expansion} | {item['status']} |"
+                )
+            lines.append("")
 
-                if industrial:
-                    lines.append(f"### {label_prefix} TOP5")
-                    lines.append("| 概念 | 涨幅 | 成交占比 | 变化 |")
-                    lines.append("|---|---|---|---|")
-                    for row in industrial[:5]:
-                        name = normalize_board_name(row.get("board_name", "-"))
-                        pct = fmt_pct(row.get("pct_chg", np.nan))
-                        ratio_today = row.get("ratio_today", np.nan)
-                        change = row.get("ratio_change_3d", row.get("ratio_change_5d", np.nan))
-                        ratio_str = f"{ratio_today * 100:.2f}%" if pd.notna(ratio_today) else "-"
-                        change_str = f"{change * 100:+.2f}个百分点" if pd.notna(change) else "-"
-                        lines.append(f"| {name} | {pct} | {ratio_str} | {change_str} |")
-                    lines.append("")
-                    if len(industrial) < 5:
-                        lines.append(f"> 过滤动态标签后，产业概念仅 {len(industrial)} 个，不强行补位。")
-                        lines.append("")
+        if attention["structure"]:
+            lines.append("### 行业量价结构")
+            lines.append("| 结构 | 行业数 | 对应方向占比 | 解读 |")
+            lines.append("|---|---:|---:|---|")
+            for item in attention["structure"]:
+                ratio = (
+                    f"{item['ratio']:.1%}" if item["ratio"] is not None else "-"
+                )
+                lines.append(
+                    f"| {item['label']} | {item['count']} | "
+                    f"{ratio} | {item['reading']} |"
+                )
+            lines.append("")
 
         if obs_main or receding:
             lines.append("### 资金流向结论")
@@ -1474,27 +1549,13 @@ def render_unified_report(
 
     # ── 以 trade_plan 为准 ──
     tp_display_counts = None
-    if trade_plan and trade_plan.get("plans"):
-        tp_plans = trade_plan["plans"]
-
-        # 先去重（节内）
-        low_buy = _dedup_tp_entries(tp_plans.get("候选低吸", []))
-        watch_only = _dedup_tp_entries(tp_plans.get("只观察", []))
-        cond_fail = _dedup_tp_entries(tp_plans.get("交易条件不满足", []))
-        high_risk = _dedup_tp_entries(tp_plans.get("高风险回避", []))
-        excluded = _dedup_tp_entries(tp_plans.get("不可交易过滤", []))
-
-        # 跨节互斥：不可交易过滤 > 高风险回避 > 交易条件不满足 > 只观察 > 候选低吸
-        def _tp_key(st):
-            return st.get("code", "") or st.get("name", "")
-        excluded_keys = {_tp_key(s) for s in excluded}
-        high_risk_keys = {_tp_key(s) for s in high_risk}
-        cond_fail_keys = {_tp_key(s) for s in cond_fail}
-        watch_keys = {_tp_key(s) for s in watch_only}
-        high_risk = [s for s in high_risk if _tp_key(s) not in excluded_keys]
-        cond_fail = [s for s in cond_fail if _tp_key(s) not in (excluded_keys | high_risk_keys)]
-        watch_only = [s for s in watch_only if _tp_key(s) not in (excluded_keys | high_risk_keys | cond_fail_keys)]
-        low_buy = [s for s in low_buy if _tp_key(s) not in (excluded_keys | high_risk_keys | cond_fail_keys | watch_keys)]
+    tp_plans = _decision_plans(trade_plan)
+    if tp_plans:
+        low_buy = [dict(item) for item in tp_plans.get("候选低吸", [])]
+        watch_only = [dict(item) for item in tp_plans.get("只观察", [])]
+        cond_fail = [dict(item) for item in tp_plans.get("交易条件不满足", [])]
+        high_risk = [dict(item) for item in tp_plans.get("高风险回避", [])]
+        excluded = [dict(item) for item in tp_plans.get("不可交易过滤", [])]
 
         for st in watch_only:
             st["display_role"] = assign_stock_role(st, st.get("strategy", ""), market, effective_themes)
@@ -1619,14 +1680,19 @@ def render_unified_report(
     # ══════════════════════════════════════
     if trade_plan:
         r = trade_plan.get("market_restrictions", {})
-        s = trade_plan.get("summary", {})
+        s = _decision_counts(trade_plan)
         lines.append("## 9. 交易计划摘要")
         lines.append("")
         if not r.get("allow_real_trade", True):
             lines.append("> 当前仅适合模拟观察，不建议实盘买入。")
             lines.append("")
-        if r.get("allow_real_trade", True):
-            lines.append(f"- 实盘：允许 | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        if r.get("execution_allowed", False):
+            lines.append(f"- 实盘：允许执行 | 总仓位：{r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
+        elif r.get("allow_real_trade", True):
+            lines.append(
+                f"- 市场环境：允许交易 | 当前执行：无合格候选，继续等待 | "
+                f"仓位上限：{r.get('max_position_pct',0)}成"
+            )
         else:
             lines.append(f"- 实盘：不建议开仓 | 模拟观察：最多 {r.get('max_position_pct',0)}成 | 单票：{r.get('single_stock_pct',0)}成")
         if tp_display_counts:

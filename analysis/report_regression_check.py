@@ -20,9 +20,10 @@ NON_INDUSTRIAL_TERMS = [
     "沪深300", "中证500", "中证1000",
     "大盘股", "中盘股", "小盘股",
     "大盘价值", "东方财富热股",
-    "昨日高振幅", "昨日涨停", "昨日连板",
+    "昨日高振幅", "昨日高换手", "昨日涨停", "昨日连板",
     "行业龙头", "题材股", "科技风格",
     "机构重仓", "QFII重仓",
+    "中报预增",
 ]
 
 FINANCE_CLUSTER_TERMS = [
@@ -99,6 +100,18 @@ def check_g_mainline_cluster_dedup(text):
     # 聚合后允许出现一个代表项，例如“金融/券商”或单个证券方向。
     if len(hits) > 1:
         failures.append(f"金融/券商主线重复展示: {'、'.join(hits)}")
+    return failures
+
+
+def check_h_concept_stats_replaced(text):
+    """H: 产业概念资金榜已替换为行业结构统计。"""
+    failures = []
+    for heading in ["产业概念 3日流入", "产业概念 3日流出"]:
+        if heading in text:
+            failures.append(f"旧统计区块仍存在: {heading}")
+    for heading in ["行业关注度扩散", "行业量价结构"]:
+        if heading not in text:
+            failures.append(f"新统计区块缺失: {heading}")
     return failures
 
 
@@ -217,6 +230,7 @@ def main():
         ("快照复盘不展示正式胜率", lambda: check_e_snapshot_no_official_rate(text)),
         ("邮件附件白名单", check_f_attachment_whitelist),
         ("主线簇去重", lambda: check_g_mainline_cluster_dedup(text)),
+        ("产业概念统计已替换", lambda: check_h_concept_stats_replaced(text)),
     ]
 
     for name, check_fn in checks:

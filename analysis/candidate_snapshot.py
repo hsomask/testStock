@@ -12,15 +12,29 @@ from analysis.correction_engine import (
     CORRECTION_ENGINE_VERSION,
     STRATEGY_FEEDBACK_VERSION,
 )
+from analysis.daily_decision import DAILY_DECISION_SCHEMA_VERSION
+from analysis.signal_identity import (
+    SIGNAL_ID_SCHEMA_VERSION,
+    build_decision_id,
+    build_signal_id,
+)
 from data.config import DATABASE_DSN
 
 
 logger = logging.getLogger(__name__)
+SNAPSHOT_SCHEMA_VERSION = "candidate_snapshot_v2"
 
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS candidate_feature_snapshot (
     id SERIAL PRIMARY KEY,
+    signal_id TEXT,
+    signal_schema_version TEXT,
+    source_run_id TEXT,
+    decision_id TEXT,
+    snapshot_schema_version TEXT,
+    decision_schema_version TEXT,
+    canonical_final_layer TEXT,
     trade_date DATE NOT NULL,
     code TEXT NOT NULL,
     name TEXT,
@@ -69,6 +83,21 @@ CREATE TABLE IF NOT EXISTS candidate_feature_snapshot (
 )
 """
 
+MIGRATE_TABLE_SQL = """
+ALTER TABLE candidate_feature_snapshot
+    ADD COLUMN IF NOT EXISTS signal_id TEXT,
+    ADD COLUMN IF NOT EXISTS signal_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS source_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS decision_id TEXT,
+    ADD COLUMN IF NOT EXISTS snapshot_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS decision_schema_version TEXT;
+ALTER TABLE candidate_feature_snapshot
+    ADD COLUMN IF NOT EXISTS canonical_final_layer TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_candidate_snapshot_signal_id
+    ON candidate_feature_snapshot(signal_id)
+    WHERE signal_id IS NOT NULL
+"""
+
 
 def _to_sql_date(date_text):
     text = str(date_text or "").strip().replace("-", "")
@@ -102,18 +131,15 @@ def _text(value):
 
 
 def _trade_mode(trade_plan):
+    decision = (trade_plan or {}).get("decision") or {}
+    mode = decision.get("mode") or {}
+    if mode.get("name"):
+        return str(mode["name"])
     restrictions = (trade_plan or {}).get("market_restrictions", {})
-    max_position = restrictions.get("max_position_pct", 0)
-    allow_trade = restrictions.get("allow_real_trade", True)
-    try:
-        max_position = float(max_position or 0)
-    except Exception:
-        max_position = 0
-    if not allow_trade and max_position <= 0:
-        return "空仓"
-    if max_position <= 1:
-        return "防守"
-    return "观察"
+    canonical = restrictions.get("trade_mode")
+    if canonical:
+        return str(canonical)
+    return "未知"
 
 
 def _build_selector_lookup(selector_result):
@@ -128,6 +154,23 @@ def _build_selector_lookup(selector_result):
             lookup[(code, str(pool_name))] = row
             lookup.setdefault((code, ""), row)
     return lookup
+
+
+def _expand_snapshot_plans(final_plans):
+    """Keep one final decision while preserving strategy-grain ML joins."""
+    snapshot_plans = {}
+    for rule_layer, items in (final_plans or {}).items():
+        expanded = []
+        for item in items or []:
+            strategies = item.get("matched_strategies") or [item.get("strategy")]
+            for strategy in strategies:
+                if not str(strategy or "").strip():
+                    continue
+                snapshot_item = dict(item)
+                snapshot_item["strategy"] = str(strategy)
+                expanded.append(snapshot_item)
+        snapshot_plans[rule_layer] = expanded
+    return snapshot_plans
 
 
 def _feature_json(plan_item, selector_row, context):
@@ -159,6 +202,7 @@ def _feature_json(plan_item, selector_row, context):
 def ensure_table(conn):
     cur = conn.cursor()
     cur.execute(CREATE_TABLE_SQL)
+    cur.execute(MIGRATE_TABLE_SQL)
     conn.commit()
     cur.close()
 
@@ -171,6 +215,7 @@ def save_candidate_feature_snapshot(
     sentiment,
     quality,
     db_conn=None,
+    source_run_id=None,
 ):
     """Save final trade_plan candidates as ML-ready feature snapshots."""
     if not DATABASE_DSN and db_conn is None:
@@ -197,16 +242,35 @@ def save_candidate_feature_snapshot(
             "correction_engine_version": CORRECTION_ENGINE_VERSION,
             "strategy_feedback_version": STRATEGY_FEEDBACK_VERSION,
             "context_feedback_version": CONTEXT_FEEDBACK_VERSION,
+            "signal_schema_version": SIGNAL_ID_SCHEMA_VERSION,
+            "snapshot_schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "decision_schema_version": (
+                ((trade_plan or {}).get("decision") or {}).get("schema_version")
+                or DAILY_DECISION_SCHEMA_VERSION
+            ),
+            "source_run_id": source_run_id,
         }
 
         cur = conn.cursor()
+        sql_trade_date = _to_sql_date(trade_date)
+        # A snapshot is the final daily decision, not an append-only copy of
+        # every intermediate strategy signal.
+        cur.execute(
+            "DELETE FROM candidate_feature_snapshot WHERE trade_date = %s",
+            (sql_trade_date,),
+        )
         written = 0
-        for rule_layer, items in (trade_plan or {}).get("plans", {}).items():
+        decision = (trade_plan or {}).get("decision") or {}
+        final_plans = decision.get("plans") or (trade_plan or {}).get("plans", {})
+        snapshot_plans = _expand_snapshot_plans(final_plans)
+        for rule_layer, items in snapshot_plans.items():
             for item in items or []:
                 code = str(item.get("code", ""))
                 strategy = str(item.get("strategy", ""))
                 if not code or not strategy:
                     continue
+                signal_id = build_signal_id(sql_trade_date, code, strategy)
+                decision_id = build_decision_id(sql_trade_date, code)
                 row = selector_lookup.get((code, strategy))
                 if row is None:
                     row = selector_lookup.get((code, ""))
@@ -215,6 +279,10 @@ def save_candidate_feature_snapshot(
                 cur.execute(
                     """
                     INSERT INTO candidate_feature_snapshot (
+                        signal_id, signal_schema_version, source_run_id,
+                        decision_id,
+                        snapshot_schema_version, decision_schema_version,
+                        canonical_final_layer,
                         trade_date, code, name, strategy, rule_layer, primary_direction,
                         market_status, market_score, trade_mode, position_cap,
                         sentiment_score, sentiment_stage, data_confidence,
@@ -226,6 +294,9 @@ def save_candidate_feature_snapshot(
                         strategy_feedback_win_rate_1d, strategy_feedback_failed_rate,
                         strategy_feedback_sample_count, feature_json, updated_at
                     ) VALUES (
+                        %s, %s, %s,
+                        %s,
+                        %s, %s, %s,
                         %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s,
                         %s, %s, %s,
@@ -239,6 +310,13 @@ def save_candidate_feature_snapshot(
                     )
                     ON CONFLICT (trade_date, code, strategy)
                     DO UPDATE SET
+                        signal_id = EXCLUDED.signal_id,
+                        signal_schema_version = EXCLUDED.signal_schema_version,
+                        source_run_id = EXCLUDED.source_run_id,
+                        decision_id = EXCLUDED.decision_id,
+                        snapshot_schema_version = EXCLUDED.snapshot_schema_version,
+                        decision_schema_version = EXCLUDED.decision_schema_version,
+                        canonical_final_layer = EXCLUDED.canonical_final_layer,
                         name = EXCLUDED.name,
                         rule_layer = EXCLUDED.rule_layer,
                         primary_direction = EXCLUDED.primary_direction,
@@ -275,7 +353,11 @@ def save_candidate_feature_snapshot(
                         updated_at = NOW()
                     """,
                     (
-                        _to_sql_date(trade_date), code, item.get("name"), strategy,
+                        signal_id, SIGNAL_ID_SCHEMA_VERSION, source_run_id,
+                        decision_id,
+                        SNAPSHOT_SCHEMA_VERSION, context["decision_schema_version"],
+                        rule_layer,
+                        sql_trade_date, code, item.get("name"), strategy,
                         rule_layer, item.get("primary_direction"),
                         context["market_status"], _num(context["market_score"]),
                         context["trade_mode"], _num(context["position_cap"]),

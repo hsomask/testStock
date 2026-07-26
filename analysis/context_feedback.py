@@ -32,7 +32,7 @@ def _sql_date(date_text):
     text = str(date_text or "").strip().replace("-", "")
     if len(text) != 8 or not text.isdigit():
         raise ValueError(f"invalid date: {date_text}")
-    return f"{text[:4]}-{text[4:6]}-{text[6:]}"
+    return text
 
 
 def _table_exists(cur, table_name):
@@ -111,6 +111,8 @@ def _load_rows(as_of_date, window_days):
             "candidate_feature_snapshot",
             "watchlist_evaluation_result",
             "watchlist_evaluation_summary",
+            "canonical_daily_evaluation_summary",
+            "canonical_daily_evaluation_result",
         ]
         missing = [name for name in required if not _table_exists(cur, name)]
         cur.close()
@@ -121,7 +123,7 @@ def _load_rows(as_of_date, window_days):
         sql = """
         WITH recent_dates AS (
             SELECT DISTINCT as_of_date
-            FROM watchlist_evaluation_summary
+            FROM canonical_daily_evaluation_summary
             WHERE eval_mode = 'daily'
               AND as_of_date <= %s
             ORDER BY as_of_date DESC
@@ -130,7 +132,7 @@ def _load_rows(as_of_date, window_days):
         latest_summary AS (
             SELECT DISTINCT ON (signal_date, as_of_date)
                 signal_date, as_of_date, coverage_1d, generated_at
-            FROM watchlist_evaluation_summary
+            FROM canonical_daily_evaluation_summary
             WHERE eval_mode = 'daily'
               AND as_of_date IN (SELECT as_of_date FROM recent_dates)
             ORDER BY signal_date, as_of_date, generated_at DESC
@@ -141,7 +143,7 @@ def _load_rows(as_of_date, window_days):
             c.strategy,
             c.primary_direction,
             c.market_status,
-            c.rule_layer,
+            c.canonical_final_layer AS rule_layer,
             c.feature_json #>> '{plan,direction_fit_score}' AS direction_fit_score,
             c.feature_json #>> '{plan,entry_quality}' AS entry_quality,
             r.next_1d_return,
@@ -150,12 +152,11 @@ def _load_rows(as_of_date, window_days):
         FROM candidate_feature_snapshot c
         JOIN latest_summary s
           ON s.signal_date = TO_CHAR(c.trade_date, 'YYYYMMDD')
-        JOIN watchlist_evaluation_result r
-          ON r.eval_mode = 'daily'
+        JOIN canonical_daily_evaluation_result r
+          ON r.signal_id = c.signal_id
+         AND r.eval_mode = 'daily'
          AND r.signal_trade_date = s.signal_date
          AND r.as_of_date = s.as_of_date
-         AND r.code = c.code
-         AND COALESCE(r.strategy, '') = COALESCE(c.strategy, '')
         WHERE r.next_1d_return IS NOT NULL
           AND COALESCE(r.price_status, 'ok') = 'ok'
         """

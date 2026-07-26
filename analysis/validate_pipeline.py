@@ -144,8 +144,7 @@ def main():
     files_to_check = [
         ("daily_summary", "daily_summary_{}.json"),
         ("trade_plan", "trade_plan_{}.json"),
-        ("小白版报告", "daily_report_{}.md"),
-        ("专业版报告", "daily_report_{}_pro.md"),
+        ("统一日报", "daily_report_{}.md"),
     ]
     for label, pattern in files_to_check:
         path = REPORTS_DIR / pattern.format(trade_date)
@@ -158,7 +157,7 @@ def main():
     print("\n9. 最近 job_run_log")
     cur.execute(
         "SELECT job_name, status, duration_seconds FROM job_run_log "
-        "WHERE trade_date=%s ORDER BY started_at DESC LIMIT 5",
+        "WHERE trade_date=%s ORDER BY started_at DESC LIMIT 1",
         (trade_date,)
     )
     jobs = cur.fetchall()

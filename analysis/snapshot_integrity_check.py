@@ -34,6 +34,14 @@ REQUIRED_CONTEXT_FIELDS = [
     "correction_engine_version",
 ]
 
+REQUIRED_IDENTITY_COLUMNS = [
+    "signal_id",
+    "signal_schema_version",
+    "snapshot_schema_version",
+    "decision_schema_version",
+    "canonical_final_layer",
+]
+
 
 def _sql_date(date_text):
     text = str(date_text or "").strip().replace("-", "")
@@ -73,6 +81,24 @@ def run_snapshot_integrity_check(date=None, save=True):
         total = int(cur.fetchone()[0] or 0)
 
         field_results = []
+        for field in REQUIRED_IDENTITY_COLUMNS:
+            cur.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM candidate_feature_snapshot
+                WHERE trade_date = %s
+                  AND NULLIF({field}, '') IS NOT NULL
+                """,
+                (sql_date,),
+            )
+            present = int(cur.fetchone()[0] or 0)
+            field_results.append({
+                "scope": "identity",
+                "field": field,
+                "present": present,
+                "missing": max(total - present, 0),
+                "coverage": present / total if total else 0,
+            })
         for scope, fields in (("plan", REQUIRED_PLAN_FIELDS), ("context", REQUIRED_CONTEXT_FIELDS)):
             for field in fields:
                 expr = _field_expr([scope, field])

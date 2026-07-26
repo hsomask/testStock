@@ -88,7 +88,11 @@ def run_checks():
 
     failures.append(_assert("主线低吸仍是候选", rows["主线低吸"][0] == "候选低吸", rows["主线低吸"]))
     failures.append(_assert("非主线被降级", rows["非主线"][0] == "只观察", rows["非主线"]))
-    failures.append(_assert("高位追强被降级", rows["高位追强"][0] == "只观察", rows["高位追强"]))
+    failures.append(_assert(
+        "接近涨停不进入低吸候选",
+        rows["高位追强"][0] == "交易条件不满足",
+        rows["高位追强"],
+    ))
     failures.append(_assert("高风险保持回避", rows["高风险"][0] == "高风险回避", rows["高风险"]))
     failures.append(_assert("不可交易保持过滤", rows["不可交易"][0] == "不可交易过滤", rows["不可交易"]))
 

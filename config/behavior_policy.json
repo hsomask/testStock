@@ -1,0 +1,20 @@
+{
+  "schema_version": "behavior_policy_v1",
+  "approved_at": "2026-07-25",
+  "approved_by": "user",
+  "accepted_changes": {
+    "board_aware_near_limit": {
+      "accepted": true,
+      "proximity": 0.9,
+      "definition": "ST 4.5%, main board 9%, ChiNext/STAR 18%, BSE 27%"
+    },
+    "canonical_market_facts": {
+      "accepted": true,
+      "required_invariant": "touched_count = sealed_count + failed_count"
+    },
+    "t1_t3_isolation": {
+      "accepted": true,
+      "definition": "T+1 decisions use T+1 facts only; T+3 is evaluated in independent fields"
+    }
+  }
+}

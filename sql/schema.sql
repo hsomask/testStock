@@ -75,6 +75,12 @@ CREATE TABLE IF NOT EXISTS data_quality_log (
 -- 记录每只观察池个股的风险等级和操作信号
 CREATE TABLE IF NOT EXISTS stock_signal (
     id SERIAL PRIMARY KEY,
+    signal_id TEXT,
+    signal_schema_version TEXT,
+    source_run_id TEXT,
+    decision_id TEXT,
+    decision_schema_version TEXT,
+    final_decision_layer TEXT,
     trade_date DATE NOT NULL,
     code VARCHAR(20) NOT NULL,
     name VARCHAR(100),
@@ -101,14 +107,33 @@ CREATE TABLE IF NOT EXISTS stock_signal (
     entry_reasons TEXT,
     risk_reasons TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (trade_date, code, strategy)
 );
+
+ALTER TABLE stock_signal
+    ADD COLUMN IF NOT EXISTS signal_id TEXT,
+    ADD COLUMN IF NOT EXISTS signal_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS source_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS decision_id TEXT,
+    ADD COLUMN IF NOT EXISTS decision_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS final_decision_layer TEXT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_signal_signal_id
+    ON stock_signal(signal_id)
+    WHERE signal_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_stock_signal_decision_id
+    ON stock_signal(decision_id);
 
 
 -- 任务运行日志表
 -- 记录每次 job 的运行状态、耗时、错误信息
 CREATE TABLE IF NOT EXISTS job_run_log (
     id SERIAL PRIMARY KEY,
+    run_id TEXT,
+    run_schema_version TEXT,
     job_name VARCHAR(100) NOT NULL,
     trade_date DATE,
     status VARCHAR(20) NOT NULL DEFAULT 'running',
@@ -117,6 +142,15 @@ CREATE TABLE IF NOT EXISTS job_run_log (
     duration_seconds NUMERIC,
     error_message TEXT
 );
+
+ALTER TABLE job_run_log
+    ADD COLUMN IF NOT EXISTS run_id TEXT,
+    ADD COLUMN IF NOT EXISTS run_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_run_id
+    ON job_run_log(run_id)
+    WHERE run_id IS NOT NULL;
 
 
 -- 确保 stock_signal 唯一约束存在（幂等）
@@ -241,6 +275,7 @@ CREATE TABLE IF NOT EXISTS limitup_daily_stats (
 -- 追踪 stock_signal 中每条信号的后续表现
 CREATE TABLE IF NOT EXISTS signal_performance (
     id SERIAL PRIMARY KEY,
+    signal_id TEXT,
     trade_date DATE NOT NULL,
     code VARCHAR(20) NOT NULL,
     name VARCHAR(100),
@@ -265,6 +300,12 @@ CREATE TABLE IF NOT EXISTS signal_performance (
     UNIQUE (trade_date, code, strategy)
 );
 
+ALTER TABLE signal_performance
+    ADD COLUMN IF NOT EXISTS signal_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_signal_performance_signal_id
+    ON signal_performance(signal_id);
+
 
 -- 观察池评价明细表
 -- 保存每条 signal 的评价结果，通过 upsert 可重复运行
@@ -278,6 +319,9 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_result (
     as_of_date TEXT,
 
     signal_key TEXT NOT NULL,
+    signal_id TEXT,
+    decision_id TEXT,
+    evaluation_run_id TEXT,
     code TEXT NOT NULL,
     name TEXT,
     strategy TEXT,
@@ -317,6 +361,30 @@ ALTER TABLE watchlist_evaluation_result
     ADD COLUMN IF NOT EXISTS feedback_score NUMERIC,
     ADD COLUMN IF NOT EXISTS attribution_tags JSONB,
     ADD COLUMN IF NOT EXISTS attribution_text TEXT;
+
+ALTER TABLE watchlist_evaluation_result
+    ADD COLUMN IF NOT EXISTS signal_id TEXT,
+    ADD COLUMN IF NOT EXISTS decision_id TEXT,
+    ADD COLUMN IF NOT EXISTS evaluation_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS t3_run_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_watchlist_evaluation_signal_id
+    ON watchlist_evaluation_result(signal_id);
+
+-- Evaluation lifecycle v2: T+1 is frozen; T+3 is an independent maturity patch.
+ALTER TABLE watchlist_evaluation_result
+    ADD COLUMN IF NOT EXISTS evaluation_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS target_1d_date TEXT,
+    ADD COLUMN IF NOT EXISTS target_3d_date TEXT,
+    ADD COLUMN IF NOT EXISTS t1_evaluated_at TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS t3_evaluated_at TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS t3_price_status TEXT,
+    ADD COLUMN IF NOT EXISTS t3_missing_reason TEXT,
+    ADD COLUMN IF NOT EXISTS verification_tag_3d TEXT,
+    ADD COLUMN IF NOT EXISTS feedback_label_3d TEXT,
+    ADD COLUMN IF NOT EXISTS feedback_score_3d NUMERIC,
+    ADD COLUMN IF NOT EXISTS attribution_tags_3d JSONB,
+    ADD COLUMN IF NOT EXISTS attribution_text_3d TEXT;
 
 
 -- 迁移旧唯一键（幂等）
@@ -382,6 +450,44 @@ CREATE TABLE IF NOT EXISTS watchlist_evaluation_summary (
     UNIQUE (eval_mode, eval_start_date, eval_end_date, signal_date, as_of_date)
 );
 
+ALTER TABLE watchlist_evaluation_summary
+    ADD COLUMN IF NOT EXISTS evaluation_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS evaluation_phase TEXT,
+    ADD COLUMN IF NOT EXISTS run_as_of_date TEXT,
+    ADD COLUMN IF NOT EXISTS target_1d_date TEXT,
+    ADD COLUMN IF NOT EXISTS target_3d_date TEXT,
+    ADD COLUMN IF NOT EXISTS t1_frozen_at TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS t3_updated_at TIMESTAMP,
+    ADD COLUMN IF NOT EXISTS evaluation_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS t3_run_id TEXT;
+
+-- One lifecycle row per signal date. Prefer v2; legacy fallback uses the
+-- earliest T+1 observation instead of a later time-travelled rerun.
+CREATE OR REPLACE VIEW canonical_daily_evaluation_summary AS
+SELECT DISTINCT ON (signal_date) *
+FROM watchlist_evaluation_summary
+WHERE eval_mode = 'daily'
+ORDER BY
+    signal_date,
+    CASE WHEN evaluation_schema_version = 'evaluation_v2' THEN 0 ELSE 1 END,
+    as_of_date ASC,
+    generated_at DESC;
+
+CREATE OR REPLACE VIEW canonical_daily_evaluation_result AS
+SELECT r.*
+FROM watchlist_evaluation_result r
+JOIN canonical_daily_evaluation_summary s
+  ON r.eval_mode = 'daily'
+ AND r.signal_trade_date = s.signal_date
+ AND r.as_of_date = s.as_of_date
+WHERE (
+    s.evaluation_schema_version = 'evaluation_v2'
+    AND r.evaluation_schema_version = 'evaluation_v2'
+) OR (
+    s.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+    AND r.evaluation_schema_version IS DISTINCT FROM 'evaluation_v2'
+);
+
 
 -- 策略反馈滚动统计表
 -- 基于 watchlist_evaluation_result 聚合最近 N 个交易日的策略表现
@@ -409,6 +515,13 @@ CREATE TABLE IF NOT EXISTS strategy_feedback_stats (
 -- 保存日报生成当下的最终 trade_plan 分层和候选特征，用于后续旁路机器学习训练。
 CREATE TABLE IF NOT EXISTS candidate_feature_snapshot (
     id SERIAL PRIMARY KEY,
+    signal_id TEXT,
+    signal_schema_version TEXT,
+    source_run_id TEXT,
+    decision_id TEXT,
+    snapshot_schema_version TEXT,
+    decision_schema_version TEXT,
+    canonical_final_layer TEXT,
     trade_date DATE NOT NULL,
     code TEXT NOT NULL,
     name TEXT,
@@ -455,3 +568,50 @@ CREATE TABLE IF NOT EXISTS candidate_feature_snapshot (
     updated_at TIMESTAMP DEFAULT NOW(),
     UNIQUE (trade_date, code, strategy)
 );
+
+ALTER TABLE candidate_feature_snapshot
+    ADD COLUMN IF NOT EXISTS signal_id TEXT,
+    ADD COLUMN IF NOT EXISTS signal_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS source_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS decision_id TEXT,
+    ADD COLUMN IF NOT EXISTS snapshot_schema_version TEXT,
+    ADD COLUMN IF NOT EXISTS decision_schema_version TEXT;
+ALTER TABLE candidate_feature_snapshot
+    ADD COLUMN IF NOT EXISTS canonical_final_layer TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_candidate_snapshot_signal_id
+    ON candidate_feature_snapshot(signal_id)
+    WHERE signal_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_candidate_snapshot_decision_id
+    ON candidate_feature_snapshot(decision_id);
+
+-- Canonical strategy-grain lineage. Historical gaps remain visible as NULL
+-- snapshot/evaluation ids; they are never filled with hindsight features.
+CREATE OR REPLACE VIEW canonical_signal_lineage AS
+SELECT
+    s.signal_id,
+    s.signal_schema_version,
+    s.source_run_id,
+    s.trade_date,
+    s.code,
+    s.name,
+    s.strategy,
+    s.id AS stock_signal_row_id,
+    c.id AS snapshot_row_id,
+    c.rule_layer,
+    c.snapshot_schema_version,
+    c.decision_schema_version,
+    r.id AS evaluation_row_id,
+    r.as_of_date AS evaluation_as_of_date,
+    r.evaluation_schema_version,
+    s.decision_id,
+    s.decision_schema_version AS stock_decision_schema_version,
+    s.final_decision_layer,
+    c.canonical_final_layer
+FROM stock_signal s
+LEFT JOIN candidate_feature_snapshot c
+  ON c.signal_id = s.signal_id
+LEFT JOIN canonical_daily_evaluation_result r
+  ON r.signal_id = s.signal_id
+WHERE s.signal_id IS NOT NULL;

@@ -15,6 +15,8 @@ from analysis.correction_engine import (
     load_strategy_feedback,
     terminal_decision,
 )
+from analysis.daily_decision import build_daily_decision
+from analysis.limitup_metrics import is_near_limit_up
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
@@ -92,10 +94,11 @@ def _classify_stock(row):
         trade_issues.append(f"量比{vr:.1f}≥10")
     if pd.notna(turnover) and turnover >= 30:
         trade_issues.append(f"换手率{turnover:.0f}%≥30")
-    # 接近涨停判断：20cm板(300/301/688)用19%，主板用9.5%
-    is_20cm = str(row.get("code", "")).startswith(("300", "301", "688"))
-    limit_like = 19 if is_20cm else 9.5
-    if pd.notna(today_pct) and today_pct >= limit_like:
+    if pd.notna(today_pct) and is_near_limit_up(
+        today_pct,
+        row.get("code", ""),
+        row.get("name", ""),
+    ):
         trade_issues.append(f"今日涨幅{today_pct:.1f}%接近涨停，不适合作为低吸候选")
 
     if trade_issues:
@@ -324,6 +327,17 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
                 "context_feedback_sample_count": context_item.get("sample_count") if context_item else None,
             })
 
+    decision = build_daily_decision(market_result, restrictions, plans)
+    plans = decision["plans"]
+    mode = decision["mode"]
+    execution = decision["execution"]
+    restrictions.update({
+        "trade_mode_code": mode["code"],
+        "trade_mode": mode["name"],
+        "trade_mode_summary": mode["summary"],
+        **execution,
+    })
+
     # 组装输出
     trade_plan = {
         "trade_date": trade_date,
@@ -339,15 +353,10 @@ def generate_trade_plan(trade_date, market_result, quality, themes,
             "sentiment_stage": market_result.get("status", ""),
         },
         "market_restrictions": restrictions,
+        "decision": decision,
         "entry_notes": _gen_entry_notes(),
         "plans": plans,
-        "summary": {
-            "候选低吸": len(plans["候选低吸"]),
-            "只观察": len(plans["只观察"]),
-            "交易条件不满足": len(plans["交易条件不满足"]),
-            "高风险回避": len(plans["高风险回避"]),
-            "不可交易过滤": len(plans["不可交易过滤"]),
-        },
+        "summary": decision["summary"],
     }
 
     return trade_plan
@@ -390,7 +399,8 @@ def _render_trade_plan_md(tp):
     lines.append("")
 
     # 各分类
-    for category, stocks in tp["plans"].items():
+    plans = (tp.get("decision") or {}).get("plans") or tp.get("plans") or {}
+    for category, stocks in plans.items():
         lines.append(f"## {category}（{len(stocks)}只）")
         if not stocks:
             lines.append("暂无")
@@ -407,7 +417,8 @@ def _render_trade_plan_md(tp):
 
     # 汇总
     lines.append("## 汇总")
-    for k, v in tp["summary"].items():
+    summary = (tp.get("decision") or {}).get("summary") or tp.get("summary") or {}
+    for k, v in summary.items():
         lines.append(f"- {k}：{v}只")
     lines.append("")
     lines.append("> 本计划仅用于辅助决策，不构成投资建议。市场有风险，投资需谨慎。")

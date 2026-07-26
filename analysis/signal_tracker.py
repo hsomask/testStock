@@ -54,7 +54,7 @@ def track_signals(lookback_days=10):
     # 读取过去 N 天的信号（trade_date 为 YYYYMMDD 格式 VARCHAR）
     start_date = (datetime.now() - timedelta(days=lookback_days + 5)).strftime("%Y%m%d")
     cur.execute(
-        "SELECT DISTINCT trade_date, code, name, strategy, close_price, risk_level, action_signal "
+        "SELECT DISTINCT signal_id, trade_date, code, name, strategy, close_price, risk_level, action_signal "
         "FROM stock_signal WHERE trade_date >= %s ORDER BY trade_date",
         (start_date,)
     )
@@ -67,7 +67,7 @@ def track_signals(lookback_days=10):
         return
 
     # 按代码分组去重
-    unique_codes = list(set(s[1] for s in signals))
+    unique_codes = list(set(s[2] for s in signals))
     print(f"追踪 {len(signals)} 条信号，{len(unique_codes)} 只股票")
 
     # 批量取历史K线
@@ -76,7 +76,7 @@ def track_signals(lookback_days=10):
     updated = 0
     skipped = 0
 
-    for trade_date, code, name, strategy, signal_close, risk_level, action_signal in signals:
+    for signal_id, trade_date, code, name, strategy, signal_close, risk_level, action_signal in signals:
         signal_close = float(signal_close) if signal_close else 0
         hist = hist_map.get(code)
         if hist is None or hist.empty:
@@ -136,8 +136,8 @@ def track_signals(lookback_days=10):
         hit_invalid = False
 
         cur.execute(
-            "SELECT pressure_price, invalid_price FROM stock_signal WHERE trade_date=%s AND code=%s AND strategy=%s",
-            (td_str, code, strategy)
+            "SELECT pressure_price, invalid_price FROM stock_signal WHERE signal_id=%s",
+            (signal_id,)
         )
         row = cur.fetchone()
         if row:
@@ -150,6 +150,7 @@ def track_signals(lookback_days=10):
         try:
             cur.execute("""
                 INSERT INTO signal_performance (
+                    signal_id,
                     trade_date, code, name, strategy,
                     signal_close, next_trade_date,
                     close_t1, close_t3, close_t5,
@@ -157,8 +158,9 @@ def track_signals(lookback_days=10):
                     max_high_5d, max_return_5d, min_low_5d, max_drawdown_5d,
                     risk_level, action_signal,
                     hit_pressure, hit_invalid
-                ) VALUES (%s,%s,%s,%s, %s,%s, %s,%s,%s, %s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+                ) VALUES (%s, %s,%s,%s,%s, %s,%s, %s,%s,%s, %s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
                 ON CONFLICT (trade_date, code, strategy) DO UPDATE SET
+                    signal_id=EXCLUDED.signal_id,
                     close_t1=EXCLUDED.close_t1, close_t3=EXCLUDED.close_t3, close_t5=EXCLUDED.close_t5,
                     return_t1=EXCLUDED.return_t1, return_t3=EXCLUDED.return_t3, return_t5=EXCLUDED.return_t5,
                     max_high_5d=EXCLUDED.max_high_5d, max_return_5d=EXCLUDED.max_return_5d,
@@ -166,6 +168,7 @@ def track_signals(lookback_days=10):
                     risk_level=EXCLUDED.risk_level, action_signal=EXCLUDED.action_signal,
                     hit_pressure=EXCLUDED.hit_pressure, hit_invalid=EXCLUDED.hit_invalid
             """, (
+                signal_id,
                 td_str, code, name, strategy, signal_close, next_td,
                 close_t1, close_t3, close_t5,
                 return_t1, return_t3, return_t5,
