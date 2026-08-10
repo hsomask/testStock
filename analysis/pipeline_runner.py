@@ -31,10 +31,9 @@ class Step:
 def daily_steps(trade_date):
     py = sys.executable
     return (
-        Step("daily_initial", ("bash", "entrypoint.sh"), timeout=5400),
-        Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), ("daily_initial",), timeout=3600, retries=1),
-        Step("report_rerender", (py, "-m", "analysis.daily_report", "--date", trade_date, "--mode", "both"), ("daily_initial",), timeout=3600),
-        Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("report_rerender",), timeout=900),
+        Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), timeout=3600, retries=1),
+        Step("daily_report", ("bash", "entrypoint.sh"), timeout=5400),
+        Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("daily_report",), timeout=900),
         Step("daily_reconcile", (py, "-m", "analysis.daily_reconciliation", "--days", "10", "--as-of", trade_date, "--apply"), retries=1, always_run=True, timeout=900),
     )
 
@@ -88,7 +87,23 @@ def _email_already_sent(trade_date):
         conn.close()
 
 
-def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, calendar_status_getter=None):
+def _pipeline_already_completed(trade_date):
+    if not DATABASE_DSN:
+        return False
+    import psycopg2
+    conn = psycopg2.connect(DATABASE_DSN)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM job_run_log WHERE trade_date=%s AND job_name='daily_pipeline' AND status IN ('success','deferred'))",
+            (f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",),
+        )
+        value = bool(cur.fetchone()[0]); cur.close(); return value
+    finally:
+        conn.close()
+
+
+def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, force=False, calendar_status_getter=None):
     steps = daily_steps(trade_date)
     validate_steps(steps)
     if dry_run:
@@ -96,6 +111,8 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, ca
     calendar_status = (calendar_status_getter or get_calendar_status)(trade_date)
     if calendar_status == "closed":
         return {"status": "skipped", "trade_date": trade_date, "reason": "non_trading_day", "steps": []}
+    if not force and _pipeline_already_completed(trade_date):
+        return {"status": "skipped", "trade_date": trade_date, "reason": "pipeline_already_completed", "steps": []}
     execute = executor or subprocess.run
     parent = start_task("daily_pipeline", trade_date, trigger_type="dag", required=True)
     statuses, details = {}, []
@@ -142,8 +159,9 @@ def main():
     parser.add_argument("--date", required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force-email", action="store_true")
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    result = run_daily(args.date.replace("-", "")[:8], dry_run=args.dry_run, force_email=args.force_email)
+    result = run_daily(args.date.replace("-", "")[:8], dry_run=args.dry_run, force_email=args.force_email, force=args.force)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if result["status"] == "failed": raise SystemExit(1)
 
