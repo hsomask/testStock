@@ -3,16 +3,25 @@ set -e
 
 TRADE_DATE=${TRADE_DATE:-$(date +%Y%m%d)}
 SEND_DAILY_EMAIL="${SEND_DAILY_EMAIL:-1}"
+echo "=== Initialize database schema ==="
+python -m analysis.init_db
+echo "=== Ensure persistent exchange calendar ==="
+python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
 echo "=== 日期：$TRADE_DATE ==="
 
-# 非交易日跳过全部流程
-python -c "from analysis.data_fetcher import is_trade_day; import sys; sys.exit(0 if is_trade_day('$TRADE_DATE') else 1)" || {
+# 日历检查退出码：0=开市，10=明确休市，20=日历不可用。
+set +e
+python -m analysis.trade_calendar_check --date "$TRADE_DATE"
+CALENDAR_STATUS=$?
+set -e
+if [ "$CALENDAR_STATUS" -eq 10 ]; then
     echo "$TRADE_DATE 非交易日，跳过全部任务"
     exit 0
-}
-
-echo "=== 初始化数据库 ==="
-python -m analysis.init_db
+fi
+if [ "$CALENDAR_STATUS" -ne 0 ]; then
+    echo "[ERROR] 无法确认 $TRADE_DATE 的交易日状态"
+    exit "$CALENDAR_STATUS"
+fi
 
 echo "=== 更新板块成交占比 ==="
 python -m analysis.board_history --date "$TRADE_DATE"

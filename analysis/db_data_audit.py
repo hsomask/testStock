@@ -12,7 +12,7 @@ from pathlib import Path
 import psycopg2
 
 from data.config import DATABASE_DSN, REPORT_DIR
-from analysis.data_fetcher import is_trade_day
+from analysis.trade_calendar import is_trade_day
 
 logger = logging.getLogger(__name__)
 

@@ -249,7 +249,8 @@ def main():
 
     # 确定发送日期并检查交易日
     from analysis.utils import to_ymd
-    from analysis.data_fetcher import get_trade_date, is_trade_day
+    from analysis.data_fetcher import get_trade_date
+    from analysis.trade_calendar import is_trade_day
 
     if args.date:
         date_str = to_ymd(args.date)

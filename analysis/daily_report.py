@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 from analysis.data_fetcher import (
     get_trade_date,
-    is_trade_day,
     fetch_stock_spot,
     fetch_index_spot,
     fetch_industry_boards,
@@ -67,6 +66,7 @@ from analysis.signal_identity import (
     build_decision_id,
     build_signal_id,
 )
+from analysis.trade_calendar import is_trade_day
 from data.config import DATABASE_DSN
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"

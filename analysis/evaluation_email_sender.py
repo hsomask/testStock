@@ -23,7 +23,7 @@ from data.config import (
     SMTP_PASSWORD,
     EMAIL_TO,
 )
-from analysis.data_fetcher import is_trade_day
+from analysis.trade_calendar import is_trade_day
 from data.config import REPORT_DIR
 
 logger = logging.getLogger(__name__)

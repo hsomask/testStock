@@ -179,3 +179,29 @@ python -m analysis.evaluation_query --mode daily --days 10
 - 下一步可进入第四阶段LLM旁路接入；LLM不得进入事实计算和最终决策主链。
 - 仍需在服务器dev环境跑一次完整 `evaluation_entrypoint.sh`，验证Linux部署入口。
 - 验证通过后再提交dev，不要直接在main开发。
+
+## 持久化交易日历（2026-08-10）
+
+- `exchange_calendar` 是 A 股交易日事实表，保存每个自然日的 `open/closed/unknown` 状态。
+- `exchange_calendar_sync_run` 保存同步批次、来源、覆盖区间和验证结果。
+- `analysis/trade_calendar.py` 是唯一运行时交易日入口；业务模块不再直接调用外部日历接口。
+- `analysis/trade_calendar_sync.py` 负责外部获取和原子同步，默认 dry-run，`--apply` 才写库。
+- 日报和 Evaluation 入口会在 schema 初始化后执行 `--ensure`，仅在权威未来覆盖不足时同步。
+- 生产环境保持 `TRADE_CALENDAR_ALLOW_WEEKDAY_FALLBACK=0`；日历未知时失败关闭，不按周一至周五猜测。
+- 首次同步范围为 2010-01-01 至 2027-09-14，其中权威状态覆盖到 2026-12-31，之后为 `unknown`。
+- 57个历史信号日与旧权威接口逐日比较，交易日及 T+1/T+2/T+3 差异为0。
+
+关键命令：
+
+```bash
+python -m analysis.trade_calendar_sync --start-year 2010 --future-days 400
+python -m analysis.trade_calendar_sync --start-year 2010 --future-days 400 --apply
+python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
+python -m analysis.trade_calendar_regression_check
+```
+
+建议服务器增加独立低频兜底同步：
+
+```cron
+10 2 * * 1 cd /root/stock-ai-system && flock -n /tmp/stock-calendar.lock timeout 900 docker compose run --rm --entrypoint python stock-report -m analysis.trade_calendar_sync --ensure --future-days 400 --apply >> logs/trade_calendar.log 2>&1
+```
