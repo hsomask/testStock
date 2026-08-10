@@ -4,57 +4,13 @@
 刷新策略：delete old + insert latest（空数据时保留旧映射）
 """
 import time
-import pandas as pd
 import psycopg2
-import requests
 
 from data.config import DATABASE_DSN
-
-
-def _fetch_em_paginated(fs_filter, fields, pz=100):
-    """使用 push2delay 分页获取 EastMoney 数据"""
-    s = requests.Session()
-    s.trust_env = False
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://quote.eastmoney.com/",
-    })
-    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    all_rows = []
-    page = 1
-    total = None
-    while True:
-        params = {"pn": str(page), "pz": str(pz), "po": "1", "np": "1",
-                  "fltt": "2", "invt": "2", "fid": "f3",
-                  "fs": fs_filter, "fields": fields}
-        resp = s.get(url, params=params, timeout=30)
-        data = resp.json()
-        if total is None:
-            total = data.get("data", {}).get("total", 0)
-        diff = data.get("data", {}).get("diff") or []
-        all_rows.extend(diff)
-        if len(all_rows) >= total:
-            break
-        page += 1
-    return pd.DataFrame(all_rows)
-
-
-def _get_board_list(board_type_label):
-    """获取行业或概念板块名称和代码列表"""
-    fs_filter = "m:90+t:2" if board_type_label == "行业" else "m:90+t:3"
-    df = _fetch_em_paginated(fs_filter, "f12,f14", pz=500)
-    if df.empty:
-        return []
-    return [(row["f12"], row["f14"]) for _, row in df.iterrows() if pd.notna(row.get("f14"))]
-
-
-def _get_board_cons(board_code):
-    """获取板块成分股"""
-    df = _fetch_em_paginated(f"b:{board_code}", "f12,f14", pz=500)
-    if df.empty:
-        return []
-    return [(str(row["f12"]).zfill(6), row.get("f14", "")) for _, row in df.iterrows()]
-
+from analysis.data_sources.eastmoney_board import (
+    fetch_board_constituents,
+    fetch_board_list,
+)
 
 def _refresh_board(conn, board_type_label, board_name, constituents):
     """刷新单个板块映射：delete old + insert latest。
@@ -104,7 +60,7 @@ def _refresh_board(conn, board_type_label, board_name, constituents):
         cur.close()
 
 
-def _map_boards(boards, board_type_label, cur, conn):
+def _map_boards(boards, board_type_label, conn):
     """遍历板块列表，逐个刷新成分股"""
     total_board_count = len(boards)
     refreshed = 0
@@ -115,10 +71,8 @@ def _map_boards(boards, board_type_label, cur, conn):
     start_time = time.time()
 
     for idx, (board_code, board_name) in enumerate(boards):
-        board_start = time.time()
-
         try:
-            cons = _get_board_cons(board_code)
+            cons = fetch_board_constituents(board_code)
         except Exception as e:
             print(f"  [{idx+1}/{total_board_count}] {board_name} — 获取成分股失败：{e}")
             failed += 1
@@ -165,45 +119,48 @@ def _map_boards(boards, board_type_label, cur, conn):
     return refreshed, empty_skipped, failed, total_deleted, total_inserted, elapsed
 
 
-def update_industry_stock_map(cur, conn):
-    boards = _get_board_list("行业")
+def update_industry_stock_map(conn):
+    boards = fetch_board_list("行业")
+    if not boards:
+        raise RuntimeError("industry board list is empty; existing mappings retained")
     print(f"行业板块列表：{len(boards)} 个")
-    return _map_boards(boards, "行业", cur, conn)
+    return _map_boards(boards, "行业", conn)
 
 
-def update_concept_stock_map(cur, conn):
-    boards = _get_board_list("概念")
+def update_concept_stock_map(conn):
+    boards = fetch_board_list("概念")
+    if not boards:
+        raise RuntimeError("concept board list is empty; existing mappings retained")
     print(f"概念板块列表：{len(boards)} 个")
-    return _map_boards(boards, "概念", cur, conn)
+    return _map_boards(boards, "概念", conn)
 
 
 def update_all_stock_board_map():
     if not DATABASE_DSN:
-        print("DATABASE_DSN 未配置")
-        return
+        raise RuntimeError("DATABASE_DSN is not configured")
 
     conn = psycopg2.connect(DATABASE_DSN)
-    cur = conn.cursor()
-
     overall_start = time.time()
+    scope_errors = []
 
     # 行业映射
     ind_result = None
     try:
-        ind_result = update_industry_stock_map(cur, conn)
+        ind_result = update_industry_stock_map(conn)
     except Exception as e:
         print(f"行业映射异常：{e}")
+        scope_errors.append(f"industry: {e}")
         ind_result = (0, 0, 0, 0, 0, 0)
 
     # 概念映射
     con_result = None
     try:
-        con_result = update_concept_stock_map(cur, conn)
+        con_result = update_concept_stock_map(conn)
     except Exception as e:
         print(f"概念映射异常：{e}")
+        scope_errors.append(f"concept: {e}")
         con_result = (0, 0, 0, 0, 0, 0)
 
-    cur.close()
     conn.close()
 
     # 汇总统计
@@ -226,6 +183,19 @@ def update_all_stock_board_map():
         print(f"  - 删除旧记录总数：{total_deleted}")
         print(f"  - 写入新记录总数：{total_inserted}")
         print(f"  - 总耗时：{mins} 分 {secs} 秒")
+
+        summary = {
+            "status": "failed" if scope_errors or total_failed else "success",
+            "refreshed": total_refreshed,
+            "empty_skipped": total_empty,
+            "failed": total_failed,
+            "deleted": total_deleted,
+            "inserted": total_inserted,
+            "scope_errors": scope_errors,
+        }
+        if summary["status"] == "failed":
+            raise RuntimeError(f"board mapping incomplete: {summary}")
+        return summary
 
 
 if __name__ == "__main__":

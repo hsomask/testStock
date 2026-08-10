@@ -9,7 +9,6 @@ from datetime import datetime
 
 import pandas as pd
 import psycopg2
-import akshare as ak
 from psycopg2.extras import execute_batch
 
 from analysis.data_fetcher import fetch_stock_spot

@@ -9,6 +9,8 @@ warnings.filterwarnings("ignore")
 
 from analysis.utils import safe_numeric
 from analysis.limitup_metrics import enrich_limitup_flags
+from analysis.data_sources.eastmoney import fetch_paginated as fetch_eastmoney_paginated
+from analysis.data_sources.kline import fetch_sina_history, fetch_tencent_history
 
 logger = logging.getLogger(__name__)
 
@@ -97,62 +99,38 @@ def _ensure_columns(df, required_cols):
 
 # ── 个股行情 ──
 
+def _validate_stock_spot_frame(frame, source: str, min_rows: int = 1000):
+    required = {"code", "name", "close", "pct_chg"}
+    if frame is None or not isinstance(frame, pd.DataFrame):
+        raise RuntimeError(f"{source} stock universe is not a DataFrame")
+    missing = sorted(required - set(frame.columns))
+    if missing:
+        raise RuntimeError(f"{source} stock universe missing columns: {missing}")
+    if len(frame) < min_rows:
+        raise RuntimeError(f"{source} stock universe too small: {len(frame)}")
+    return frame
+
+
 def fetch_stock_spot():
     """
     获取 A 股实时行情
     优先东方财富(全字段)，不可用时降级新浪(少部分字段)
     """
     if _check_eastmoney():
-        return _fetch_stock_spot_em()
-    return _fetch_stock_spot_sina()
+        try:
+            return _validate_stock_spot_frame(_fetch_stock_spot_em(), "EastMoney")
+        except Exception as exc:
+            logger.warning("EastMoney stock spot failed; falling back to Sina: %s", exc)
+    return _validate_stock_spot_frame(_fetch_stock_spot_sina(), "Sina")
 
 
 def _fetch_stock_spot_em():
     """东方财富通道：使用 push2delay 端点分页获取，字段最全"""
-    import requests as _req
-
-    s = _req.Session()
-    s.trust_env = False
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://quote.eastmoney.com/",
-    })
-
-    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    base_params = {
-        "pz": "100",
-        "po": "1",
-        "np": "1",
-        "fltt": "2",
-        "invt": "2",
-        "fid": "f3",
-        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-        "fields": "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f23",
-    }
-
-    all_rows = []
-    page = 1
-    total = None
-
-    while True:
-        params = {**base_params, "pn": str(page)}
-        resp = s.get(url, params=params, timeout=30)
-        data = resp.json()
-
-        if data.get("data") is None:
-            raise RuntimeError(f"EastMoney 接口返回异常：{resp.text[:200]}")
-
-        if total is None:
-            total = data["data"].get("total", 0)
-
-        diff = data["data"].get("diff") or []
-        all_rows.extend(diff)
-
-        if len(all_rows) >= total:
-            break
-        page += 1
-
-    df = pd.DataFrame(all_rows)
+    df = fetch_eastmoney_paginated(
+        "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+        "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f14,f15,f16,f17,f18,f20,f21,f23",
+        pz=100,
+    )
     if df.empty:
         raise RuntimeError("EastMoney 返回空数据")
 
@@ -309,43 +287,7 @@ def fetch_concept_boards():
 
 def _fetch_em_delay(fs_filter, fields, rename_map, numeric_cols, pz=100):
     """通用 EastMoney push2delay 分页获取"""
-    import requests as _req
-
-    s = _req.Session()
-    s.trust_env = False
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://quote.eastmoney.com/",
-    })
-
-    url = "https://push2delay.eastmoney.com/api/qt/clist/get"
-    all_rows = []
-    page = 1
-    total = None
-
-    while True:
-        params = {
-            "pn": str(page),
-            "pz": str(pz),
-            "po": "1",
-            "np": "1",
-            "fltt": "2",
-            "invt": "2",
-            "fid": "f3",
-            "fs": fs_filter,
-            "fields": fields,
-        }
-        resp = s.get(url, params=params, timeout=30)
-        data = resp.json()
-        if total is None:
-            total = data.get("data", {}).get("total", 0)
-        diff = data.get("data", {}).get("diff") or []
-        all_rows.extend(diff)
-        if len(all_rows) >= total:
-            break
-        page += 1
-
-    df = pd.DataFrame(all_rows)
+    df = fetch_eastmoney_paginated(fs_filter, fields, pz=pz)
     if df.empty:
         return df
 
@@ -403,72 +345,6 @@ def _fetch_boards_ths(board_type_label, fetch_fn):
 
 
 # ── 个股历史K线 ──
-
-def _history_session():
-    import requests as _req
-    s = _req.Session()
-    s.trust_env = False
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://finance.sina.com.cn/",
-    })
-    return s
-
-
-def _get_stock_history_sina(code: str, days: int = 80):
-    """新浪通道：直连 money.finance.sina.com.cn"""
-    try:
-        s = _history_session()
-        url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData"
-        r = s.get(url, params={"symbol": code, "scale": "240", "ma": "no", "datalen": str(days)}, timeout=15)
-        records = r.json()
-        if not records or not isinstance(records, list):
-            return pd.DataFrame()
-
-        df = pd.DataFrame(records)
-        rename_map = {
-            "day": "date", "open": "open", "close": "close",
-            "high": "high", "low": "low", "volume": "volume",
-        }
-        df = df.rename(columns=rename_map)
-        df = safe_numeric(df, ["open", "close", "high", "low", "volume"])
-        if "amount" not in df.columns:
-            df["amount"] = np.nan
-        if "pct_chg" not in df.columns:
-            df["pct_chg"] = np.nan
-        if "turnover" not in df.columns:
-            df["turnover"] = np.nan
-        return df
-    except Exception as e:
-        logger.debug(f"Sina 历史行情获取失败：{code}, {e}")
-        return pd.DataFrame()
-
-
-def _get_stock_history_tx(code: str, days: int = 80):
-    """腾讯通道：直连 web.ifzq.gtimg.cn"""
-    try:
-        s = _history_session()
-        url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-        r = s.get(url, params={"param": f"{code},day,,,{days},qfq"}, timeout=15)
-        data = r.json()
-        if data.get("code") != 0:
-            return pd.DataFrame()
-
-        # 从嵌套结构中提取数据
-        stock_data = data.get("data", {}).get(code, {})
-        klines = stock_data.get("qfqday") or stock_data.get("day") or []
-        if not klines:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(klines, columns=["date", "open", "close", "high", "low", "volume"])
-        df = safe_numeric(df, ["open", "close", "high", "low", "volume"])
-        df["amount"] = np.nan
-        df["pct_chg"] = np.nan
-        df["turnover"] = np.nan
-        return df
-    except Exception as e:
-        logger.debug(f"Tencent 历史行情获取失败：{code}, {e}")
-        return pd.DataFrame()
 
 
 _hist_db_conn = None
@@ -689,6 +565,61 @@ def _text_or_none(x):
     return str(x)
 
 
+_KLINE_REQUIRED_FIELDS = ("open", "close", "high", "low", "volume")
+
+
+def _kline_row_complete(row) -> bool:
+    """Return whether one cached row has the fields required by selectors."""
+    for field in _KLINE_REQUIRED_FIELDS:
+        value = row.get(field)
+        if value is None or pd.isna(value):
+            return False
+    return True
+
+
+def _target_dates_needing_refresh(db_df, target_date: str | None) -> set[str]:
+    """Identify a missing or incomplete expected K-line date."""
+    if not target_date:
+        return set()
+    if db_df is None or db_df.empty or "date" not in db_df.columns:
+        return {target_date}
+    target_rows = db_df[db_df["date"].astype(str).str[:10] == target_date]
+    if target_rows.empty or not any(_kline_row_complete(row) for _, row in target_rows.iterrows()):
+        return {target_date}
+    return set()
+
+
+def _validate_kline_conflicts(db_df, api_df) -> list[dict]:
+    """Report material OHLCV disagreements without overwriting complete cache rows."""
+    if db_df is None or db_df.empty or api_df is None or api_df.empty:
+        return []
+    if "date" not in db_df.columns or "date" not in api_df.columns:
+        return []
+
+    cached = db_df.copy()
+    fetched = api_df.copy()
+    cached["_date_key"] = cached["date"].astype(str).str[:10]
+    fetched["_date_key"] = fetched["date"].astype(str).str[:10]
+    cached = cached.drop_duplicates("_date_key", keep="last").set_index("_date_key")
+    fetched = fetched.drop_duplicates("_date_key", keep="last").set_index("_date_key")
+    conflicts = []
+    for date_key in sorted(set(cached.index) & set(fetched.index)):
+        old_row = cached.loc[date_key]
+        new_row = fetched.loc[date_key]
+        differing_fields = []
+        for field in _KLINE_REQUIRED_FIELDS:
+            old_value = pd.to_numeric(pd.Series([old_row.get(field)]), errors="coerce").iloc[0]
+            new_value = pd.to_numeric(pd.Series([new_row.get(field)]), errors="coerce").iloc[0]
+            if pd.isna(old_value) or pd.isna(new_value):
+                continue
+            tolerance = max(abs(float(old_value)), abs(float(new_value)), 1.0) * 1e-6
+            if abs(float(old_value) - float(new_value)) > tolerance:
+                differing_fields.append(field)
+        if differing_fields:
+            conflicts.append({"date": date_key, "fields": differing_fields})
+    return conflicts
+
+
 def get_stock_history(
     code: str,
     days: int = 80,
@@ -708,10 +639,14 @@ def get_stock_history(
         db_dates = set(db_df["date"].astype(str).str[:10].tolist())
     latest_db_date = max(db_dates) if db_dates else None
     fresh_cutoff = _latest_expected_cache_date() if require_fresh else None
+    refresh_dates = _target_dates_needing_refresh(db_df, fresh_cutoff)
 
     # 2. 如果 DB 已有足够且不陈旧的数据，直接返回
     has_enough_cache = len(db_dates) >= max(days - 3, 1)
-    is_fresh_enough = (not require_fresh) or (latest_db_date and latest_db_date >= fresh_cutoff)
+    is_fresh_enough = (
+        (not require_fresh)
+        or (latest_db_date and latest_db_date >= fresh_cutoff and not refresh_dates)
+    )
     if has_enough_cache and is_fresh_enough:
         return db_df.tail(days)
 
@@ -729,13 +664,13 @@ def get_stock_history(
 
     api_df = pd.DataFrame()
     for symbol in symbol_candidates:
-        api_df = _get_stock_history_sina(symbol, days)
+        api_df = fetch_sina_history(symbol, days)
         if not api_df.empty:
             break
 
     if api_df.empty:
         for symbol in symbol_candidates:
-            api_df = _get_stock_history_tx(symbol, days)
+            api_df = fetch_tencent_history(symbol, days)
             if not api_df.empty:
                 break
 
@@ -747,13 +682,34 @@ def get_stock_history(
     api_df["name"] = name
     api_df = enrich_limitup_flags(api_df)
     if "data_source" not in api_df.columns:
-        api_df["data_source"] = "get_stock_history"
+        api_df["data_source"] = "unknown_kline_provider"
 
-    # 4. 只保存 DB 中没有的新日期
+    conflicts = _validate_kline_conflicts(db_df, api_df)
+    if conflicts:
+        logger.warning(
+            "K-line source conflicts detected for %s: count=%s, sample=%s",
+            code,
+            len(conflicts),
+            conflicts[:3],
+        )
+
+    api_dates = set(api_df["date"].astype(str).str[:10].tolist())
+    replace_dates = refresh_dates & api_dates
+    unresolved_refresh_dates = refresh_dates - api_dates
+    if unresolved_refresh_dates:
+        logger.warning(
+            "K-line target refresh unresolved for %s: missing_from_provider=%s, source=%s",
+            code,
+            sorted(unresolved_refresh_dates),
+            api_df["data_source"].dropna().astype(str).unique().tolist(),
+        )
+
+    # 4. Save new dates and replace an incomplete target only when the API
+    # actually returned that same date.
     new_rows = []
     for _, row in api_df.iterrows():
         d = str(row["date"])[:10]
-        if d not in db_dates:
+        if d not in db_dates or d in replace_dates:
             new_rows.append(row)
     if new_rows:
         new_df = pd.DataFrame(new_rows)
@@ -761,7 +717,10 @@ def get_stock_history(
 
     # 5. 合并 DB + 新增，返回
     if not db_df.empty:
-        combined = pd.concat([db_df, api_df], ignore_index=True)
+        retained_db = db_df[
+            ~db_df["date"].astype(str).str[:10].isin(replace_dates)
+        ]
+        combined = pd.concat([retained_db, api_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["date"]).sort_values("date")
         return combined.tail(days)
     return api_df.tail(days)

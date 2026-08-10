@@ -8,7 +8,7 @@ from analysis.pipeline_runner import Step, daily_steps, run_daily, validate_step
 def main():
     steps = daily_steps("20260810")
     assert validate_steps(steps)
-    assert [s.name for s in steps] == ["daily_initial", "evaluation", "report_rerender", "daily_email", "daily_reconcile"]
+    assert [s.name for s in steps] == ["evaluation", "daily_report", "daily_email", "daily_reconcile"]
     assert run_daily("20260810", dry_run=True)["status"] == "dry_run"
     try:
         validate_steps((Step("a", ("x",), ("b",)), Step("b", ("x",), ("a",))))
@@ -17,12 +17,14 @@ def main():
         pass
     original_start, original_finish = runner.start_task, runner.finish_task
     original_email = runner._email_already_sent
+    original_completed = runner._pipeline_already_completed
     original_eval = runner._evaluation_status
     events = []
     try:
         runner.start_task = lambda name, *_a, **_k: {"run_id": name, "job_name": name}
         runner.finish_task = lambda run, status, **_k: events.append((run["job_name"], status)) or True
         runner._email_already_sent = lambda _date: False
+        runner._pipeline_already_completed = lambda _date: False
         runner._evaluation_status = lambda _date, code, _started=0: "deferred" if code == 0 else "failed"
         result = run_daily("20260810", executor=lambda *_a, **_k: SimpleNamespace(returncode=0), calendar_status_getter=lambda _d: "open")
         assert result["status"] == "deferred"
@@ -56,6 +58,7 @@ def main():
     finally:
         runner.start_task, runner.finish_task = original_start, original_finish
         runner._email_already_sent = original_email
+        runner._pipeline_already_completed = original_completed
         runner._evaluation_status = original_eval
     print("[OK] pipeline runner regression check")
 
