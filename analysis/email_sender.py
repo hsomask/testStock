@@ -237,7 +237,7 @@ def build_email_body_from_json(summary, report_path=None):
     return "\n".join(parts)
 
 
-def main():
+def _main():
     import argparse
     logging.basicConfig(
         level=logging.INFO,
@@ -259,7 +259,7 @@ def main():
 
     if not is_trade_day(date_str):
         print(f"[邮件] {date_str} 非交易日，跳过邮件推送")
-        return
+        return "skipped"
 
     if args.date:
         report_path = REPORTS_DIR / f"daily_report_{date_str}.md"
@@ -307,14 +307,14 @@ def main():
         print(f"[邮件] JSON 不存在，降级解析 Markdown：{report_path}")
     else:
         print("[邮件] 未找到任何报告，跳过推送")
-        return
+        return "skipped"
 
     # 日报邮件默认附件：主日报 + 板块趋势明细
     date_key = date_str.replace("-", "") if len(date_str) > 8 else date_str
 
     if not report_path or not Path(report_path).exists():
         print(f"[邮件] 主日报缺失：{report_path}，跳过发送")
-        return
+        return "skipped"
 
     attachments = [report_path]
 
@@ -348,6 +348,28 @@ def main():
         body += "\n\n---\n流程检查：pipeline_check JSON 未生成\n"
 
     send_email(subject, body, attachments)
+    return "success"
+
+
+def _requested_trade_date():
+    import sys
+    for index, value in enumerate(sys.argv[:-1]):
+        if value == "--date":
+            return sys.argv[index + 1].replace("-", "")[:8]
+    return None
+
+
+def main():
+    from analysis.task_ledger import finish_task, start_task
+
+    run = start_task("daily_email", _requested_trade_date(), trigger_type="direct")
+    try:
+        status = _main() or "success"
+    except Exception as exc:
+        finish_task(run, "failed", error_message=str(exc))
+        raise
+    finish_task(run, status)
+    return status
 
 
 if __name__ == "__main__":

@@ -10,7 +10,6 @@ A 股每日分析报告主入口
 import argparse
 import json
 import logging
-import uuid
 import time
 import warnings
 from datetime import datetime
@@ -34,6 +33,7 @@ from analysis.data_fetcher import (
 )
 from analysis.account_filter import filter_tradeable_stocks
 from analysis.trade_plan import generate_trade_plan, save_trade_plan
+from analysis.task_ledger import finish_task, start_task
 from analysis.data_sources.ths_hot import ths_hot_reasons_by_stock
 from analysis.context.report_context import build_report_context
 
@@ -394,48 +394,13 @@ def save_data_quality_log(trade_date, quality, data_status, db_conn=None):
 
 
 def log_job_start(job_name, trade_date):
-    """记录任务开始，返回数据库行和跨表 run_id。"""
-    conn = _get_db_conn()
-    if conn is None:
-        return None
-    run_id = str(uuid.uuid4())
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO job_run_log (
-            run_id, run_schema_version, job_name, trade_date, status
-        ) VALUES (%s, 'pipeline_run_v1', %s, %s, 'running')
-        RETURNING id
-        """,
-        (run_id, job_name, trade_date),
-    )
-    job_id = cur.fetchone()[0]
-    conn.commit()
-    cur.close()
-    conn.close()
-    return {"id": job_id, "run_id": run_id}
+    """兼容入口：统一委托给任务账本。"""
+    return start_task(job_name, trade_date, trigger_type="direct")
 
 
 def log_job_end(job_run, status="success", error_message=None):
-    """记录任务结束"""
-    if job_run is None:
-        return
-    job_id = job_run.get("id") if isinstance(job_run, dict) else job_run
-    conn = _get_db_conn()
-    if conn is None:
-        return
-    cur = conn.cursor()
-    cur.execute(
-        """UPDATE job_run_log
-           SET status = %s, finished_at = CURRENT_TIMESTAMP,
-               duration_seconds = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at)),
-               error_message = %s
-           WHERE id = %s""",
-        (status, error_message, job_id)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
+    """兼容入口：统一委托给任务账本。"""
+    return finish_task(job_run, status, error_message=error_message)
 
 
 def generate_report_mode(trade_date, mode, data_status, market_result,
