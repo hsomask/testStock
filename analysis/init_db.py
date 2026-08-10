@@ -19,6 +19,7 @@ TABLES = [
     "data_quality_log",
     "stock_signal",
     "job_run_log",
+    "daily_reconciliation",
     "exchange_calendar",
     "exchange_calendar_sync_run",
     "stock_hist_kline",

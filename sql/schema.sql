@@ -146,11 +146,43 @@ CREATE TABLE IF NOT EXISTS job_run_log (
 ALTER TABLE job_run_log
     ADD COLUMN IF NOT EXISTS run_id TEXT,
     ADD COLUMN IF NOT EXISTS run_schema_version TEXT,
-    ADD COLUMN IF NOT EXISTS metadata_json JSONB;
+    ADD COLUMN IF NOT EXISTS metadata_json JSONB,
+    ADD COLUMN IF NOT EXISTS parent_run_id TEXT,
+    ADD COLUMN IF NOT EXISTS trigger_type TEXT,
+    ADD COLUMN IF NOT EXISTS attempt_no INTEGER NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS idempotency_key TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_run_id
     ON job_run_log(run_id)
     WHERE run_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_job_run_log_trade_job_started
+    ON job_run_log(trade_date, job_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS daily_reconciliation (
+    trade_date DATE PRIMARY KEY,
+    as_of_date DATE NOT NULL,
+    calendar_status TEXT NOT NULL,
+    report_status TEXT NOT NULL,
+    signal_status TEXT NOT NULL,
+    snapshot_status TEXT NOT NULL,
+    kline_status TEXT NOT NULL,
+    kline_coverage NUMERIC,
+    evaluation_t1_status TEXT NOT NULL,
+    evaluation_t3_status TEXT NOT NULL,
+    email_status TEXT NOT NULL,
+    overall_status TEXT NOT NULL,
+    signal_count INTEGER NOT NULL DEFAULT 0,
+    snapshot_count INTEGER NOT NULL DEFAULT 0,
+    evaluation_count INTEGER NOT NULL DEFAULT 0,
+    report_count INTEGER NOT NULL DEFAULT 0,
+    missing_items_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    diagnostics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checked_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_reconciliation_status_date
+    ON daily_reconciliation(overall_status, trade_date DESC);
 
 
 -- A-share exchange calendar. Runtime date logic reads this table only;
