@@ -34,7 +34,14 @@ def daily_steps(trade_date):
         Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), timeout=3600, retries=1),
         Step("daily_report", ("bash", "entrypoint.sh"), timeout=5400),
         Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("daily_report",), timeout=900),
-        Step("daily_reconcile", (py, "-m", "analysis.daily_reconciliation", "--days", "10", "--as-of", trade_date, "--apply"), retries=1, always_run=True, timeout=900),
+        Step(
+            "daily_reconcile",
+            (py, "-m", "analysis.daily_reconciliation", "--days", "10", "--as-of", trade_date, "--apply"),
+            ("evaluation", "daily_report", "daily_email"),
+            retries=1,
+            always_run=True,
+            timeout=900,
+        ),
     )
 
 
