@@ -84,13 +84,10 @@ def _load_previous_pool(conn, trade_date):
 
 
 def _previous_trade_date(trade_date):
-    try:
-        cal = ak.tool_trade_date_hist_sina()
-        dates = pd.to_datetime(cal["trade_date"], errors="coerce").dropna().dt.strftime("%Y-%m-%d")
-        prev = [d for d in dates.tolist() if d < trade_date]
-        return max(prev) if prev else None
-    except Exception:
-        return None
+    from analysis.trade_calendar import previous_trade_day
+
+    value = previous_trade_day(trade_date)
+    return f"{value[:4]}-{value[4:6]}-{value[6:]}"
 
 
 def _limitup_status(row, consecutive):

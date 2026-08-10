@@ -153,6 +153,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_run_id
     WHERE run_id IS NOT NULL;
 
 
+-- A-share exchange calendar. Runtime date logic reads this table only;
+-- external calendar APIs are used by the sync command, not business modules.
+CREATE TABLE IF NOT EXISTS exchange_calendar (
+    exchange TEXT NOT NULL DEFAULT 'CN_A',
+    calendar_date DATE NOT NULL,
+    market_status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_version TEXT,
+    synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (exchange, calendar_date),
+    CHECK (market_status IN ('open', 'closed', 'unknown'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_calendar_open_date
+    ON exchange_calendar(exchange, calendar_date)
+    WHERE market_status = 'open';
+
+CREATE TABLE IF NOT EXISTS exchange_calendar_sync_run (
+    id BIGSERIAL PRIMARY KEY,
+    run_id TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    range_start DATE,
+    range_end DATE,
+    fetched_open_days INTEGER,
+    generated_days INTEGER,
+    status TEXT NOT NULL,
+    validation_json JSONB,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP
+);
+
+
 -- 确保 stock_signal 唯一约束存在（幂等）
 DO $$
 BEGIN

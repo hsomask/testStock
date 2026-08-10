@@ -33,6 +33,8 @@ REQUIRED_TABLES = [
     "data_quality_log",
     "stock_signal",
     "job_run_log",
+    "exchange_calendar",
+    "exchange_calendar_sync_run",
     "signal_performance",
 ]
 
@@ -97,6 +99,26 @@ def main():
             ok(f"{table} 存在")
         else:
             fail(f"{table} 不存在")
+
+    # Persistent exchange calendar must explicitly cover the requested date.
+    cur.execute(
+        """
+        SELECT market_status, source, synced_at
+        FROM exchange_calendar
+        WHERE exchange = 'CN_A' AND calendar_date = %s
+        """,
+        (trade_date,),
+    )
+    calendar_row = cur.fetchone()
+    if not calendar_row:
+        fail(f"exchange_calendar 未覆盖 {trade_date}")
+    elif calendar_row[0] == "unknown":
+        fail(f"exchange_calendar {trade_date} 仍为 unknown")
+    else:
+        ok(
+            f"exchange_calendar {trade_date}={calendar_row[0]} "
+            f"source={calendar_row[1]}"
+        )
 
     # 4. stock_board_map 数据
     print("\n4. stock_board_map")

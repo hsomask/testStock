@@ -19,7 +19,7 @@ from datetime import datetime
 import psycopg2
 
 from data.config import DATABASE_DSN
-from analysis.data_fetcher import is_trade_day
+from analysis.trade_calendar import is_trade_day
 from analysis.ensure_signal_kline_coverage import ensure_signal_kline_coverage
 from analysis.evaluation_time import resolve_evaluation_horizons
 

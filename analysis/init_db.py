@@ -19,6 +19,8 @@ TABLES = [
     "data_quality_log",
     "stock_signal",
     "job_run_log",
+    "exchange_calendar",
+    "exchange_calendar_sync_run",
     "stock_hist_kline",
     "limitup_stock_pool",
     "limitup_daily_stats",
@@ -36,7 +38,7 @@ def init_database():
         print("请在 .env 文件中设置 DATABASE_DSN=postgresql://user:pass@host:port/dbname")
         return
 
-    print(f"数据库地址：{DATABASE_DSN}")
+    print("数据库连接已配置")
 
     if not SCHEMA_SQL.exists():
         print(f"[错误] 未找到建表脚本：{SCHEMA_SQL}")

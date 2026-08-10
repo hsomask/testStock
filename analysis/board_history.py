@@ -223,7 +223,7 @@ def update_board_history(trade_date=None):
         logger.warning("DATABASE_DSN 未设置，数据库功能跳过")
         return
 
-    from analysis.data_fetcher import is_trade_day
+    from analysis.trade_calendar import is_trade_day
     if not is_trade_day(today_ymd):
         print(f"{today_ymd} 非交易日，跳过板块成交占比更新")
         return

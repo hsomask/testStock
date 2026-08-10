@@ -21,6 +21,8 @@ echo ""
 
 echo "[0/4] Ensure evaluation schema"
 python -m analysis.init_db
+echo "[0a/4] Ensure persistent exchange calendar"
+python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
 
 if [ "$EVAL_V2_BACKFILL_DAYS" -gt 0 ]; then
     echo "[0b/4] Rebuild legacy T+1 lifecycle rows"
