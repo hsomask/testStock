@@ -577,16 +577,52 @@ def _kline_row_complete(row) -> bool:
     return True
 
 
-def _target_dates_needing_refresh(db_df, target_date: str | None) -> set[str]:
-    """Identify a missing or incomplete expected K-line date."""
-    if not target_date:
+def _normalize_kline_dates(values) -> set[str]:
+    """Normalize optional compact/ISO date values for K-line identity checks."""
+    if not values:
+        return set()
+    if isinstance(values, (str, datetime)):
+        values = [values]
+    normalized = set()
+    for value in values:
+        if value is None:
+            continue
+        if hasattr(value, "strftime"):
+            normalized.add(value.strftime("%Y-%m-%d"))
+            continue
+        compact = str(value).strip().replace("-", "")[:8]
+        if len(compact) == 8 and compact.isdigit():
+            normalized.add(f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}")
+    return normalized
+
+
+def _target_dates_needing_refresh(db_df, target_dates) -> set[str]:
+    """Identify missing or incomplete expected K-line dates."""
+    target_dates = _normalize_kline_dates(target_dates)
+    if not target_dates:
         return set()
     if db_df is None or db_df.empty or "date" not in db_df.columns:
-        return {target_date}
-    target_rows = db_df[db_df["date"].astype(str).str[:10] == target_date]
-    if target_rows.empty or not any(_kline_row_complete(row) for _, row in target_rows.iterrows()):
-        return {target_date}
-    return set()
+        return target_dates
+    date_keys = db_df["date"].astype(str).str[:10]
+    missing = set()
+    for target_date in target_dates:
+        target_rows = db_df[date_keys == target_date]
+        if target_rows.empty or not any(_kline_row_complete(row) for _, row in target_rows.iterrows()):
+            missing.add(target_date)
+    return missing
+
+
+def _history_result(df, days: int, required_dates: set[str]):
+    """Keep legacy tail semantics while retaining explicitly requested dates."""
+    if df is None or df.empty or not required_dates or "date" not in df.columns:
+        return df.tail(days) if df is not None and not df.empty else df
+    tail = df.tail(days)
+    required = df[df["date"].astype(str).str[:10].isin(required_dates)]
+    return (
+        pd.concat([tail, required], ignore_index=True)
+        .drop_duplicates(subset=["date"], keep="last")
+        .sort_values("date")
+    )
 
 
 def _validate_kline_conflicts(db_df, api_df) -> list[dict]:
@@ -626,11 +662,13 @@ def get_stock_history(
     name: str = "",
     require_fresh: bool = True,
     allow_api: bool = True,
+    required_dates=None,
 ):
     """
     获取个股历史K线。优先从 DB 缓存读取，缺失时从 API 获取并自动入库。
     """
     code = str(code).strip()
+    required_dates = _normalize_kline_dates(required_dates)
 
     # 1. 先查 DB 缓存
     db_df = _get_hist_from_db(code, days)
@@ -639,7 +677,10 @@ def get_stock_history(
         db_dates = set(db_df["date"].astype(str).str[:10].tolist())
     latest_db_date = max(db_dates) if db_dates else None
     fresh_cutoff = _latest_expected_cache_date() if require_fresh else None
-    refresh_dates = _target_dates_needing_refresh(db_df, fresh_cutoff)
+    expected_dates = set(required_dates)
+    if fresh_cutoff:
+        expected_dates.add(fresh_cutoff)
+    refresh_dates = _target_dates_needing_refresh(db_df, expected_dates)
 
     # 2. 如果 DB 已有足够且不陈旧的数据，直接返回
     has_enough_cache = len(db_dates) >= max(days - 3, 1)
@@ -648,10 +689,10 @@ def get_stock_history(
         or (latest_db_date and latest_db_date >= fresh_cutoff and not refresh_dates)
     )
     if has_enough_cache and is_fresh_enough:
-        return db_df.tail(days)
+        return _history_result(db_df, days, required_dates)
 
     if not allow_api:
-        return db_df.tail(days) if not db_df.empty else pd.DataFrame()
+        return _history_result(db_df, days, required_dates) if not db_df.empty else pd.DataFrame()
 
     # 3. 从 API 获取
     symbol_candidates = [code]
@@ -664,14 +705,22 @@ def get_stock_history(
 
     api_df = pd.DataFrame()
     for symbol in symbol_candidates:
-        api_df = fetch_sina_history(symbol, days)
-        if not api_df.empty:
+        candidate = fetch_sina_history(symbol, days)
+        if not candidate.empty:
+            api_df = candidate
             break
 
-    if api_df.empty:
+    sina_dates = set(api_df["date"].astype(str).str[:10]) if not api_df.empty else set()
+    if api_df.empty or (refresh_dates and not refresh_dates.issubset(sina_dates)):
         for symbol in symbol_candidates:
-            api_df = fetch_tencent_history(symbol, days)
-            if not api_df.empty:
+            candidate = fetch_tencent_history(symbol, days)
+            if candidate.empty:
+                continue
+            candidate_dates = set(candidate["date"].astype(str).str[:10])
+            if api_df.empty or len(candidate_dates & refresh_dates) > len(sina_dates & refresh_dates):
+                api_df = candidate
+                sina_dates = candidate_dates
+            if not refresh_dates or refresh_dates.issubset(sina_dates):
                 break
 
     if api_df.empty:
@@ -722,8 +771,8 @@ def get_stock_history(
         ]
         combined = pd.concat([retained_db, api_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["date"]).sort_values("date")
-        return combined.tail(days)
-    return api_df.tail(days)
+        return _history_result(combined, days, required_dates)
+    return _history_result(api_df, days, required_dates)
 
 
 # ── 技术指标补充 ──

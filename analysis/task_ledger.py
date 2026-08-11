@@ -37,7 +37,7 @@ def start_task(
     *,
     parent_run_id=None,
     trigger_type="direct",
-    attempt_no=1,
+    attempt_no=None,
     idempotency_key=None,
     metadata=None,
     required=False,
@@ -48,6 +48,15 @@ def start_task(
     try:
         conn = _connect()
         cur = conn.cursor()
+        if attempt_no is None:
+            if idempotency_key:
+                cur.execute(
+                    "SELECT COALESCE(MAX(attempt_no), 0) + 1 FROM job_run_log WHERE idempotency_key=%s",
+                    (idempotency_key,),
+                )
+                attempt_no = int(cur.fetchone()[0])
+            else:
+                attempt_no = 1
         cur.execute(
             """
             INSERT INTO job_run_log (
@@ -66,7 +75,13 @@ def start_task(
         row_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
-        return {"id": row_id, "run_id": run_id, "job_name": job_name}
+        return {
+            "id": row_id,
+            "run_id": run_id,
+            "job_name": job_name,
+            "attempt_no": int(attempt_no),
+            "idempotency_key": idempotency_key,
+        }
     except Exception as exc:
         if conn is not None:
             conn.rollback()
@@ -115,6 +130,42 @@ def finish_task(task_run, status, *, error_message=None, metadata=None, required
             raise
         logger.warning("task ledger finish failed for %s: %s", task_run, exc)
         return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def fail_stale_pipeline_tasks(trade_date, stale_after_seconds=10800, required=False):
+    """Close abandoned DAG rows so a later invocation can retry truthfully."""
+    conn = None
+    try:
+        conn = _connect()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE job_run_log
+            SET status='failed', finished_at=CURRENT_TIMESTAMP,
+                duration_seconds=EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP-started_at)),
+                error_message=COALESCE(error_message, 'stale_running_recovered'),
+                metadata_json=COALESCE(metadata_json, '{}'::jsonb)
+                    || '{"recovered_stale": true}'::jsonb
+            WHERE trade_date=%s AND status='running'
+              AND (job_name='daily_pipeline' OR job_name LIKE 'pipeline_step:%%')
+              AND started_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+            """,
+            (trade_date, int(stale_after_seconds)),
+        )
+        updated = cur.rowcount
+        conn.commit()
+        cur.close()
+        return updated
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        if required:
+            raise
+        logger.exception("stale pipeline task recovery failed for %s", trade_date)
+        return 0
     finally:
         if conn is not None:
             conn.close()

@@ -3,10 +3,14 @@ set -e
 
 TRADE_DATE=${TRADE_DATE:-$(date +%Y%m%d)}
 SEND_DAILY_EMAIL="${SEND_DAILY_EMAIL:-1}"
-echo "=== Initialize database schema ==="
-python -m analysis.init_db
-echo "=== Ensure persistent exchange calendar ==="
-python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
+if [ "${PIPELINE_BOOTSTRAPPED:-0}" != "1" ]; then
+    echo "=== Initialize database schema ==="
+    python -m analysis.init_db
+    echo "=== Ensure persistent exchange calendar ==="
+    python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
+else
+    echo "=== Pipeline bootstrap already completed ==="
+fi
 echo "=== 日期：$TRADE_DATE ==="
 
 # 日历检查退出码：0=开市，10=明确休市，20=日历不可用。

@@ -403,6 +403,28 @@ def log_job_end(job_run, status="success", error_message=None):
     return finish_task(job_run, status, error_message=error_message)
 
 
+def _persist_daily_report(conn, trade_date, mode, report, confidence_score):
+    """Persist the canonical report for one date/mode without accumulating rerenders."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """INSERT INTO daily_report (
+                   trade_date, report_mode, report_type, content,
+                   confidence_score, created_at
+               )
+               VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+               ON CONFLICT (trade_date, report_mode, report_type)
+               DO UPDATE SET
+                   content = EXCLUDED.content,
+                   confidence_score = EXCLUDED.confidence_score,
+                   created_at = CURRENT_TIMESTAMP""",
+            (trade_date, mode, "daily", report, confidence_score),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
 def generate_report_mode(trade_date, mode, data_status, market_result,
                          industry_result, concept_result, sentiment_result,
                          selector_result, board_ratio_changes, quality, themes,
@@ -441,14 +463,13 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
     conn = _get_db_conn()
     if conn:
         try:
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO daily_report (trade_date, report_mode, report_type, content, confidence_score)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (trade_date, mode, "daily", report, quality["confidence_score"])
+            _persist_daily_report(
+                conn,
+                trade_date,
+                mode,
+                report,
+                quality["confidence_score"],
             )
-            conn.commit()
-            cur.close()
         except Exception as e:
             logger.exception(f"日报写入失败：{e}")
         finally:

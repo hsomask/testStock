@@ -62,7 +62,7 @@ def main():
         patch.object(data_fetcher, "_get_hist_from_db", return_value=incomplete),
         patch.object(data_fetcher, "_latest_expected_cache_date", return_value=TARGET_DATE),
         patch.object(data_fetcher, "fetch_sina_history", return_value=older_only),
-        patch.object(data_fetcher, "fetch_tencent_history", side_effect=AssertionError("fallback must not run")),
+        patch.object(data_fetcher, "fetch_tencent_history", return_value=pd.DataFrame()),
         patch.object(data_fetcher, "enrich_limitup_flags", side_effect=lambda frame: frame),
         patch.object(data_fetcher, "_save_hist_to_db", side_effect=lambda code, frame: saved_without_target.append(frame.copy())),
     ):
@@ -72,6 +72,20 @@ def main():
     target_row = unresolved_result[unresolved_result["date"] == TARGET_DATE].iloc[0]
     assert pd.isna(target_row["close"])
     assert all(TARGET_DATE not in frame["date"].astype(str).tolist() for frame in saved_without_target)
+
+    fallback_saved = []
+    tencent_target = pd.DataFrame([_row(close=10.4, source="tencent")])
+    with (
+        patch.object(data_fetcher, "_get_hist_from_db", return_value=incomplete),
+        patch.object(data_fetcher, "_latest_expected_cache_date", return_value=TARGET_DATE),
+        patch.object(data_fetcher, "fetch_sina_history", return_value=older_only),
+        patch.object(data_fetcher, "fetch_tencent_history", return_value=tencent_target),
+        patch.object(data_fetcher, "enrich_limitup_flags", side_effect=lambda frame: frame),
+        patch.object(data_fetcher, "_save_hist_to_db", side_effect=lambda code, frame: fallback_saved.append(frame.copy())),
+    ):
+        fallback_result = data_fetcher.get_stock_history("600000", days=5)
+    assert fallback_result[fallback_result["date"] == TARGET_DATE].iloc[0]["close"] == 10.4
+    assert fallback_saved[0].iloc[0]["data_source"] == "tencent"
 
     with (
         patch.object(data_fetcher, "_get_hist_from_db", return_value=complete),

@@ -51,6 +51,68 @@ CREATE TABLE IF NOT EXISTS daily_report (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Canonical daily reports are idempotent by date, mode and type. Normalize
+-- legacy NULL keys and retain only the newest row before adding the index.
+UPDATE daily_report
+SET report_mode = COALESCE(NULLIF(report_mode, ''), 'legacy'),
+    report_type = COALESCE(NULLIF(report_type, ''), 'daily')
+WHERE report_mode IS NULL OR report_mode = ''
+   OR report_type IS NULL OR report_type = '';
+
+CREATE TABLE IF NOT EXISTS daily_report_duplicate_archive (
+    archive_id BIGSERIAL PRIMARY KEY,
+    original_report_id INTEGER NOT NULL UNIQUE,
+    trade_date DATE,
+    report_mode VARCHAR(20),
+    report_type VARCHAR(50),
+    content TEXT,
+    confidence_score NUMERIC,
+    original_created_at TIMESTAMP,
+    archived_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    archive_reason TEXT NOT NULL DEFAULT 'canonical_key_duplicate'
+);
+
+WITH ranked_reports AS (
+    SELECT id, trade_date, report_mode, report_type, content,
+           confidence_score, created_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY trade_date, report_mode, report_type
+               ORDER BY created_at DESC NULLS LAST, id DESC
+           ) AS row_rank
+    FROM daily_report
+)
+INSERT INTO daily_report_duplicate_archive (
+    original_report_id, trade_date, report_mode, report_type, content,
+    confidence_score, original_created_at
+)
+SELECT id, trade_date, report_mode, report_type, content,
+       confidence_score, created_at
+FROM ranked_reports
+WHERE row_rank > 1
+ON CONFLICT (original_report_id) DO NOTHING;
+
+WITH ranked_reports AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY trade_date, report_mode, report_type
+               ORDER BY created_at DESC NULLS LAST, id DESC
+           ) AS row_rank
+    FROM daily_report
+)
+DELETE FROM daily_report
+WHERE id IN (
+    SELECT id FROM ranked_reports WHERE row_rank > 1
+);
+
+ALTER TABLE daily_report
+    ALTER COLUMN report_mode SET DEFAULT 'unified',
+    ALTER COLUMN report_mode SET NOT NULL,
+    ALTER COLUMN report_type SET DEFAULT 'daily',
+    ALTER COLUMN report_type SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_daily_report_date_mode_type
+    ON daily_report(trade_date, report_mode, report_type);
+
 
 -- 数据质量日志表
 -- 记录每日数据质量检查结果
@@ -155,6 +217,16 @@ ALTER TABLE job_run_log
 CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_run_id
     ON job_run_log(run_id)
     WHERE run_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_idempotency_attempt
+    ON job_run_log(idempotency_key, attempt_no)
+    WHERE idempotency_key IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_run_log_idempotency_active_pipeline
+    ON job_run_log(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+      AND status = 'running'
+      AND job_name = 'daily_pipeline';
 
 CREATE INDEX IF NOT EXISTS idx_job_run_log_trade_job_started
     ON job_run_log(trade_date, job_name, started_at DESC);

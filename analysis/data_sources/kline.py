@@ -9,6 +9,32 @@ from analysis.utils import safe_numeric
 
 
 logger = logging.getLogger(__name__)
+_REQUIRED_COLUMNS = ("date", "open", "close", "high", "low", "volume")
+
+
+def _validate_history_frame(frame, source):
+    """Reject malformed provider rows before they can poison the shared cache."""
+    if frame is None or frame.empty or any(column not in frame.columns for column in _REQUIRED_COLUMNS):
+        return pd.DataFrame()
+    result = frame.copy()
+    parsed_dates = pd.to_datetime(result["date"], errors="coerce")
+    valid = parsed_dates.notna()
+    for field in ("open", "close", "high", "low", "volume"):
+        valid &= pd.to_numeric(result[field], errors="coerce").notna()
+    valid &= (result[["open", "close", "high", "low"]] > 0).all(axis=1)
+    valid &= result["volume"] >= 0
+    valid &= result["high"] >= result[["open", "close", "low"]].max(axis=1)
+    valid &= result["low"] <= result[["open", "close", "high"]].min(axis=1)
+    dropped = int((~valid).sum())
+    result = result.loc[valid].copy()
+    if result.empty:
+        logger.warning("%s K-line payload rejected: no valid OHLCV rows", source)
+        return pd.DataFrame()
+    result["date"] = parsed_dates.loc[valid].dt.strftime("%Y-%m-%d")
+    result = result.drop_duplicates(subset=["date"], keep="last").sort_values("date")
+    if dropped:
+        logger.warning("%s K-line payload dropped %s malformed rows", source, dropped)
+    return result.reset_index(drop=True)
 
 
 def _history_session():
@@ -39,7 +65,7 @@ def fetch_sina_history(code: str, days: int = 80, *, session_factory=_history_se
             if field not in frame.columns:
                 frame[field] = np.nan
         frame["data_source"] = "sina"
-        return frame
+        return _validate_history_frame(frame, "sina")
     except Exception as exc:
         logger.debug("Sina history fetch failed: %s, %s", code, exc)
         return pd.DataFrame()
@@ -68,7 +94,7 @@ def fetch_tencent_history(code: str, days: int = 80, *, session_factory=_history
         frame["pct_chg"] = np.nan
         frame["turnover"] = np.nan
         frame["data_source"] = "tencent"
-        return frame
+        return _validate_history_frame(frame, "tencent")
     except Exception as exc:
         logger.debug("Tencent history fetch failed: %s, %s", code, exc)
         return pd.DataFrame()

@@ -28,6 +28,21 @@ def _count(cur, sql, params):
     return int(cur.fetchone()[0] or 0)
 
 
+def _report_status(report_count):
+    return "success" if report_count == 1 else ("missing" if not report_count else "duplicate")
+
+
+def _email_status(success_count, attempt_count):
+    return "success" if success_count else ("missing" if attempt_count else "unknown")
+
+
+def _overall_status(statuses, deferred_statuses):
+    hard = {"missing", "duplicate", "identity_mismatch", "blocked"}
+    if any(status in hard for status in statuses):
+        return "failed"
+    return "deferred" if "deferred" in deferred_statuses else "success"
+
+
 def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
     trade_text = normalize_trade_date(trade_date)
     as_of_text = normalize_trade_date(as_of_date or date.today())
@@ -36,14 +51,21 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
     try:
         cur = db.cursor()
         calendar_status = get_calendar_status(trade_text, conn=db)
-        signal_count = _count(cur, "SELECT COUNT(*) FROM stock_signal WHERE trade_date=%s", (_sql_date(trade_text),))
-        snapshot_count = _count(cur, "SELECT COUNT(*) FROM candidate_feature_snapshot WHERE trade_date=%s", (_sql_date(trade_text),))
-        report_count = _count(cur, "SELECT COUNT(*) FROM daily_report WHERE trade_date=%s", (_sql_date(trade_text),))
-        evaluation_count = _count(
-            cur,
-            "SELECT COUNT(*) FROM canonical_daily_evaluation_result WHERE signal_trade_date=%s",
-            (trade_text,),
+        raw_signal_count = _count(cur, "SELECT COUNT(*) FROM stock_signal WHERE trade_date=%s", (_sql_date(trade_text),))
+        cur.execute(
+            """
+            SELECT COUNT(*), COUNT(snapshot_row_id), COUNT(evaluation_row_id),
+                   COUNT(*) FILTER (WHERE snapshot_row_id IS NULL),
+                   COUNT(*) FILTER (WHERE evaluation_row_id IS NULL)
+            FROM canonical_signal_lineage
+            WHERE trade_date=%s
+            """,
+            (_sql_date(trade_text),),
         )
+        signal_count, snapshot_count, evaluation_count, missing_snapshot_count, missing_evaluation_count = [
+            int(value or 0) for value in cur.fetchone()
+        ]
+        report_count = _count(cur, "SELECT COUNT(*) FROM daily_report WHERE trade_date=%s", (_sql_date(trade_text),))
         horizons = resolve_evaluation_horizons(trade_text, as_of_text)
         target_1d = horizons.get("t1_date")
         covered_count = 0
@@ -51,12 +73,15 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
             covered_count = _count(
                 cur,
                 """
-                SELECT COUNT(DISTINCT s.code)
-                FROM stock_signal s
-                JOIN stock_hist_kline k ON k.code=s.code AND k.trade_date=%s
+                SELECT COUNT(*)
+                FROM canonical_signal_lineage s
                 WHERE s.trade_date=%s
+                  AND EXISTS (
+                      SELECT 1 FROM stock_hist_kline k
+                      WHERE k.code=s.code AND k.trade_date=%s
+                  )
                 """,
-                (_sql_date(target_1d), _sql_date(trade_text)),
+                (_sql_date(trade_text), _sql_date(target_1d)),
             )
         coverage = covered_count / signal_count if signal_count else 0.0
         email_rows = _count(
@@ -68,18 +93,30 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
             """,
             (_sql_date(trade_text),),
         )
+        email_attempt_rows = _count(
+            cur,
+            """
+            SELECT COUNT(*) FROM job_run_log
+            WHERE trade_date=%s AND job_name IN ('daily_email','email_sender')
+            """,
+            (_sql_date(trade_text),),
+        )
 
         missing = []
-        report_status = "success" if report_count else "missing"
-        signal_status = "success" if signal_count else "missing"
-        snapshot_status = "success" if signal_count and snapshot_count == signal_count else "missing"
-        if report_status == "missing": missing.append("daily_report")
-        if signal_status == "missing": missing.append("stock_signal")
-        if snapshot_status == "missing": missing.append("candidate_feature_snapshot")
+        report_status = _report_status(report_count)
+        signal_status = (
+            "success" if signal_count > 0 and signal_count == raw_signal_count
+            else "missing" if raw_signal_count == 0
+            else "identity_mismatch"
+        )
+        snapshot_status = "success" if signal_count > 0 and missing_snapshot_count == 0 else "missing"
+        if report_status != "success": missing.append("daily_report" if report_count == 0 else "daily_report_duplicate")
+        if signal_status != "success": missing.append("stock_signal" if raw_signal_count == 0 else "stock_signal_identity")
+        if snapshot_status != "success": missing.append("candidate_feature_snapshot_identity")
 
-        evaluation_complete = signal_count > 0 and evaluation_count >= signal_count
+        evaluation_complete = signal_count > 0 and missing_evaluation_count == 0
         if evaluation_complete:
-            kline_status = "success"
+            kline_status = "success" if coverage >= 0.8 else "deferred"
             t1_status = "success"
         elif not horizons.get("t1_mature"):
             kline_status = "pending"
@@ -90,29 +127,38 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
             if evaluation_count == 0: missing.append("evaluation_t1_low_coverage")
         else:
             kline_status = "success"
-            t1_status = "success" if evaluation_count else "missing"
+            t1_status = "success" if evaluation_complete else "missing"
             if t1_status == "missing": missing.append("evaluation_t1")
 
         if not horizons.get("t3_mature"):
             t3_status = "pending"
         elif not evaluation_count:
-            t3_status = "blocked"
-            missing.append("evaluation_t3_blocked")
+            if t1_status == "deferred":
+                t3_status = "deferred"
+                missing.append("evaluation_t3_low_coverage")
+            else:
+                t3_status = "blocked"
+                missing.append("evaluation_t3_blocked")
         else:
             t3_complete = _count(
                 cur,
                 """
-                SELECT COUNT(*) FROM canonical_daily_evaluation_result
-                WHERE signal_trade_date=%s AND is_mature_3d IS TRUE
+                SELECT COUNT(*)
+                FROM canonical_signal_lineage l
+                JOIN canonical_daily_evaluation_result r ON r.id=l.evaluation_row_id
+                WHERE l.trade_date=%s AND r.is_mature_3d IS TRUE
                 """,
-                (trade_text,),
+                (_sql_date(trade_text),),
             )
-            t3_status = "success" if t3_complete == evaluation_count else "missing"
+            t3_status = "success" if t3_complete == signal_count else "missing"
             if t3_status == "missing": missing.append("evaluation_t3")
 
-        email_status = "success" if email_rows else "unknown"
-        hard_missing = any(status == "missing" for status in (report_status, signal_status, snapshot_status, t1_status, t3_status))
-        overall = "failed" if hard_missing else ("deferred" if "deferred" in (kline_status, t1_status) else "success")
+        email_status = _email_status(email_rows, email_attempt_rows)
+        if email_status == "missing": missing.append("daily_email")
+        overall = _overall_status(
+            (report_status, signal_status, snapshot_status, t1_status, t3_status, email_status),
+            (kline_status, t1_status, t3_status),
+        )
         result = {
             "trade_date": trade_text, "as_of_date": as_of_text,
             "calendar_status": calendar_status, "report_status": report_status,
@@ -123,7 +169,16 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
             "signal_count": signal_count, "snapshot_count": snapshot_count,
             "evaluation_count": evaluation_count, "report_count": report_count,
             "missing_items": missing,
-            "diagnostics": {"target_1d_date": target_1d, "target_3d_date": horizons.get("t3_date"), "covered_count": covered_count},
+            "diagnostics": {
+                "target_1d_date": target_1d,
+                "target_3d_date": horizons.get("t3_date"),
+                "covered_count": covered_count,
+                "raw_signal_count": raw_signal_count,
+                "missing_snapshot_identity_count": missing_snapshot_count,
+                "missing_evaluation_identity_count": missing_evaluation_count,
+                "expected_report_count": 1,
+                "email_attempt_count": email_attempt_rows,
+            },
         }
         if persist:
             cur.execute(
@@ -187,6 +242,9 @@ def main():
             for item in reversed(dates)
         ]
     print(json.dumps(result,ensure_ascii=False,indent=2))
+    rows = result if isinstance(result, list) else [result]
+    if any(item.get("overall_status") == "failed" for item in rows):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

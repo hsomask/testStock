@@ -118,6 +118,14 @@ def main():
         session_factory=_factory(_Session(ValueError("invalid json"))),
     ).empty
 
+    malformed = [{
+        "day": "2026-08-10", "open": "10", "close": "10",
+        "high": "9", "low": "11", "volume": "100",
+    }]
+    assert fetch_sina_history(
+        code, session_factory=_factory(_Session(malformed)),
+    ).empty
+
     print("[OK] kline provider regression check")
 
 
