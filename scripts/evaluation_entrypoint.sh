@@ -19,10 +19,14 @@ echo "ML_DATASET_MIN_COVERAGE=${ML_DATASET_MIN_COVERAGE}"
 echo "EVAL_V2_BACKFILL_DAYS=${EVAL_V2_BACKFILL_DAYS}"
 echo ""
 
-echo "[0/4] Ensure evaluation schema"
-python -m analysis.init_db
-echo "[0a/4] Ensure persistent exchange calendar"
-python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
+if [ "${PIPELINE_BOOTSTRAPPED:-0}" != "1" ]; then
+    echo "[0/4] Ensure evaluation schema"
+    python -m analysis.init_db
+    echo "[0a/4] Ensure persistent exchange calendar"
+    python -m analysis.trade_calendar_sync --ensure --future-days 400 --apply
+else
+    echo "[0/4] Pipeline bootstrap already completed"
+fi
 
 if [ "$EVAL_V2_BACKFILL_DAYS" -gt 0 ]; then
     echo "[0b/4] Rebuild legacy T+1 lifecycle rows"
@@ -143,7 +147,17 @@ echo "[2a/4] Signal lineage post-evaluation gate"
 python -m analysis.signal_lineage_check --date "$SIGNAL_DATE" --strict
 
 echo ""
-echo "[2b/4] Patch mature T+3 fields"
+echo "[2b/4] Reconcile recent missing/low-coverage T+1 evaluations"
+python -m analysis.evaluation_backfill_low_coverage \
+    --as-of "$AS_OF_DATE" \
+    --days "${EVAL_BACKFILL_DAYS:-10}" \
+    --exclude-signal-date "$SIGNAL_DATE" \
+    --time-budget "${EVAL_TIME_BUDGET:-1800}" \
+    --deep \
+    --execute
+
+echo ""
+echo "[2b.1/4] Patch mature T+3 fields"
 python -m analysis.evaluation_maturity_backfill --as-of "$AS_OF_DATE" --days 30 --apply
 
 echo ""

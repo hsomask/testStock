@@ -287,7 +287,14 @@ def ensure_signal_kline_coverage(signal_date, as_of_date, time_budget=300, deep=
                 code = item["code"]
                 before = _inspect_code(cur, code, signal_sql, asof_sql)
                 try:
-                    get_stock_history(code, days=days, name=item.get("name", ""), require_fresh=True, allow_api=True)
+                    get_stock_history(
+                        code,
+                        days=days,
+                        name=item.get("name", ""),
+                        require_fresh=True,
+                        allow_api=True,
+                        required_dates={signal_sql, asof_sql},
+                    )
                 except Exception as exc:
                     errors.append({"code": code, "error": str(exc)[:160]})
                 attempted += 1

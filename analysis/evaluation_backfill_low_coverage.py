@@ -20,6 +20,7 @@ import psycopg2
 
 from data.config import DATABASE_DSN, REPORT_DIR
 from analysis.ensure_signal_kline_coverage import ensure_signal_kline_coverage
+from analysis.evaluation_time import resolve_evaluation_horizons
 
 
 EVAL_DIR = REPORT_DIR / "evaluation"
@@ -42,7 +43,7 @@ def _run_module(module, args):
     }
 
 
-def _fetch_targets(days, as_of, threshold):
+def _fetch_targets(days, as_of, threshold, exclude_signal_date=None):
     conn = _connect()
     try:
         cur = conn.cursor()
@@ -78,17 +79,77 @@ def _fetch_targets(days, as_of, threshold):
             params,
         )
         rows = cur.fetchall()
-        cur.close()
-        return [
+        targets = [
             {
                 "signal_date": row[0],
                 "as_of_date": row[1],
                 "total_signals": row[2],
                 "evaluated_1d": row[3],
                 "coverage_1d": float(row[4] or 0),
+                "missing_evaluation": False,
             }
             for row in rows
         ]
+
+        # A summary-only scan can never discover a completely missing
+        # Evaluation. Reconcile recent signal dates against their canonical T+1
+        # anchor and add mature gaps to the same repair queue.
+        run_as_of = str(as_of or datetime.now().strftime("%Y%m%d")).replace("-", "")[:8]
+        cur.execute(
+            """
+            SELECT trade_date, COUNT(*)
+            FROM stock_signal
+            WHERE trade_date < %s
+            GROUP BY trade_date
+            ORDER BY trade_date DESC
+            LIMIT %s
+            """,
+            (f"{run_as_of[:4]}-{run_as_of[4:6]}-{run_as_of[6:]}", int(days)),
+        )
+        known = {
+            (
+                str(item["signal_date"]).replace("-", "")[:8],
+                str(item["as_of_date"]).replace("-", "")[:8],
+            )
+            for item in targets
+        }
+        for signal_date, signal_count in cur.fetchall():
+            signal_key = signal_date.strftime("%Y%m%d") if hasattr(signal_date, "strftime") else str(signal_date).replace("-", "")[:8]
+            horizons = resolve_evaluation_horizons(signal_key, run_as_of)
+            if not horizons.get("t1_mature") or not horizons.get("t1_date"):
+                continue
+            anchor = horizons["t1_date"]
+            if (signal_key, anchor) in known:
+                continue
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM watchlist_evaluation_summary
+                    WHERE eval_mode = 'daily'
+                      AND signal_date = %s
+                      AND as_of_date = %s
+                )
+                """,
+                (signal_key, anchor),
+            )
+            if cur.fetchone()[0]:
+                continue
+            targets.append({
+                "signal_date": signal_key,
+                "as_of_date": anchor,
+                "total_signals": int(signal_count or 0),
+                "evaluated_1d": 0,
+                "coverage_1d": 0.0,
+                "missing_evaluation": True,
+            })
+        excluded = str(exclude_signal_date or "").replace("-", "")[:8]
+        if excluded:
+            targets = [
+                item for item in targets
+                if str(item["signal_date"]).replace("-", "")[:8] != excluded
+            ]
+        cur.close()
+        return sorted(targets, key=lambda item: str(item["as_of_date"]), reverse=True)
     finally:
         conn.close()
 
@@ -130,8 +191,14 @@ def backfill_low_coverage(
     time_budget=1800,
     deep=True,
     execute=False,
+    exclude_signal_date=None,
 ):
-    targets = _fetch_targets(days=days, as_of=as_of, threshold=threshold)
+    targets = _fetch_targets(
+        days=days,
+        as_of=as_of,
+        threshold=threshold,
+        exclude_signal_date=exclude_signal_date,
+    )
     result = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "execute": execute,
@@ -141,6 +208,7 @@ def backfill_low_coverage(
         "rerun_min_coverage": rerun_min_coverage,
         "time_budget": time_budget,
         "deep": deep,
+        "exclude_signal_date": exclude_signal_date,
         "items": [],
     }
 
@@ -170,20 +238,25 @@ def backfill_low_coverage(
             "commands": [],
         }
 
-        if after_cov >= rerun_min_coverage:
+        effective_rerun_coverage = 0.80 if target.get("missing_evaluation") else rerun_min_coverage
+        item["effective_rerun_coverage"] = effective_rerun_coverage
+        if after_cov >= effective_rerun_coverage:
             if execute:
                 item["action"] = "rerun_evaluation"
-                item["commands"].append(
-                    _run_module(
-                        "analysis.watchlist_evaluation",
-                        [
-                            "--mode", "daily",
-                            "--signal-date", signal_date,
-                            "--as-of", as_of_date,
-                            "--save-db",
-                        ],
-                    )
+                evaluation_command = _run_module(
+                    "analysis.watchlist_evaluation",
+                    [
+                        "--mode", "daily",
+                        "--signal-date", signal_date,
+                        "--as-of", as_of_date,
+                        "--save-db",
+                    ],
                 )
+                item["commands"].append(evaluation_command)
+                if evaluation_command.get("returncode") != 0:
+                    item["action"] = "rerun_failed"
+                    result["items"].append(item)
+                    continue
                 item["commands"].append(
                     _run_module("analysis.strategy_feedback", ["--date", as_of_date, "--window", "20"])
                 )
@@ -208,6 +281,12 @@ def backfill_low_coverage(
 
         result["items"].append(item)
 
+    result["status"] = (
+        "failed"
+        if any(item.get("action") == "rerun_failed" for item in result["items"])
+        else "success"
+    )
+
     suffix = as_of or datetime.now().strftime("%Y%m%d_%H%M%S")
     _write_report(result, suffix)
     return result
@@ -223,6 +302,7 @@ def main():
     parser.add_argument("--deep", action="store_true", default=False, help="Use deeper K-line fetch rounds")
     parser.add_argument("--execute", action="store_true", default=False, help="Actually rerun formal evaluation")
     parser.add_argument("--json", action="store_true", default=False, dest="json_output")
+    parser.add_argument("--exclude-signal-date", type=str, default=None)
     args = parser.parse_args()
 
     result = backfill_low_coverage(
@@ -233,6 +313,7 @@ def main():
         time_budget=args.time_budget,
         deep=args.deep,
         execute=args.execute,
+        exclude_signal_date=args.exclude_signal_date,
     )
     if args.json_output:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -245,6 +326,8 @@ def main():
                 f"{item['as_of_date']} {item['signal_date']}: "
                 f"{item['before_coverage']:.1%} -> {item['after_coverage']:.1%}, {item['action']}"
             )
+    if result.get("status") == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

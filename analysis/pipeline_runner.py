@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from analysis.task_ledger import finish_task, start_task
+from analysis.task_ledger import fail_stale_pipeline_tasks, finish_task, start_task
 from analysis.trade_calendar import get_calendar_status
 from data.config import DATABASE_DSN
 
@@ -31,8 +31,9 @@ class Step:
 def daily_steps(trade_date):
     py = sys.executable
     return (
-        Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), timeout=3600, retries=1),
-        Step("daily_report", ("bash", "entrypoint.sh"), timeout=5400),
+        Step("bootstrap", ("bash", "scripts/pipeline_bootstrap.sh"), timeout=1200, retries=1),
+        Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), ("bootstrap",), timeout=3600),
+        Step("daily_report", ("bash", "entrypoint.sh"), ("bootstrap",), timeout=5400),
         Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("daily_report",), timeout=900),
         Step(
             "daily_reconcile",
@@ -102,7 +103,7 @@ def _pipeline_already_completed(trade_date):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT EXISTS(SELECT 1 FROM job_run_log WHERE trade_date=%s AND job_name='daily_pipeline' AND status IN ('success','deferred'))",
+            "SELECT EXISTS(SELECT 1 FROM job_run_log WHERE trade_date=%s AND job_name='daily_pipeline' AND status IN ('running','success','deferred'))",
             (f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",),
         )
         value = bool(cur.fetchone()[0]); cur.close(); return value
@@ -110,7 +111,7 @@ def _pipeline_already_completed(trade_date):
         conn.close()
 
 
-def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, force=False, calendar_status_getter=None):
+def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, force=False, calendar_status_getter=None, stale_recoverer=None):
     steps = daily_steps(trade_date)
     validate_steps(steps)
     if dry_run:
@@ -118,13 +119,23 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
     calendar_status = (calendar_status_getter or get_calendar_status)(trade_date)
     if calendar_status == "closed":
         return {"status": "skipped", "trade_date": trade_date, "reason": "non_trading_day", "steps": []}
+    (stale_recoverer or fail_stale_pipeline_tasks)(trade_date, required=True)
     if not force and _pipeline_already_completed(trade_date):
         return {"status": "skipped", "trade_date": trade_date, "reason": "pipeline_already_completed", "steps": []}
     execute = executor or subprocess.run
-    parent = start_task("daily_pipeline", trade_date, trigger_type="dag", required=True)
+    parent = start_task(
+        "daily_pipeline", trade_date, trigger_type="dag",
+        idempotency_key=f"daily_pipeline:{trade_date}", required=True,
+    )
     statuses, details = {}, []
     env = os.environ.copy()
-    env.update({"TRADE_DATE": trade_date, "AS_OF_DATE": trade_date, "SEND_DAILY_EMAIL": "0", "SEND_EVAL_EMAIL": "0"})
+    env.update({
+        "TRADE_DATE": trade_date,
+        "AS_OF_DATE": trade_date,
+        "SEND_DAILY_EMAIL": "0",
+        "SEND_EVAL_EMAIL": "0",
+        "PIPELINE_BOOTSTRAPPED": "1",
+    })
     try:
         for step in steps:
             blocked = any(statuses.get(dep) not in {"success", "deferred"} for dep in step.depends_on)
@@ -136,23 +147,34 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
                 statuses[step.name] = "skipped"
                 details.append({"step": step.name, "status": "skipped", "reason": "already_sent"})
                 continue
-            child = start_task(f"pipeline_step:{step.name}", trade_date, parent_run_id=parent["run_id"], trigger_type="dag", required=True)
             outcome, error = "failed", None
+            attempts = []
             for attempt in range(step.retries + 1):
+                child = start_task(
+                    f"pipeline_step:{step.name}", trade_date,
+                    parent_run_id=parent["run_id"], trigger_type="dag",
+                    attempt_no=attempt + 1,
+                    idempotency_key=f"{parent['run_id']}:{step.name}",
+                    required=True,
+                )
                 try:
                     started_at = time.time()
                     proc = execute(step.command, cwd=ROOT, env=env, timeout=step.timeout, text=True)
                     outcome = _evaluation_status(trade_date, proc.returncode, started_at) if step.name == "evaluation" else ("success" if proc.returncode == 0 else "failed")
-                    if outcome != "failed": break
-                    error = f"exit_code={proc.returncode}"
+                    error = None if outcome != "failed" else f"exit_code={proc.returncode}"
                 except subprocess.TimeoutExpired:
+                    outcome = "failed"
                     error = f"timeout={step.timeout}"
                 except Exception as exc:
+                    outcome = "failed"
                     error = f"executor_error={exc}"
-            finish_task(child, outcome, error_message=error, required=True)
+                finish_task(child, outcome, error_message=error, required=True)
+                attempts.append({"attempt": attempt + 1, "status": outcome, "error": error})
+                if outcome != "failed":
+                    break
             statuses[step.name] = outcome
-            details.append({"step": step.name, "status": outcome, "error": error})
-        failed = any(value in {"failed", "blocked"} for key, value in statuses.items() if key != "daily_reconcile")
+            details.append({"step": step.name, "status": outcome, "error": error, "attempts": attempts})
+        failed = any(value in {"failed", "blocked"} for value in statuses.values())
         final = "failed" if failed else ("deferred" if "deferred" in statuses.values() else "success")
         finish_task(parent, final, metadata={"steps": details}, required=True)
         return {"status": final, "trade_date": trade_date, "steps": details}

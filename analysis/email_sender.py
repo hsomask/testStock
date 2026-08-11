@@ -140,12 +140,12 @@ def attach_file(msg, file_path):
 def send_email(subject, body, attachments=None):
     if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD or not EMAIL_TO:
         print("[邮件] SMTP 配置不完整，跳过邮件推送")
-        return
+        return "skipped_config_missing"
 
     recipients = [x.strip() for x in EMAIL_TO.split(",") if x.strip()]
     if not recipients:
         print("[邮件] 收件人列表为空，跳过推送")
-        return
+        return "skipped_recipient_missing"
 
     msg = MIMEMultipart()
     msg["From"] = SMTP_USER
@@ -163,10 +163,12 @@ def send_email(subject, body, attachments=None):
             server.sendmail(SMTP_USER, recipients, msg.as_string())
 
         print("[邮件] 推送成功")
+        return "success"
 
     except Exception as e:
         logger.exception(f"邮件推送失败：{e}")
         print(f"[邮件] 推送失败：{e}")
+        return "failed"
 
 
 def build_email_body_from_json(summary, report_path=None):
@@ -347,8 +349,7 @@ def _main():
     else:
         body += "\n\n---\n流程检查：pipeline_check JSON 未生成\n"
 
-    send_email(subject, body, attachments)
-    return "success"
+    return send_email(subject, body, attachments)
 
 
 def _requested_trade_date():
@@ -364,13 +365,31 @@ def main():
 
     run = start_task("daily_email", _requested_trade_date(), trigger_type="direct")
     try:
-        status = _main() or "success"
+        delivery_status = _main() or "failed"
     except Exception as exc:
         finish_task(run, "failed", error_message=str(exc))
         raise
-    finish_task(run, status)
-    return status
+    ledger_status = (
+        "success"
+        if delivery_status == "success"
+        else "skipped"
+        if delivery_status.startswith("skipped_")
+        else "failed"
+    )
+    finish_task(
+        run,
+        ledger_status,
+        metadata={"delivery_status": delivery_status},
+        error_message=(
+            None
+            if ledger_status != "failed"
+            else f"delivery_status={delivery_status}"
+        ),
+    )
+    return delivery_status
 
 
 if __name__ == "__main__":
-    main()
+    result = main()
+    if result in {"failed", "skipped_config_missing", "skipped_recipient_missing"}:
+        raise SystemExit(1)
