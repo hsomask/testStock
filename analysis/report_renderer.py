@@ -1,7 +1,6 @@
 """
 日报渲染模块 — 统一主日报模板
 """
-import requests
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -20,7 +19,6 @@ from analysis.report_insights import (
     filter_effective_themes, is_dynamic_label,
     classify_concept_label, label_category_name, explain_non_industrial_label, dedup_watchlist_entries,
 )
-from data.config import MINIMAX_API_KEY, MINIMAX_API_URL
 
 
 def _decision_plans(trade_plan):
@@ -38,33 +36,6 @@ def _get_context_section(report_context, name):
         return {}
     s = report_context.get(name) or {}
     return s if isinstance(s, dict) else {}
-
-
-# ── MiniMax AI ──
-
-def call_minimax(prompt):
-    if not MINIMAX_API_KEY:
-        return None
-    try:
-        headers = {
-            "Authorization": f"Bearer {MINIMAX_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "abab6.5s-chat",
-            "messages": [
-                {"role": "system", "content": "你是一名经验丰富的A股交易员和分析师，擅长用简洁、专业的语言总结市场情况和策略建议。你的分析基于数据，不构成投资建议。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.7, "max_tokens": 2000,
-        }
-        resp = requests.post(MINIMAX_API_URL, headers=headers, json=payload, timeout=30)
-        data = resp.json()
-        if data.get("base_resp", {}).get("status_code") == 0:
-            return data["choices"][0]["message"]["content"]
-        return None
-    except Exception:
-        return None
 
 
 # ── 板块表格渲染（保持不变）──

@@ -751,3 +751,54 @@ LEFT JOIN candidate_feature_snapshot c
 LEFT JOIN canonical_daily_evaluation_result r
   ON r.signal_id = s.signal_id
 WHERE s.signal_id IS NOT NULL;
+
+
+-- Immutable LLM sidecar inputs. These tables are isolated from all trading
+-- facts and are only written when the governed sidecar is explicitly enabled.
+CREATE TABLE IF NOT EXISTS llm_fact_pack (
+    fact_pack_id TEXT PRIMARY KEY,
+    schema_version TEXT NOT NULL,
+    trade_date DATE NOT NULL,
+    as_of_date DATE NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    facts_json JSONB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (trade_date, as_of_date, content_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS llm_interpretation_run (
+    run_id TEXT PRIMARY KEY,
+    idempotency_key TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL DEFAULT 1,
+    fact_pack_id TEXT NOT NULL REFERENCES llm_fact_pack(fact_pack_id),
+    task TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    output_schema_version TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    request_json JSONB,
+    response_json JSONB,
+    evidence_count INTEGER,
+    error_message TEXT,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMP,
+    duration_seconds NUMERIC,
+    UNIQUE (idempotency_key, attempt_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_interpretation_trade
+    ON llm_fact_pack(trade_date, as_of_date);
+
+CREATE INDEX IF NOT EXISTS idx_llm_interpretation_status
+    ON llm_interpretation_run(status, started_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_interpretation_success
+    ON llm_interpretation_run(idempotency_key)
+    WHERE status = 'success';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_interpretation_running
+    ON llm_interpretation_run(idempotency_key)
+    WHERE status = 'running';
