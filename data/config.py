@@ -54,8 +54,6 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAIL_TO = os.getenv("EMAIL_TO", "")
 
-MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY", "")
-MINIMAX_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"
 
 # ── 账户过滤配置 ──
 ALLOW_MAIN_BOARD = os.getenv("ALLOW_MAIN_BOARD", "true").lower() == "true"
