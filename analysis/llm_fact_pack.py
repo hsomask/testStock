@@ -19,6 +19,7 @@ from psycopg2.extras import RealDictCursor
 
 from analysis.correction_effectiveness import build_correction_effectiveness
 from analysis.evaluation_time import resolve_evaluation_horizons
+from analysis.evaluation_status import resolve_evaluation_status
 from analysis.trade_calendar import normalize_trade_date
 from data.config import DATABASE_DSN, REPORT_DIR
 
@@ -182,10 +183,42 @@ def _signal_facts(rows: list[dict[str, Any]], horizons: dict[str, Any]):
     return facts
 
 
+def _evaluation_data_status(
+    signals: list[dict[str, Any]], horizons: dict[str, Any], as_of_date: str,
+) -> dict[str, Any]:
+    eligible = len(signals)
+    evaluated_t1 = sum(
+        1 for item in signals
+        if item["evaluation"]["t1"]["state"] == "success"
+    )
+    evaluated_t3 = sum(
+        1 for item in signals
+        if item["evaluation"]["t3"]["state"] == "success"
+    )
+    return {
+        "t1": resolve_evaluation_status(
+            mature=horizons["t1_mature"],
+            target_date=horizons.get("t1_date"),
+            as_of_date=as_of_date,
+            eligible_count=eligible,
+            evaluated_count=evaluated_t1,
+            execution_status="success" if evaluated_t1 else "unknown",
+        ),
+        "t3": resolve_evaluation_status(
+            mature=horizons["t3_mature"],
+            target_date=horizons.get("t3_date"),
+            as_of_date=as_of_date,
+            eligible_count=eligible,
+            evaluated_count=evaluated_t3,
+            execution_status="success" if evaluated_t3 else "unknown",
+        ),
+    }
+
+
 def _status_and_limitations(
     *, trade_date: str, as_of_date: str, signal_rows: list[dict[str, Any]],
     signals: list[dict[str, Any]], report: dict[str, Any], quality: dict[str, Any],
-    artifact_summary: dict[str, Any],
+    artifact_summary: dict[str, Any], evaluation_status: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     limitations = []
     raw_count = len(signal_rows)
@@ -216,6 +249,24 @@ def _status_and_limitations(
             "code": "mature_evaluation_price_unavailable", "severity": "warning",
             "t1_count": unavailable_t1, "t3_count": unavailable_t3,
         })
+    for horizon, evaluation in (evaluation_status or {}).items():
+        if evaluation.get("status") == "degraded":
+            limitations.append({
+                "code": f"{horizon}_evaluation_low_coverage",
+                "severity": "warning",
+                "coverage": evaluation.get("coverage"),
+                "threshold": evaluation.get("threshold"),
+                "missing_count": evaluation.get("missing_count"),
+                "reason_code": evaluation.get("reason_code"),
+            })
+        elif evaluation.get("status") in {"missing", "failed"}:
+            limitations.append({
+                "code": f"{horizon}_evaluation_unavailable",
+                "severity": "blocking",
+                "coverage": evaluation.get("coverage"),
+                "missing_count": evaluation.get("missing_count"),
+                "reason_code": evaluation.get("reason_code"),
+            })
     if artifact_summary.get("status") != "available":
         limitations.append({
             "code": "daily_summary_artifact_unavailable", "severity": "warning",
@@ -322,6 +373,7 @@ def build_fact_pack(
             db.close()
 
     signals = _signal_facts(rows, horizons)
+    evaluation_status = _evaluation_data_status(signals, horizons, as_of_text)
     artifact_summary = _load_daily_summary(trade_text, Path(report_dir or REPORT_DIR))
     try:
         correction_raw = build_correction_effectiveness(
@@ -340,7 +392,7 @@ def build_fact_pack(
     status, limitations = _status_and_limitations(
         trade_date=trade_text, as_of_date=as_of_text, signal_rows=rows,
         signals=signals, report=report, quality=quality,
-        artifact_summary=artifact_summary,
+        artifact_summary=artifact_summary, evaluation_status=evaluation_status,
     )
     facts = {
         "trade_date": trade_text,
@@ -351,6 +403,7 @@ def build_fact_pack(
         "report": report,
         "artifact_summary": artifact_summary,
         "signals": signals,
+        "evaluation_status": evaluation_status,
         "evaluation_summary": evaluation_summary,
         "strategy_feedback": strategy_feedback,
         "correction_effectiveness": correction,
@@ -360,11 +413,20 @@ def build_fact_pack(
         },
     }
     content_hash = _canonical_hash(facts)
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
     return {
         "schema_version": FACT_PACK_SCHEMA_VERSION,
         "fact_pack_id": f"llmfp:{trade_text}:{as_of_text}:{content_hash[:16]}",
         "content_sha256": content_hash,
-        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "generated_at": generated_at,
+        "meta": {
+            "schema_version": FACT_PACK_SCHEMA_VERSION,
+            "trade_date": trade_text,
+            "as_of_date": as_of_text,
+            "generated_at": generated_at,
+            "report_mode": report.get("report_mode"),
+            "signal_grain": "trade_date+code+strategy",
+        },
         "status": status,
         "policy": {
             "mode": "read_only_sidecar",
@@ -380,6 +442,7 @@ def build_fact_pack(
             "pending": "target trading date has not matured at as_of_date",
             "unavailable_price": "evaluation record exists but a required market price is unavailable",
             "success": "mature evaluation return is present",
+            "degraded": "evaluation is mature but coverage is below the governed threshold",
         },
         "limitations": limitations,
         "facts": facts,
@@ -389,6 +452,20 @@ def build_fact_pack(
             "quality": "data_quality_log",
             "pipeline": "daily_reconciliation + job_run_log",
             "report": "daily_report",
+        },
+        "source_manifest": {
+            "signals": {"source": "canonical_signal_lineage", "rows": len(rows)},
+            "snapshots": {
+                "source": "candidate_feature_snapshot",
+                "rows": sum(1 for row in rows if row.get("snapshot_row_id") is not None),
+            },
+            "evaluation": {
+                "source": "canonical_daily_evaluation_result",
+                "rows": sum(1 for row in rows if row.get("evaluation_row_id") is not None),
+            },
+            "report": {"source": "daily_report", "rows": 1 if report else 0},
+            "quality": {"source": "data_quality_log", "rows": 1 if quality else 0},
+            "pipeline": {"source": "daily_reconciliation+job_run_log", "rows": len(job_runs)},
         },
     }
 

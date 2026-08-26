@@ -15,6 +15,7 @@ from analysis.llm_adapter import (
     run_adapter,
 )
 from analysis.llm_fact_pack import _canonical_hash
+from analysis.llm_fact_pack_validator import validate_fact_pack
 
 
 LLM_POLICY_VERSION = "llm_sidecar_policy_v1"
@@ -49,6 +50,11 @@ def validate_fact_pack_integrity(pack: dict[str, Any]) -> None:
     policy = pack.get("policy") or {}
     if policy.get("mode") != "read_only_sidecar":
         raise PolicyViolation("fact_pack_policy_mode_invalid")
+    gate = validate_fact_pack(pack)
+    if gate["status"] == "blocked":
+        raise PolicyViolation(
+            "fact_pack_gate_blocked:" + ",".join(item["code"] for item in gate["errors"])
+        )
 
 
 def _warning_codes(pack: dict[str, Any]) -> set[str]:

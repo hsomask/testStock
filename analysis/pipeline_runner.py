@@ -33,7 +33,11 @@ def daily_steps(trade_date):
     return (
         Step("bootstrap", ("bash", "scripts/pipeline_bootstrap.sh"), timeout=1200, retries=1),
         Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), ("bootstrap",), timeout=3600),
-        Step("daily_report", ("bash", "entrypoint.sh"), ("bootstrap",), timeout=5400),
+        Step(
+            "daily_report",
+            (py, "-m", "analysis.report_dispatcher", "--date", trade_date),
+            ("bootstrap",), timeout=5400,
+        ),
         Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("daily_report",), timeout=900),
         Step(
             "daily_reconcile",

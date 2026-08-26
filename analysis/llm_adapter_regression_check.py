@@ -5,10 +5,11 @@ from analysis.llm_adapter import (
     run_adapter,
     validate_interpretation,
 )
+from analysis.llm_fact_pack import _canonical_hash
 
 
 def _pack():
-    return {
+    pack = {
         "schema_version": "llm_fact_pack_v1",
         "fact_pack_id": "llmfp:test",
         "status": "degraded",
@@ -17,11 +18,14 @@ def _pack():
         "facts": {
             "trade_date": "20260821", "as_of_date": "20260823",
             "market": {"score": 75.9}, "horizons": {}, "data_quality": {},
-            "artifact_summary": {}, "evaluation_summary": {},
+            "artifact_summary": {}, "evaluation_summary": {}, "report": {"id": 1},
+            "evaluation_status": {
+                "t1": {"status": "success"}, "t3": {"status": "pending"},
+            },
             "strategy_feedback": [], "correction_effectiveness": {},
             "pipeline": {"reconciliation": {}},
             "signals": [{
-                "signal_id": "sig-1", "code": "000001", "name": "fixture",
+                "signal_id": "sig-1", "decision_id": "dec-1", "code": "000001", "name": "fixture",
                 "strategy": "fixture", "final_layer": "observe",
                 "primary_direction": "fixture", "decision": {},
                 "evaluation": {"t1": {"state": "pending"}},
@@ -31,7 +35,10 @@ def _pack():
                 ],
             }],
         },
+        "source_manifest": {"snapshots": {"rows": 1}},
     }
+    pack["content_sha256"] = _canonical_hash(pack["facts"])
+    return pack
 
 
 class FixtureProvider:
@@ -48,6 +55,9 @@ class FixtureProvider:
                 "kind": "fact",
                 "claim": "T+1处于pending，不能判断为失败。",
                 "evidence_refs": ["stock_signal:sig-1"],
+                "fact_refs": [{
+                    "path": "facts.market.score", "value": request["facts"]["market"]["score"],
+                }],
                 "confidence": "high",
             }],
             "risks": [],
@@ -61,8 +71,15 @@ class FixtureProvider:
 
 def main():
     pack = _pack()
+    original_hash = pack["content_sha256"]
     request = build_request(pack, "explain")
     assert len(request["facts"]["signals"]) == 1
+    assert request["quality_gate"]["status"] == "degraded"
+    assert set(request["facts"]["signals"][0]["evaluation"]["t3"]) == {
+        "state", "mature", "target_date",
+    }
+    assert pack["content_sha256"] == original_hash
+    assert "t3" not in pack["facts"]["signals"][0]["evaluation"]
     result = run_adapter(pack, FixtureProvider(), task="explain")
     assert result.interpretation["findings"][0]["confidence"] == "high"
 
@@ -74,6 +91,15 @@ def main():
         assert "finding_evidence_unknown" in str(exc)
     else:
         raise AssertionError("unknown evidence reference was accepted")
+
+    wrong_value = FixtureProvider().generate(request)
+    wrong_value["findings"][0]["fact_refs"] = [{"path": "facts.market.score", "value": 99}]
+    try:
+        validate_interpretation(wrong_value, pack=pack, task="explain")
+    except ValueError as exc:
+        assert "finding_fact_value_mismatch" in str(exc)
+    else:
+        raise AssertionError("invented fact value was accepted")
 
     comparison = _pack()
     comparison["fact_pack_id"] = "llmfp:comparison"

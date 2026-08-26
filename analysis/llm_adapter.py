@@ -6,10 +6,12 @@ document.  It has no database access and no dependency on trading modules.
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from analysis.llm_fact_pack import FACT_PACK_SCHEMA_VERSION
+from analysis.llm_fact_pack_validator import validate_fact_pack
 
 
 LLM_OUTPUT_SCHEMA_VERSION = "llm_interpretation_v1"
@@ -52,8 +54,8 @@ def compact_fact_pack(pack: dict[str, Any]) -> dict[str, Any]:
             "strategy": item.get("strategy"),
             "final_layer": item.get("final_layer"),
             "primary_direction": item.get("primary_direction"),
-            "decision": item.get("decision"),
-            "evaluation": item.get("evaluation"),
+            "decision": deepcopy(item.get("decision") or {}),
+            "evaluation": deepcopy(item.get("evaluation") or {}),
             "evidence_refs": item.get("evidence_refs") or [],
         })
     pipeline = facts.get("pipeline") or {}
@@ -73,6 +75,7 @@ def compact_fact_pack(pack: dict[str, Any]) -> dict[str, Any]:
         "risk_directions": artifact.get("risk_directions") or [],
         "signals": signals,
         "evaluation_summary": facts.get("evaluation_summary") or {},
+        "evaluation_status": facts.get("evaluation_status") or {},
         "strategy_feedback": facts.get("strategy_feedback") or [],
         "correction_effectiveness": facts.get("correction_effectiveness") or {},
         "pipeline": {"reconciliation": pipeline.get("reconciliation") or {}},
@@ -85,17 +88,31 @@ def build_request(
 ) -> dict[str, Any]:
     if task not in ALLOWED_TASKS:
         raise ValueError(f"unsupported_task:{task}")
-    if pack.get("status") == "blocked":
+    gate = validate_fact_pack(pack)
+    if pack.get("status") == "blocked" or gate["status"] == "blocked":
         raise ValueError("fact_pack_blocked")
     if task == "compare" and comparison_pack is None:
         raise ValueError("compare_requires_second_fact_pack")
     if comparison_pack is not None and comparison_pack.get("status") == "blocked":
         raise ValueError("comparison_fact_pack_blocked")
     compact = compact_fact_pack(pack)
+    allowed = set(gate["allowed_sections"])
+    for signal in compact["signals"]:
+        evaluation = signal.get("evaluation") or {}
+        for horizon in ("t1", "t3"):
+            if f"evaluation_{horizon}" in allowed:
+                continue
+            current = evaluation.get(horizon) or {}
+            evaluation[horizon] = {
+                key: current.get(key) for key in ("state", "mature", "target_date")
+            }
+    if "evaluation_t1" not in allowed and "evaluation_t3" not in allowed:
+        compact["evaluation_summary"] = {}
     request = {
         "request_schema_version": "llm_grounded_request_v1",
         "task": task,
         "fact_pack_id": pack.get("fact_pack_id"),
+        "quality_gate": gate,
         "system_policy": {
             "role": "read_only_a_share_report_interpreter",
             "grounding": "Use only supplied facts. Never invent missing values.",
@@ -118,9 +135,10 @@ def build_request(
                 "limitations_acknowledged",
             ],
             "finding_contract": {
-                "required": ["kind", "claim", "evidence_refs", "confidence"],
+                "required": ["kind", "claim", "evidence_refs", "fact_refs", "confidence"],
                 "kind": sorted(ALLOWED_FINDING_KINDS),
                 "confidence": sorted(ALLOWED_CONFIDENCE),
+                "fact_ref": {"required": ["path", "value"], "path_root": "facts"},
             },
         },
         "facts": compact,
@@ -141,6 +159,28 @@ def allowed_evidence_refs(
         for signal in (comparison_pack.get("facts") or {}).get("signals") or []:
             refs.update(str(value) for value in signal.get("evidence_refs") or [])
     return refs
+
+
+def _resolve_fact_path(pack: dict[str, Any], path: str) -> Any:
+    if not isinstance(path, str) or not path.startswith("facts."):
+        raise KeyError(path)
+    value: Any = pack
+    for part in path.split("."):
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+            continue
+        if isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+            continue
+        else:
+            raise KeyError(path)
+    return value
+
+
+def _same_fact_value(expected: Any, claimed: Any) -> bool:
+    if isinstance(expected, (int, float)) and isinstance(claimed, (int, float)):
+        return abs(float(expected) - float(claimed)) <= 1e-9
+    return expected == claimed
 
 
 def validate_interpretation(
@@ -192,6 +232,23 @@ def validate_interpretation(
         unknown = {str(ref) for ref in refs} - allowed_refs
         if unknown:
             raise ValueError(f"finding_evidence_unknown:{index}:{sorted(unknown)}")
+        fact_refs = finding.get("fact_refs")
+        if finding.get("kind") in {"fact", "inference"} and not fact_refs:
+            raise ValueError(f"finding_fact_refs_missing:{index}")
+        if fact_refs is not None and not isinstance(fact_refs, list):
+            raise ValueError(f"finding_fact_refs_not_list:{index}")
+        for ref_index, ref in enumerate(fact_refs or []):
+            if not isinstance(ref, dict) or "path" not in ref or "value" not in ref:
+                raise ValueError(f"finding_fact_ref_invalid:{index}:{ref_index}")
+            source_pack = comparison_pack if ref.get("source") == "comparison" else pack
+            if source_pack is None:
+                raise ValueError(f"finding_fact_ref_source_invalid:{index}:{ref_index}")
+            try:
+                actual = _resolve_fact_path(source_pack, ref["path"])
+            except KeyError as exc:
+                raise ValueError(f"finding_fact_path_unknown:{index}:{ref_index}") from exc
+            if not _same_fact_value(actual, ref["value"]):
+                raise ValueError(f"finding_fact_value_mismatch:{index}:{ref_index}")
     for field in ("risks", "next_validations", "limitations_acknowledged"):
         if not isinstance(output[field], list):
             raise ValueError(f"model_output_{field}_not_list")

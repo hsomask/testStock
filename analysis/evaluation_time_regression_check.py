@@ -155,6 +155,9 @@ def run_checks():
                 if params is not None and sql.count("%s") != len(params):
                     maturity_mismatches.append((sql.count("%s"), len(params)))
 
+            def fetchone(self):
+                return None
+
         class MaturityConnection(FakeConnection):
             def cursor(self):
                 return MaturityCursor()
@@ -171,6 +174,37 @@ def run_checks():
             "20260722",
         )
         failures.append(_assert("T+3补齐SQL参数数量一致", not maturity_mismatches, maturity_mismatches))
+
+        detail_update_count = []
+        current_patch = build_t3_patch(records[0])
+        current_row = (
+            current_patch["next_3d_return"], current_patch["max_3d_return"],
+            current_patch["max_3d_drawdown"], current_patch["is_mature_3d"],
+            current_patch["target_3d_date"], current_patch["t3_price_status"],
+            current_patch["t3_missing_reason"], current_patch["verification_tag_3d"],
+            current_patch["feedback_label_3d"], current_patch["feedback_score_3d"],
+            current_patch["attribution_tags_3d"], current_patch["attribution_text_3d"],
+        )
+
+        class UnchangedMaturityCursor(MaturityCursor):
+            def execute(self, sql, params=None):
+                super().execute(sql, params)
+                if "UPDATE watchlist_evaluation_result" in sql:
+                    detail_update_count.append(1)
+
+            def fetchone(self):
+                return current_row
+
+        class UnchangedMaturityConnection(MaturityConnection):
+            def cursor(self):
+                return UnchangedMaturityCursor()
+
+        _apply_target(
+            UnchangedMaturityConnection(),
+            {"signal_date": "20260717", "anchor_date": "20260720", "total_signals": 1},
+            records, evaluation.aggregate_metrics(records), "20260722",
+        )
+        failures.append(_assert("T+3业务字段未变化时不重复写detail", not detail_update_count, detail_update_count))
 
         suspended = hist[hist["date"] != "20260720"].copy()
         evaluation._cached_get_history = lambda code, days=80: suspended
