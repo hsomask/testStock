@@ -21,6 +21,10 @@ import psycopg2
 from data.config import DATABASE_DSN, REPORT_DIR
 from analysis.ensure_signal_kline_coverage import ensure_signal_kline_coverage
 from analysis.evaluation_time import resolve_evaluation_horizons
+from analysis.evaluation_status import (
+    resolve_evaluation_status,
+    should_backfill_evaluation,
+)
 
 
 EVAL_DIR = REPORT_DIR / "evaluation"
@@ -43,104 +47,85 @@ def _run_module(module, args):
     }
 
 
+def _select_repair_horizon(
+    *, signal_date, run_as_of, signal_count, evaluated_1d=0,
+    coverage_1d=0, evaluated_3d=0, coverage_3d=0, threshold=0.90,
+):
+    horizons = resolve_evaluation_horizons(signal_date, run_as_of)
+    candidates = []
+    for horizon, evaluated, coverage in (
+        ("t1", evaluated_1d, coverage_1d),
+        ("t3", evaluated_3d, coverage_3d),
+    ):
+        state = resolve_evaluation_status(
+            mature=bool(horizons.get(f"{horizon}_mature")),
+            target_date=horizons.get(f"{horizon}_date"),
+            as_of_date=run_as_of,
+            eligible_count=int(signal_count or 0),
+            evaluated_count=int(evaluated or 0),
+            coverage=float(coverage or 0),
+            execution_status="success" if int(evaluated or 0) else "unknown",
+            minimum_coverage=threshold,
+        )
+        if should_backfill_evaluation(state):
+            candidates.append((horizon, state))
+    return candidates[-1] if candidates else None
+
+
 def _fetch_targets(days, as_of, threshold, exclude_signal_date=None):
     conn = _connect()
     try:
         cur = conn.cursor()
-        params = [threshold]
-        asof_filter = ""
-        limit_clause = "LIMIT %s"
-        if as_of:
-            asof_filter = "AND as_of_date = %s"
-            params.append(str(as_of).replace("-", "")[:8])
-            limit_clause = ""
-        else:
-            params.append(days)
-
-        cur.execute(
-            f"""
-            WITH latest AS (
-                SELECT DISTINCT ON (signal_date, as_of_date)
-                    signal_date, as_of_date, total_signals, evaluated_1d,
-                    coverage_1d, generated_at
-                FROM watchlist_evaluation_summary
-                WHERE eval_mode = 'daily'
-                  AND signal_date IS NOT NULL
-                  AND as_of_date IS NOT NULL
-                ORDER BY signal_date, as_of_date, generated_at DESC
-            )
-            SELECT signal_date, as_of_date, total_signals, evaluated_1d, coverage_1d
-            FROM latest
-            WHERE COALESCE(coverage_1d, 0) < %s
-              {asof_filter}
-            ORDER BY as_of_date DESC
-            {limit_clause}
-            """,
-            params,
-        )
-        rows = cur.fetchall()
-        targets = [
-            {
-                "signal_date": row[0],
-                "as_of_date": row[1],
-                "total_signals": row[2],
-                "evaluated_1d": row[3],
-                "coverage_1d": float(row[4] or 0),
-                "missing_evaluation": False,
-            }
-            for row in rows
-        ]
-
-        # A summary-only scan can never discover a completely missing
-        # Evaluation. Reconcile recent signal dates against their canonical T+1
-        # anchor and add mature gaps to the same repair queue.
         run_as_of = str(as_of or datetime.now().strftime("%Y%m%d")).replace("-", "")[:8]
         cur.execute(
             """
-            SELECT trade_date, COUNT(*)
-            FROM stock_signal
-            WHERE trade_date < %s
-            GROUP BY trade_date
-            ORDER BY trade_date DESC
-            LIMIT %s
+            WITH recent AS (
+                SELECT trade_date, COUNT(*) AS signal_count
+                FROM stock_signal
+                WHERE trade_date < %s
+                GROUP BY trade_date
+                ORDER BY trade_date DESC
+                LIMIT %s
+            )
+            SELECT r.trade_date, r.signal_count,
+                   s.evaluated_1d, s.coverage_1d,
+                   s.evaluated_3d, s.coverage_3d
+            FROM recent r
+            LEFT JOIN canonical_daily_evaluation_summary s
+              ON s.signal_date=TO_CHAR(r.trade_date, 'YYYYMMDD')
+            ORDER BY r.trade_date DESC
             """,
             (f"{run_as_of[:4]}-{run_as_of[4:6]}-{run_as_of[6:]}", int(days)),
         )
-        known = {
-            (
-                str(item["signal_date"]).replace("-", "")[:8],
-                str(item["as_of_date"]).replace("-", "")[:8],
-            )
-            for item in targets
-        }
-        for signal_date, signal_count in cur.fetchall():
+        targets = []
+        for signal_date, signal_count, evaluated_1d, coverage_1d, evaluated_3d, coverage_3d in cur.fetchall():
             signal_key = signal_date.strftime("%Y%m%d") if hasattr(signal_date, "strftime") else str(signal_date).replace("-", "")[:8]
-            horizons = resolve_evaluation_horizons(signal_key, run_as_of)
-            if not horizons.get("t1_mature") or not horizons.get("t1_date"):
-                continue
-            anchor = horizons["t1_date"]
-            if (signal_key, anchor) in known:
-                continue
-            cur.execute(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM watchlist_evaluation_summary
-                    WHERE eval_mode = 'daily'
-                      AND signal_date = %s
-                      AND as_of_date = %s
-                )
-                """,
-                (signal_key, anchor),
+            candidate = _select_repair_horizon(
+                signal_date=signal_key,
+                run_as_of=run_as_of,
+                signal_count=signal_count,
+                evaluated_1d=evaluated_1d,
+                coverage_1d=coverage_1d,
+                evaluated_3d=evaluated_3d,
+                coverage_3d=coverage_3d,
+                threshold=threshold,
             )
-            if cur.fetchone()[0]:
+            if not candidate:
                 continue
+            # A T+3 rerun also preserves/fills T+1, so one signal date enters
+            # the queue only once at its latest repairable horizon.
+            horizon, state = candidate
             targets.append({
                 "signal_date": signal_key,
-                "as_of_date": anchor,
-                "total_signals": int(signal_count or 0),
-                "evaluated_1d": 0,
-                "coverage_1d": 0.0,
-                "missing_evaluation": True,
+                "as_of_date": state["target_date"],
+                "horizon": horizon,
+                "total_signals": state["eligible_count"],
+                "evaluated_count": state["evaluated_count"],
+                "coverage": state["coverage"],
+                "coverage_1d": float(coverage_1d or 0),
+                "coverage_3d": float(coverage_3d or 0),
+                "reason_code": state["reason_code"],
+                "missing_evaluation": state["evaluated_count"] == 0,
             })
         excluded = str(exclude_signal_date or "").replace("-", "")[:8]
         if excluded:
@@ -168,12 +153,12 @@ def _write_report(result, suffix):
         f"- 回补后重跑门槛：{result.get('rerun_min_coverage'):.1%}",
         f"- 目标数量：{len(result.get('items', []))}",
         "",
-        "| as_of | signal | 原覆盖 | 补后覆盖 | 质量层级 | 动作 |",
-        "|---|---|---:|---:|---|---|",
+        "| as_of | signal | horizon | 原覆盖 | 补后覆盖 | 质量层级 | 动作 |",
+        "|---|---|---|---:|---:|---|---|",
     ]
     for item in result.get("items", []):
         lines.append(
-            f"| {item.get('as_of_date')} | {item.get('signal_date')} | "
+            f"| {item.get('as_of_date')} | {item.get('signal_date')} | {item.get('horizon')} | "
             f"{item.get('before_coverage', 0):.1%} | {item.get('after_coverage', 0):.1%} | "
             f"{item.get('coverage_level')} | {item.get('action')} |"
         )
@@ -225,7 +210,7 @@ def backfill_low_coverage(
         after_cov = float(coverage.get("coverage") or 0)
         item = {
             **target,
-            "before_coverage": target.get("coverage_1d", 0),
+            "before_coverage": target.get("coverage", 0),
             "after_coverage": after_cov,
             "coverage_status": coverage.get("status"),
             "coverage_level": coverage.get("coverage_level"),
@@ -238,6 +223,9 @@ def backfill_low_coverage(
             "commands": [],
         }
 
+        # A completely missing Evaluation should still be materialized once the
+        # operational 80% floor is met; its data status remains ``degraded``
+        # until the governed 90% completeness threshold is reached.
         effective_rerun_coverage = 0.80 if target.get("missing_evaluation") else rerun_min_coverage
         item["effective_rerun_coverage"] = effective_rerun_coverage
         if after_cov >= effective_rerun_coverage:

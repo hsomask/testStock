@@ -8,6 +8,7 @@ from datetime import date
 import psycopg2
 
 from analysis.evaluation_time import resolve_evaluation_horizons
+from analysis.evaluation_status import resolve_evaluation_status
 from analysis.trade_calendar import get_calendar_status, normalize_trade_date
 from data.config import DATABASE_DSN
 
@@ -40,6 +41,10 @@ def _overall_status(statuses, deferred_statuses):
     hard = {"missing", "duplicate", "identity_mismatch", "blocked"}
     if any(status in hard for status in statuses):
         return "failed"
+    if "failed" in statuses:
+        return "failed"
+    if "degraded" in statuses:
+        return "degraded"
     return "deferred" if "deferred" in deferred_statuses else "success"
 
 
@@ -114,44 +119,50 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
         if signal_status != "success": missing.append("stock_signal" if raw_signal_count == 0 else "stock_signal_identity")
         if snapshot_status != "success": missing.append("candidate_feature_snapshot_identity")
 
-        evaluation_complete = signal_count > 0 and missing_evaluation_count == 0
-        if evaluation_complete:
-            kline_status = "success" if coverage >= 0.8 else "deferred"
-            t1_status = "success"
-        elif not horizons.get("t1_mature"):
-            kline_status = "pending"
-            t1_status = "pending"
-        elif coverage < 0.8:
-            kline_status = "deferred"
-            t1_status = "deferred" if evaluation_count == 0 else "success"
-            if evaluation_count == 0: missing.append("evaluation_t1_low_coverage")
-        else:
-            kline_status = "success"
-            t1_status = "success" if evaluation_complete else "missing"
-            if t1_status == "missing": missing.append("evaluation_t1")
-
-        if not horizons.get("t3_mature"):
-            t3_status = "pending"
-        elif not evaluation_count:
-            if t1_status == "deferred":
-                t3_status = "deferred"
-                missing.append("evaluation_t3_low_coverage")
-            else:
-                t3_status = "blocked"
-                missing.append("evaluation_t3_blocked")
-        else:
-            t3_complete = _count(
-                cur,
-                """
-                SELECT COUNT(*)
-                FROM canonical_signal_lineage l
-                JOIN canonical_daily_evaluation_result r ON r.id=l.evaluation_row_id
-                WHERE l.trade_date=%s AND r.is_mature_3d IS TRUE
-                """,
-                (_sql_date(trade_text),),
-            )
-            t3_status = "success" if t3_complete == signal_count else "missing"
-            if t3_status == "missing": missing.append("evaluation_t3")
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE r.next_1d_return IS NOT NULL),
+                COUNT(*) FILTER (
+                    WHERE r.is_mature_3d IS TRUE AND r.next_3d_return IS NOT NULL
+                )
+            FROM canonical_signal_lineage l
+            LEFT JOIN canonical_daily_evaluation_result r
+              ON r.id=l.evaluation_row_id
+            WHERE l.trade_date=%s
+            """,
+            (_sql_date(trade_text),),
+        )
+        evaluated_t1_count, evaluated_t3_count = [
+            int(value or 0) for value in cur.fetchone()
+        ]
+        t1_evaluation = resolve_evaluation_status(
+            mature=horizons.get("t1_mature", False),
+            target_date=target_1d,
+            as_of_date=as_of_text,
+            eligible_count=signal_count,
+            evaluated_count=evaluated_t1_count,
+            execution_status="success" if evaluated_t1_count else "unknown",
+        )
+        t3_evaluation = resolve_evaluation_status(
+            mature=horizons.get("t3_mature", False),
+            target_date=horizons.get("t3_date"),
+            as_of_date=as_of_text,
+            eligible_count=signal_count,
+            evaluated_count=evaluated_t3_count,
+            execution_status="success" if evaluated_t3_count else "unknown",
+        )
+        t1_status = t1_evaluation["status"]
+        t3_status = t3_evaluation["status"]
+        kline_status = (
+            "pending" if not horizons.get("t1_mature")
+            else "success" if coverage >= 0.8
+            else "deferred"
+        )
+        if t1_status in {"missing", "degraded", "failed"}:
+            missing.append(f"evaluation_t1_{t1_evaluation['reason_code']}")
+        if t3_status in {"missing", "degraded", "failed"}:
+            missing.append(f"evaluation_t3_{t3_evaluation['reason_code']}")
 
         email_status = _email_status(email_rows, email_attempt_rows)
         if email_status == "missing": missing.append("daily_email")
@@ -178,6 +189,10 @@ def reconcile_trade_date(trade_date, as_of_date=None, conn=None, persist=False):
                 "missing_evaluation_identity_count": missing_evaluation_count,
                 "expected_report_count": 1,
                 "email_attempt_count": email_attempt_rows,
+                "evaluation": {
+                    "t1": t1_evaluation,
+                    "t3": t3_evaluation,
+                },
             },
         }
         if persist:

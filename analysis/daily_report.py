@@ -486,6 +486,10 @@ def main():
                         help="强制执行（非交易日也运行）")
     parser.add_argument("--date", type=str, default=None,
                         help="日期 YYYYMMDD，默认今天")
+    parser.add_argument(
+        "--rebuild-existing-signals", action="store_true",
+        help="显式允许覆盖已有历史信号；仅用于人工数据修复",
+    )
     args = parser.parse_args()
 
     force = args.force
@@ -511,6 +515,16 @@ def main():
         db_conn = _get_db_conn()
     except Exception as e:
         logger.exception(f"数据库连接失败：{e}")
+
+    if db_conn and not args.rebuild_existing_signals:
+        from analysis.report_dispatcher import inspect_signal_set
+        existing = inspect_signal_set(trade_date, conn=db_conn)
+        if existing["state"] != "missing":
+            db_conn.close()
+            raise RuntimeError(
+                "existing signal set is protected; use analysis.report_rerender "
+                "or explicitly pass --rebuild-existing-signals"
+            )
 
     job_run = log_job_start("daily_report", trade_date)
     source_run_id = job_run.get("run_id") if isinstance(job_run, dict) else None

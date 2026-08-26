@@ -24,11 +24,33 @@ def _get_db_conn():
         return None
 
 
-def _fetch_hist_for_codes(codes, days=80):
-    """批量获取历史K线"""
+def _fetch_hist_for_codes(codes, days=80, conn=None):
+    """优先复用数据库 K 线，仅对完全缺失的代码调用外部数据源。"""
     from analysis.data_fetcher import get_stock_history
     result = {}
-    for code in codes:
+    if conn is not None and codes:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT code, trade_date, open, close, high, low, volume, amount
+            FROM stock_hist_kline
+            WHERE code = ANY(%s)
+              AND trade_date >= CURRENT_DATE - %s
+            ORDER BY code, trade_date
+            """,
+            (list(codes), int(days) + 20),
+        )
+        columns = [item[0] for item in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        if rows:
+            frame = pd.DataFrame(rows, columns=columns).rename(columns={"trade_date": "date"})
+            for code, group in frame.groupby("code"):
+                result[str(code)] = group.drop(columns=["code"]).reset_index(drop=True)
+    missing = [code for code in codes if code not in result]
+    if missing:
+        logger.info("K-line DB cache miss for %s/%s codes", len(missing), len(codes))
+    for code in missing:
         hist = get_stock_history(code, days=days)
         if not hist.empty and "close" in hist.columns:
             result[code] = hist
@@ -54,7 +76,7 @@ def track_signals(lookback_days=10):
     # 读取过去 N 天的信号（trade_date 为 YYYYMMDD 格式 VARCHAR）
     start_date = (datetime.now() - timedelta(days=lookback_days + 5)).strftime("%Y%m%d")
     cur.execute(
-        "SELECT DISTINCT signal_id, trade_date, code, name, strategy, close_price, risk_level, action_signal "
+        "SELECT DISTINCT signal_id, trade_date, code, name, strategy, close_price, risk_level, action_signal, pressure_price, invalid_price "
         "FROM stock_signal WHERE trade_date >= %s ORDER BY trade_date",
         (start_date,)
     )
@@ -71,12 +93,14 @@ def track_signals(lookback_days=10):
     print(f"追踪 {len(signals)} 条信号，{len(unique_codes)} 只股票")
 
     # 批量取历史K线
-    hist_map = _fetch_hist_for_codes(unique_codes)
+    hist_map = _fetch_hist_for_codes(unique_codes, conn=conn)
+    # 结束只读事务，避免外部数据兜底与计算期间长期占用数据库快照。
+    conn.commit()
 
     updated = 0
     skipped = 0
 
-    for signal_id, trade_date, code, name, strategy, signal_close, risk_level, action_signal in signals:
+    for signal_id, trade_date, code, name, strategy, signal_close, risk_level, action_signal, pressure_price, invalid_price in signals:
         signal_close = float(signal_close) if signal_close else 0
         hist = hist_map.get(code)
         if hist is None or hist.empty:
@@ -135,16 +159,10 @@ def track_signals(lookback_days=10):
         hit_pressure = False
         hit_invalid = False
 
-        cur.execute(
-            "SELECT pressure_price, invalid_price FROM stock_signal WHERE signal_id=%s",
-            (signal_id,)
-        )
-        row = cur.fetchone()
-        if row:
-            pp, ip = row
-            if pp and max_high_5d and max_high_5d >= float(pp):
+        if pressure_price or invalid_price:
+            if pressure_price and max_high_5d and max_high_5d >= float(pressure_price):
                 hit_pressure = True
-            if ip and min_low_5d and min_low_5d <= float(ip):
+            if invalid_price and min_low_5d and min_low_5d <= float(invalid_price):
                 hit_invalid = True
 
         try:

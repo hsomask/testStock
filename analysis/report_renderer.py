@@ -937,118 +937,8 @@ def _correction_effectiveness_lines(data):
     return lines
 
 
-def render_unified_report(
-    trade_date, data_status, quality, market, industry, concept,
-    sentiment, selectors, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None, report_context=None,
-    themes=None, t1_data=None,
-):
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
-    lines = []
-
-    # context 优先取值
-    market_context = _get_context_section(report_context, "market")
-    sentiment_context = _get_context_section(report_context, "sentiment")
-    m_score = market_context.get("score", market.get("score", 0))
-    m_status = market_context.get("status", market.get("status", ""))
-    s_score = sentiment_context.get("score", sentiment.get("score", 0))
-    s_stage = sentiment_context.get("stage", sentiment.get("stage", ""))
-    pos = validate_position_consistency(trade_plan)
-
-    # ── 预计算 insights ──
-    weak_triggers, weak_checked, weak_items, weak_green, weak_lb = check_weak_market(market)
-    weak_tag, weak_conclusion = weak_market_conclusion(weak_triggers, weak_checked, weak_green, weak_lb)
-    weak_insufficient = sum(1 for item in weak_items if item.get("status") == "insufficient")
-    profit = assess_profit_effect(market)
-    width = compute_market_width(market)
-    width_ok = width["adv_ratio"] > 1.2 and width["green_ratio"] < 0.5
-    width_weak = width["green_ratio"] > 0.6 or width["adv_ratio"] < 0.5
-    env = assess_trading_environment(market, sentiment, trade_plan, profit)
-    env["weak_market_triggers"] = f"{weak_triggers}/{weak_checked}"
-    trade_mode, mode_summary = _trading_mode(m_score, width, profit, weak_triggers, trade_plan)
-    can_do, avoid_do = _mode_actions(trade_mode)
-    board_stage_map = _board_stage_map(board_trend_summary)
-    obs_directions, obs_main, receding = _extract_observation_directions(board_ratio_changes)
-    # Merge themes from both detect_main_themes and sentiment
-    all_raw_themes = list(themes or [])
-    if isinstance(sentiment, dict) and sentiment.get("themes"):
-        all_raw_themes.extend(sentiment["themes"])
-    effective_themes, dynamic_themes = filter_effective_themes(all_raw_themes)
-    validation_themes = [{"name": name} for name, _ in obs_main[:3]] if obs_main else effective_themes
-    validation_items = generate_validation_checklist(market, validation_themes, profit, weak_triggers)
-
-    s_stage, stage_explain = explain_sentiment_stage(s_score, s_stage)
-    failed_limitup_value, failed_limitup_note = _render_failed_limitup_cells(market, sentiment)
-    yesterday_limitup_value, yesterday_limitup_note = _render_yesterday_limitup_cells(market, sentiment)
-    consecutive_height_value, consecutive_height_note = _render_consecutive_height_cells(market, sentiment)
-    three_board_value, three_board_note = _render_three_board_cells(market, sentiment)
-
-    # ── YAML frontmatter ──
-    lines.append("---")
-    lines.append(f"date: {date_display}")
-    lines.append(f"market_score: {m_score}")
-    lines.append(f"market_status: {m_status}")
-    lines.append(f"sentiment_score: {s_score}")
-    lines.append(f"sentiment_stage: {s_stage}")
-    lines.append(f"position_cap: {pos['max_pct']}成")
-    lines.append(f"data_confidence: {quality.get('confidence_score', 0)}")
-    lines.append("---")
-    lines.append("")
-
-    # ── 标题 ──
-    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
-        pd.Timestamp(date_display).dayofweek]
-    lines.append(f"# A股每日复盘 | {date_display}（{weekday}）")
-    lines.append("")
-
-    # ══════════════════════════════════════
-    # 0. 今日摘要
-    # ══════════════════════════════════════
-    lines.append("## 0. 今日结论")
-    lines.append("")
-    lines.append(f"**一句话：** {trade_mode}模式。{mode_summary}")
-    lines.append("")
-    lines.append("**交易纪律：**")
-    lines.append(f"- 当前模式：{trade_mode}")
-    if trade_mode == "空仓":
-        lines.append(f"- 实盘建议：不开新仓；模拟观察仓位最多 {pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
-    else:
-        lines.append(f"- 仓位上限：{pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
-    lines.append(f"- 可以做：{can_do}")
-    lines.append(f"- 不要做：{avoid_do}")
-    lines.append(f"- 最重要验证：{validation_items[0] if validation_items else '观察池分层是否继续有效'}")
-    lines.append("")
-    watch_focus, avoid_focus, buy_rule, fail_signal = _execution_focus(
-        trade_mode, obs_main, receding, width_weak, s_stage
-    )
-    lines.append("**今日执行：**")
-    lines.append(f"- 只看：{watch_focus}")
-    lines.append(f"- 回避：{avoid_focus}")
-    focus_label = "复盘价位" if trade_mode == "空仓" else "买点"
-    lines.append(f"- {focus_label}：{buy_rule}")
-    lines.append(f"- 放弃信号：{fail_signal}")
-    lines.append("")
-    lines.append("| 项目 | 结论 |")
-    lines.append("|------|------|")
-    lines.append(f"| 市场综合评分 | {m_score:.1f} / 100 |")
-    lines.append(f"| 市场状态 | {m_status} |")
-    lines.append(f"| 短线情绪阶段 | {s_stage} |")
-    if trade_mode == "空仓":
-        lines.append(f"| 实盘仓位 | 不开新仓 |")
-        lines.append(f"| 模拟观察仓位上限 | {pos['max_pct']}成 |")
-    else:
-        lines.append(f"| 总仓位上限 | {pos['max_pct']}成 |")
-    lines.append(f"| 单票上限 | {pos['single_pct']}成 |")
-    lines.append(f"| 数据可信度 | {quality.get('confidence_score', 0)} / 100 |")
-    lines.append("")
-    lines.append(f"**市场原始摘要：** {market.get('summary', '数据生成中')}")
-    lines.append("")
-    lines.append("---")
-    lines.append("")
-
-    # ══════════════════════════════════════
-    # 1. 昨日观察池兑现复盘（T+1）
-    # ══════════════════════════════════════
+def append_evaluation_section(lines, t1_data):
+    """Append the canonical Evaluation section used by full and safe rerenders."""
     lines.append("## 1. 昨日观察池兑现复盘（T+1）")
     lines.append("")
 
@@ -1206,6 +1096,123 @@ def render_unified_report(
     lines.extend(_correction_effectiveness_lines(
         (t1_data or {}).get("correction_effectiveness")
     ))
+
+
+
+
+def render_unified_report(
+    trade_date, data_status, quality, market, industry, concept,
+    sentiment, selectors, board_ratio_changes=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
+    themes=None, t1_data=None,
+):
+    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    lines = []
+
+    # context 优先取值
+    market_context = _get_context_section(report_context, "market")
+    sentiment_context = _get_context_section(report_context, "sentiment")
+    m_score = market_context.get("score", market.get("score", 0))
+    m_status = market_context.get("status", market.get("status", ""))
+    s_score = sentiment_context.get("score", sentiment.get("score", 0))
+    s_stage = sentiment_context.get("stage", sentiment.get("stage", ""))
+    pos = validate_position_consistency(trade_plan)
+
+    # ── 预计算 insights ──
+    weak_triggers, weak_checked, weak_items, weak_green, weak_lb = check_weak_market(market)
+    weak_tag, weak_conclusion = weak_market_conclusion(weak_triggers, weak_checked, weak_green, weak_lb)
+    weak_insufficient = sum(1 for item in weak_items if item.get("status") == "insufficient")
+    profit = assess_profit_effect(market)
+    width = compute_market_width(market)
+    width_ok = width["adv_ratio"] > 1.2 and width["green_ratio"] < 0.5
+    width_weak = width["green_ratio"] > 0.6 or width["adv_ratio"] < 0.5
+    env = assess_trading_environment(market, sentiment, trade_plan, profit)
+    env["weak_market_triggers"] = f"{weak_triggers}/{weak_checked}"
+    trade_mode, mode_summary = _trading_mode(m_score, width, profit, weak_triggers, trade_plan)
+    can_do, avoid_do = _mode_actions(trade_mode)
+    board_stage_map = _board_stage_map(board_trend_summary)
+    obs_directions, obs_main, receding = _extract_observation_directions(board_ratio_changes)
+    # Merge themes from both detect_main_themes and sentiment
+    all_raw_themes = list(themes or [])
+    if isinstance(sentiment, dict) and sentiment.get("themes"):
+        all_raw_themes.extend(sentiment["themes"])
+    effective_themes, dynamic_themes = filter_effective_themes(all_raw_themes)
+    validation_themes = [{"name": name} for name, _ in obs_main[:3]] if obs_main else effective_themes
+    validation_items = generate_validation_checklist(market, validation_themes, profit, weak_triggers)
+
+    s_stage, stage_explain = explain_sentiment_stage(s_score, s_stage)
+    failed_limitup_value, failed_limitup_note = _render_failed_limitup_cells(market, sentiment)
+    yesterday_limitup_value, yesterday_limitup_note = _render_yesterday_limitup_cells(market, sentiment)
+    consecutive_height_value, consecutive_height_note = _render_consecutive_height_cells(market, sentiment)
+    three_board_value, three_board_note = _render_three_board_cells(market, sentiment)
+
+    # ── YAML frontmatter ──
+    lines.append("---")
+    lines.append(f"date: {date_display}")
+    lines.append(f"market_score: {m_score}")
+    lines.append(f"market_status: {m_status}")
+    lines.append(f"sentiment_score: {s_score}")
+    lines.append(f"sentiment_stage: {s_stage}")
+    lines.append(f"position_cap: {pos['max_pct']}成")
+    lines.append(f"data_confidence: {quality.get('confidence_score', 0)}")
+    lines.append("---")
+    lines.append("")
+
+    # ── 标题 ──
+    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][
+        pd.Timestamp(date_display).dayofweek]
+    lines.append(f"# A股每日复盘 | {date_display}（{weekday}）")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 0. 今日摘要
+    # ══════════════════════════════════════
+    lines.append("## 0. 今日结论")
+    lines.append("")
+    lines.append(f"**一句话：** {trade_mode}模式。{mode_summary}")
+    lines.append("")
+    lines.append("**交易纪律：**")
+    lines.append(f"- 当前模式：{trade_mode}")
+    if trade_mode == "空仓":
+        lines.append(f"- 实盘建议：不开新仓；模拟观察仓位最多 {pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
+    else:
+        lines.append(f"- 仓位上限：{pos['max_pct']}成，单票不超过 {pos['single_pct']}成")
+    lines.append(f"- 可以做：{can_do}")
+    lines.append(f"- 不要做：{avoid_do}")
+    lines.append(f"- 最重要验证：{validation_items[0] if validation_items else '观察池分层是否继续有效'}")
+    lines.append("")
+    watch_focus, avoid_focus, buy_rule, fail_signal = _execution_focus(
+        trade_mode, obs_main, receding, width_weak, s_stage
+    )
+    lines.append("**今日执行：**")
+    lines.append(f"- 只看：{watch_focus}")
+    lines.append(f"- 回避：{avoid_focus}")
+    focus_label = "复盘价位" if trade_mode == "空仓" else "买点"
+    lines.append(f"- {focus_label}：{buy_rule}")
+    lines.append(f"- 放弃信号：{fail_signal}")
+    lines.append("")
+    lines.append("| 项目 | 结论 |")
+    lines.append("|------|------|")
+    lines.append(f"| 市场综合评分 | {m_score:.1f} / 100 |")
+    lines.append(f"| 市场状态 | {m_status} |")
+    lines.append(f"| 短线情绪阶段 | {s_stage} |")
+    if trade_mode == "空仓":
+        lines.append(f"| 实盘仓位 | 不开新仓 |")
+        lines.append(f"| 模拟观察仓位上限 | {pos['max_pct']}成 |")
+    else:
+        lines.append(f"| 总仓位上限 | {pos['max_pct']}成 |")
+    lines.append(f"| 单票上限 | {pos['single_pct']}成 |")
+    lines.append(f"| 数据可信度 | {quality.get('confidence_score', 0)} / 100 |")
+    lines.append("")
+    lines.append(f"**市场原始摘要：** {market.get('summary', '数据生成中')}")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    # ══════════════════════════════════════
+    # 1. 昨日观察池兑现复盘（T+1）
+    # ══════════════════════════════════════
+    append_evaluation_section(lines, t1_data)
 
     # ══════════════════════════════════════
     # 2. 市场与交易环境

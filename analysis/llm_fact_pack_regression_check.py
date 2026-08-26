@@ -3,6 +3,7 @@ from analysis.llm_fact_pack import (
     FACT_PACK_SCHEMA_VERSION,
     _canonical_hash,
     _evaluation_state,
+    _evaluation_data_status,
     _status_and_limitations,
 )
 
@@ -20,11 +21,20 @@ def main():
             "t3": {"state": "unavailable_price"},
         }
     }]
+    evaluation_status = _evaluation_data_status(
+        signals,
+        {
+            "t1_mature": True, "t3_mature": True,
+            "t1_date": "20260821", "t3_date": "20260825",
+        },
+        "20260825",
+    )
     status, limits = _status_and_limitations(
         trade_date="20260820", as_of_date="20260825",
         signal_rows=[{"snapshot_row_id": 1}], signals=signals,
         report={"id": 1}, quality={"ma_missing_ratio": 0.67},
         artifact_summary={"status": "available"},
+        evaluation_status=evaluation_status,
     )
     assert status == "degraded"
     assert {item["code"] for item in limits} == {

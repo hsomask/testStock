@@ -9,13 +9,26 @@ LLM 只允许解释、总结、比较和诊断。它不参与选股、评分、�
 
 1. `analysis.llm_fact_pack`：从规范视图读取事实，生成
    `llm_fact_pack_v1`。每个事实包具有内容哈希、成熟状态、证据引用和限制项。
+   Evaluation 同时保留执行状态和数据状态；成熟覆盖率低于 90% 时标记
+   `degraded`，不得由模型解释成完整评估。
 2. `analysis.llm_adapter`：供应商无关的模型接口。输出必须符合
    `llm_interpretation_v1`，每条判断必须引用事实包中存在的证据。
    `compare`任务必须同时提供两份完整事实包，不能用日报文本替代第二份证据。
 3. `analysis.llm_governance`：校验内容哈希、限制项确认、越权文本、调用幂等和
    审计记录。该层是唯一允许调用模型适配器的入口。
+4. `analysis.llm_fact_pack_validator`：独立质量门禁。身份、快照、哈希、日期、
+   Evaluation 状态、主链状态或敏感字段不合格时，模型调用被阻断。
+5. `analysis.llm_sidecar_runner`：唯一人工/定时旁路入口。未配置 `--provider` 时
+   只构建并校验事实包；旁路失败不得影响日报、邮件或 Evaluation。
+
+模型输出中的事实或推断除 `evidence_refs` 外，还必须提供 `fact_refs`，包含事实
+路径与原值。适配层逐项解析路径并核对值，拒绝不存在的路径和被模型改写的数字。
 
 ## Evaluation 状态
+
+Evaluation 使用两级阈值，不得混为同一口径：80% 是行情覆盖的最低可运行线，
+允许生成带低权重标记的结果；90% 是治理层认定 `success` 的完整覆盖线。
+覆盖率处于 80%～90% 时统一标记为 `degraded`，可以展示但必须声明限制。
 
 - `pending`：目标交易日尚未到期，不是失败。
 - `success`：已到期且收益值存在。

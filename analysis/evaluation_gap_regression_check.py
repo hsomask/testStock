@@ -41,6 +41,21 @@ def main():
 
     missing, existing = result["items"]
     errors = []
+    with patch.object(
+        backfill,
+        "resolve_evaluation_horizons",
+        return_value={
+            "t1_mature": True, "t3_mature": True,
+            "t1_date": "20260821", "t3_date": "20260825",
+        },
+    ):
+        horizon, state = backfill._select_repair_horizon(
+            signal_date="20260820", run_as_of="20260826", signal_count=26,
+            evaluated_1d=26, coverage_1d=1.0,
+            evaluated_3d=18, coverage_3d=18 / 26,
+        )
+    if horizon != "t3" or state.get("reason_code") != "mature_low_coverage":
+        errors.append("mature low-coverage T+3 was not selected for repair")
     if missing["effective_rerun_coverage"] != 0.80:
         errors.append("completely missing Evaluation does not use the formal 80% threshold")
     if missing["action"] != "rerun_evaluation":

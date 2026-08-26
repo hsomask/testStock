@@ -9,6 +9,8 @@ def main():
     steps = daily_steps("20260810")
     assert validate_steps(steps)
     assert [s.name for s in steps] == ["bootstrap", "evaluation", "daily_report", "daily_email", "daily_reconcile"]
+    report_command = next(s.command for s in steps if s.name == "daily_report")
+    assert "analysis.report_dispatcher" in report_command and "entrypoint.sh" not in report_command
     assert next(step for step in steps if step.name == "evaluation").retries == 0
     assert next(step for step in steps if step.name == "bootstrap").retries == 1
     assert run_daily("20260810", dry_run=True)["status"] == "dry_run"

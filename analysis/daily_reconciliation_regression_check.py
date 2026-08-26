@@ -19,6 +19,8 @@ def main():
         errors.append("K-line deferral does not propagate")
     if _overall_status(("success", "deferred"), ("success", "deferred")) != "deferred":
         errors.append("mature T+3 low-coverage deferral does not propagate")
+    if _overall_status(("success", "degraded"), ("success",)) != "degraded":
+        errors.append("mature low-coverage Evaluation degradation does not propagate")
     if _overall_status(("duplicate",), ("success",)) != "failed":
         errors.append("duplicate canonical report does not fail reconciliation")
 

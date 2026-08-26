@@ -25,3 +25,4 @@ __pycache__/
 reports/backtest/
 reports/evaluation/
 reports/ml/
+reports/llm/

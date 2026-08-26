@@ -184,7 +184,14 @@ def check_d_t1_exists(text):
 def check_e_snapshot_no_official_rate(text):
     """E: 快照复盘不展示正式胜率"""
     t1_sec = extract_section(text, "## 1. 昨日观察池兑现复盘（T+1）", "## 2.")
-    if "快照复盘" not in t1_sec and "降级" not in t1_sec:
+    # “纠偏效果”会合法出现“降级样本”等措辞，不能据此判断整段采用
+    # 快照口径；只认渲染器输出的明确快照复盘标志。
+    snapshot_markers = (
+        "| 复盘口径 | 快照复盘（降级） |",
+        "T+1 使用快照复盘",
+        "当日行情快照生成降级复盘",
+    )
+    if not any(marker in t1_sec for marker in snapshot_markers):
         return []
     failures = []
     for term in SNAPSHOT_FORBIDDEN:

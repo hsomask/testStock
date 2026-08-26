@@ -126,6 +126,46 @@ def _apply_target(conn, target, records, overall, as_of_date, run_id=None):
         patch = build_t3_patch(detail)
         cur.execute(
             """
+            SELECT next_3d_return, max_3d_return, max_3d_drawdown, is_mature_3d,
+                   target_3d_date, t3_price_status, t3_missing_reason,
+                   verification_tag_3d, feedback_label_3d, feedback_score_3d,
+                   attribution_tags_3d, attribution_text_3d
+            FROM watchlist_evaluation_result
+            WHERE eval_mode='daily' AND evaluation_schema_version=%s
+              AND signal_trade_date=%s AND as_of_date=%s AND signal_key=%s
+            """,
+            (EVALUATION_SCHEMA_VERSION, target["signal_date"], target["anchor_date"], detail["signal_key"]),
+        )
+        current = cur.fetchone()
+        if current:
+            current_feedback_replaceable = current[8] in (None, "data_insufficient")
+            desired = (
+                current[0] if current[0] is not None else patch["next_3d_return"],
+                current[1] if current[1] is not None else patch["max_3d_return"],
+                current[2] if current[2] is not None else patch["max_3d_drawdown"],
+                patch["is_mature_3d"],
+                current[4] if current[4] is not None else patch["target_3d_date"],
+                patch["t3_price_status"], patch["t3_missing_reason"],
+                patch["verification_tag_3d"] if current[7] in (None, "insufficient") else current[7],
+                patch["feedback_label_3d"] if current_feedback_replaceable else current[8],
+                current[9] if current[9] is not None else patch["feedback_score_3d"],
+                patch["attribution_tags_3d"] if current_feedback_replaceable else current[10],
+                patch["attribution_text_3d"] if current_feedback_replaceable else current[11],
+            )
+            def comparable(value):
+                if isinstance(value, (dict, list)):
+                    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+                if hasattr(value, "as_tuple"):
+                    return float(value)
+                if hasattr(value, "strftime"):
+                    return value.strftime("%Y%m%d")
+                if isinstance(value, str) and len(value.replace("-", "")) == 8 and value.replace("-", "").isdigit():
+                    return value.replace("-", "")
+                return value
+            if tuple(map(comparable, current)) == tuple(map(comparable, desired)):
+                continue
+        cur.execute(
+            """
             UPDATE watchlist_evaluation_result
             SET next_3d_return = COALESCE(next_3d_return, %s),
                 max_3d_return = COALESCE(max_3d_return, %s),
@@ -218,6 +258,15 @@ def _apply_target(conn, target, records, overall, as_of_date, run_id=None):
           AND evaluation_schema_version = %s
           AND signal_date = %s
           AND as_of_date = %s
+          AND (
+              evaluated_3d IS DISTINCT FROM %s
+              OR coverage_3d IS DISTINCT FROM %s
+              OR avg_next_3d_return IS DISTINCT FROM %s
+              OR win_rate_3d IS DISTINCT FROM %s
+              OR avg_max_3d_return IS DISTINCT FROM %s
+              OR avg_max_3d_drawdown IS DISTINCT FROM %s
+              OR evaluation_phase IS DISTINCT FROM 't1+t3'
+          )
         """,
         (
             total,
@@ -238,6 +287,12 @@ def _apply_target(conn, target, records, overall, as_of_date, run_id=None):
             EVALUATION_SCHEMA_VERSION,
             target["signal_date"],
             target["anchor_date"],
+            evaluated_3d,
+            evaluated_3d / total if total else 0,
+            metrics.get("avg_next_3d_return"),
+            metrics.get("win_rate_3d"),
+            metrics.get("avg_max_3d_return"),
+            metrics.get("avg_max_3d_drawdown"),
         ),
     )
     cur.close()
