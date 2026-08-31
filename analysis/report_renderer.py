@@ -1757,6 +1757,182 @@ def render_unified_report(
 
 # ── 兼容入口 ──
 
+def append_compact_evaluation_section(lines, t1_data):
+    """Append the short T+1 review used by the action-oriented main report."""
+    lines.append("## 1. 昨日观察池兑现复盘（T+1）")
+    lines.append("")
+    data = t1_data or {}
+    status = data.get("status")
+    if not data.get("available") or status in {"defer", "missing"}:
+        reason = data.get("message") or data.get("reason") or "Evaluation 尚未形成完整结果"
+        lines.append(f"> **暂缓评价：** {reason}。明日计划不使用未成熟的收益结论。")
+        lines.append("")
+        return
+    # The canonical reader returns a flat mapping.  Accept the short-lived
+    # nested fixture shape as a compatibility fallback for older callers.
+    td = data.get("data") or data
+    official = status == "ok"
+    lines.append(
+        f"**完成度：** {td.get('evaluated_1d', 0)}/{td.get('total_signals', 0)}　"
+        f"**平均收益：** {_fmt_pct(td.get('avg_return_1d'))}　"
+        f"**上涨比例：** {_fmt_pct(td.get('win_rate_1d'))}"
+    )
+    lines.append("")
+    conclusion = "正式样本，可用于修正次日计划" if official else "降级样本，只作方向观察"
+    lines.append(f"> **复盘结论：** {conclusion}。")
+    lines.append("")
+    top = (td.get("top_winners") or td.get("top") or [])[:2]
+    bottom = (td.get("top_losers") or td.get("bottom") or [])[:2]
+    if top or bottom:
+        lines.append("| 分类 | 股票 | 表现 | 复盘要点 |")
+        lines.append("|---|---|---:|---|")
+        for label, rows in (("较好", top), ("较弱", bottom)):
+            for item in rows:
+                note = item.get("attribution_text") or item.get("feedback_label") or "等待更多样本"
+                lines.append(
+                    f"| {label} | {item.get('name', '-')} | {_fmt_pct(item.get('ret'))} | "
+                    f"{_short_text(note, 30)} |"
+                )
+        lines.append("")
+    correction = data.get("correction_effectiveness") or {}
+    summary = correction.get("summary") or {}
+    sample_count = summary.get("total") or summary.get("sample_count")
+    pit_avoid = summary.get("pit_avoid_rate")
+    if correction.get("status") == "available" and sample_count:
+        result = f"避坑率 {_fmt_pct(pit_avoid)}" if pit_avoid is not None else "已有可用样本"
+        lines.append(f"**纠偏效果：** {result}，样本 {sample_count} 条。")
+        lines.append("")
+
+
+def render_compact_daily_report(
+    trade_date, data_status, quality, market, industry, concept,
+    sentiment, selectors, board_ratio_changes=None,
+    trade_plan=None, board_trend_summary=None, report_context=None,
+    themes=None, t1_data=None,
+):
+    """Render the short review + next-day playbook; facts stay in the appendix."""
+    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}"
+    market_context = _get_context_section(report_context, "market")
+    sentiment_context = _get_context_section(report_context, "sentiment")
+    m_score = market_context.get("score", market.get("score", 0))
+    m_status = market_context.get("status", market.get("status", ""))
+    s_score = sentiment_context.get("score", sentiment.get("score", 0))
+    s_stage, _ = explain_sentiment_stage(
+        s_score, sentiment_context.get("stage", sentiment.get("stage", ""))
+    )
+    pos = validate_position_consistency(trade_plan)
+    weak_triggers, weak_checked, *_ = check_weak_market(market)
+    profit = assess_profit_effect(market)
+    width = compute_market_width(market)
+    width_weak = width["green_ratio"] > 0.6 or width["adv_ratio"] < 0.5
+    trade_mode, mode_summary = _trading_mode(
+        m_score, width, profit, weak_triggers, trade_plan
+    )
+    can_do, avoid_do = _mode_actions(trade_mode)
+    _, obs_main, receding = _extract_observation_directions(board_ratio_changes)
+    watch_focus, avoid_focus, buy_rule, fail_signal = _execution_focus(
+        trade_mode, obs_main, receding, width_weak, s_stage
+    )
+    validation_themes = [{"name": name} for name, _ in obs_main[:3]]
+    validations = generate_validation_checklist(
+        market, validation_themes, profit, weak_triggers
+    )[:3]
+    lines = [
+        "---", f"date: {date_display}", f"market_status: {m_status}",
+        f"market_score: {m_score}", f"sentiment_stage: {s_stage}",
+        f"position_cap: {pos['max_pct']}成",
+        f"data_confidence: {quality.get('confidence_score', 0)}", "---", "",
+        f"# A股收盘复盘与次日计划｜{date_display}", "",
+        "## 0. 收盘后先看结论", "",
+        f"> **{trade_mode}模式。{mode_summary}**", "",
+        "| 复盘项目 | 今日结果 | 对次日的影响 |",
+        "|---|---|---|",
+        f"| 市场环境 | {m_status}（{m_score:.1f}分） | {can_do} |",
+        f"| 短线情绪 | {s_stage}（{s_score:.1f}分） | {avoid_do} |",
+        f"| 市场宽度 | 上涨{width['up_count']} / 下跌{width['down_count']} | "
+        f"{'机会集中，只看核心' if width_weak else '可以参与，但仍需确认持续性'} |",
+        f"| 赚钱效应 | {profit['level']} | {_short_text(profit['detail'], 30)} |",
+        f"| 数据可信度 | {quality.get('confidence_score', 0)}/100 | "
+        f"{'可用于次日计划' if quality.get('confidence_score', 0) >= 80 else '只作观察，不下确定结论'} |",
+        "",
+        f"**次日基础仓位：** 0～{min(pos['max_pct'], 3)}成　"
+        f"**确认后上限：** {pos['max_pct']}成　**单票上限：** {pos['single_pct']}成",
+        "",
+        "## 今日复盘", "",
+        f"- **市场发生了什么：** {market.get('summary', '市场数据生成中')}",
+        f"- **主线观察：** {'、'.join(name for name, _ in obs_main[:3]) or '暂无明确主线'}。",
+        f"- **退潮回避：** {'、'.join(name for name, _ in receding[:3]) or avoid_focus}。",
+        f"- **对次日的判断：** 只看{watch_focus}；{buy_rule}。",
+        "",
+    ]
+    append_compact_evaluation_section(lines, t1_data)
+    lines.extend([
+        "## 2. 次日操作计划", "",
+        "### 2.1 先判断市场属于哪种情景", "",
+        "| 情景 | 盘面确认 | 操作 |",
+        "|---|---|---|",
+        f"| A：继续走强 | 主线占比提升、核心承接稳定、炸板未增加 | 仓位可到{pos['max_pct']}成，只做主线回踩确认 |",
+        f"| B：分歧但有承接 | 指数震荡、前排不补跌、后排淘汰 | 仓位1～{min(pos['max_pct'], 3)}成，等确认后行动 |",
+        "| C：明显转弱 | 核心跌破支撑、高位批量走弱、市场宽度下降 | 不开新仓，全部候选降为观察 |",
+        "",
+        "### 2.2 次日观察池", "",
+    ])
+    plans = _decision_plans(trade_plan) or {}
+    low_buy = [dict(item) for item in plans.get("候选低吸", [])][:5]
+    watch_only = [dict(item) for item in plans.get("只观察", [])][:5]
+    high_risk = [dict(item) for item in plans.get("高风险回避", [])][:3]
+    lines.extend(["#### 第一优先级：满足条件才考虑", ""])
+    if low_buy:
+        lines.extend(["| 股票 | 关注逻辑 | 触发/参考区域 | 失效条件 |", "|---|---|---|---|"])
+        for item in low_buy:
+            role = assign_stock_role(item, item.get("strategy", ""), market, themes or [])
+            lines.append(
+                f"| {item.get('name', '-')} | {_stock_watch_point(item, role)} | "
+                f"{_entry_zone(item)} | {_stop_price(item)} |"
+            )
+    else:
+        lines.append("暂无满足条件的主动候选。")
+    lines.extend(["", "#### 第二优先级：只观察", ""])
+    if watch_only:
+        lines.extend(["| 股票 | 暂不行动原因 | 升级条件 | 放弃条件 |", "|---|---|---|---|"])
+        for item in watch_only:
+            role = assign_stock_role(item, item.get("strategy", ""), market, themes or [])
+            lines.append(
+                f"| {item.get('name', '-')} | {_stock_limit_point(item, trade_mode, 'watch')} | "
+                f"{_entry_zone(item)}出现承接 | {_stop_price(item)} |"
+            )
+    else:
+        lines.append("暂无。")
+    lines.extend(["", "#### 明确回避", ""])
+    if high_risk:
+        for item in high_risk:
+            lines.append(f"- **{item.get('name', '-')}：** {_high_risk_reason(item)}。")
+    else:
+        lines.append("- 暂无新增高风险标的。")
+    lines.extend([
+        "", "### 2.3 次日执行顺序", "",
+        "1. **开盘前：** 检查主线逻辑和观察池高开幅度，大幅高开直接降为观察。",
+        "2. **开盘后0～30分钟：** 不追涨，先判断市场属于A/B/C哪种情景。",
+        "3. **上午确认后：** 市场情景与个股触发条件同时满足，才执行计划。",
+        "4. **下午：** 不临时增加股票；尾盘转弱时不抢次日预期。",
+        "", "## 3. 次日只验证三件事", "",
+    ])
+    for index, item in enumerate(validations or ["主线是否继续获得资金承接", "高位亏钱效应是否扩大", "观察池是否满足触发条件"], 1):
+        lines.append(f"{index}. {item}")
+    lines.extend([
+        "", "## 4. 执行纪律", "",
+        f"> 1. 不追高，只等确认。  ",
+        f"> 2. 市场未确认前，总仓位不超过{min(pos['max_pct'], 3)}成。  ",
+        f"> 3. {fail_signal}，原计划立即失效。",
+        "", "## 5. 数据状态", "",
+        f"- 信号数据：{'正常' if data_status else '待确认'}",
+        f"- 数据可信度：{quality.get('confidence_score', 0)}/100",
+        f"- 完整指标与审计明细：[查看附录](daily_report_{trade_date}_appendix.md)",
+        "", "---", "",
+        "本报告仅用于数据复盘和学习，不构成任何投资建议。",
+    ])
+    return "\n".join(lines)
+
 def render_daily_report(
     trade_date, data_status, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None, mode="beginner",
@@ -1781,4 +1957,12 @@ def save_report(report, trade_date, mode="beginner"):
     path = out_dir / f"daily_report_{trade_date}.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(report)
+    return path
+
+
+def save_report_appendix(report, trade_date):
+    out_dir = Path("reports/daily")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"daily_report_{trade_date}_appendix.md"
+    path.write_text(report, encoding="utf-8")
     return path

@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+python() { command "$PYTHON_BIN" "$@"; }
+
 AS_OF_DATE="${AS_OF_DATE:-$(date +%Y%m%d)}"
 SEND_EVAL_EMAIL="${SEND_EVAL_EMAIL:-0}"
 EVAL_TIME_BUDGET="${EVAL_TIME_BUDGET:-300}"
