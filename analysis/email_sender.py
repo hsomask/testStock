@@ -5,6 +5,7 @@
 import json
 import smtplib
 import logging
+import re
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -63,7 +64,10 @@ def build_trade_plan_section(tp):
 
 def find_latest_report():
     files = sorted(REPORTS_DIR.glob("daily_report_*.md"))
-    files = [f for f in files if "_pro" not in f.name]
+    files = [
+        f for f in files
+        if "_pro" not in f.name and not f.stem.endswith("_appendix")
+    ]
     if not files:
         return None
     return files[-1]
@@ -93,6 +97,8 @@ def extract_date(report_text):
     for line in report_text.split("\n"):
         if "日期：" in line:
             return line.split("日期：")[-1].replace("**", "").strip()
+        if line.startswith("date:"):
+            return line.split(":", 1)[1].strip()
     return ""
 
 
@@ -108,14 +114,23 @@ def build_email_body(sections, report_path=None):
         parts.append("\n".join(lines[:max_lines]))
         parts.append("\n")
 
-    add_section("今日市场一句话结论", 10)
-    add_section("市场情绪", 15)
-    add_section("今日主线判断", 25)
-    add_section("今日风险方向", 15)
-    add_section("今日观察池", 40)
-    add_section("明日策略", 20)
-    add_section("数据质量检查", 15)
-    add_section("免责声明", 8)
+    if "0. 收盘后先看结论" in sections:
+        add_section("0. 收盘后先看结论", 18)
+        add_section("今日复盘", 12)
+        add_section("1. 昨日观察池兑现复盘（T+1）", 16)
+        add_section("2. 次日操作计划", 45)
+        add_section("3. 次日只验证三件事", 8)
+        add_section("4. 执行纪律", 8)
+        add_section("5. 数据状态", 8)
+    else:
+        add_section("今日市场一句话结论", 10)
+        add_section("市场情绪", 15)
+        add_section("今日主线判断", 25)
+        add_section("今日风险方向", 15)
+        add_section("今日观察池", 40)
+        add_section("明日策略", 20)
+        add_section("数据质量检查", 15)
+        add_section("免责声明", 8)
 
     parts.append("\n---\n")
     if report_path:
@@ -269,6 +284,15 @@ def _main():
     else:
         report_path = find_latest_report()
 
+    # Keep the storage key independent from the human-readable date used in
+    # the mail subject/body.  Compact reports use front matter instead of the
+    # legacy "日期：" line, so extract_date() may legitimately return empty.
+    report_date_key = to_ymd(date_str)
+    if report_path is not None:
+        match = re.search(r"daily_report_(\d{8})\.md$", Path(report_path).name)
+        if match:
+            report_date_key = match.group(1)
+
     if args.date:
         summary_path = REPORTS_DIR / f"daily_summary_{date_str}.json"
         summary = summary_path if summary_path.exists() else None
@@ -282,6 +306,7 @@ def _main():
     if summary is not None:
         data = json.loads(summary.read_text(encoding="utf-8"))
         date_key = data.get("trade_date", "")
+        report_date_key = to_ymd(date_key) or report_date_key
         date_display = f"{date_key[:4]}-{date_key[4:6]}-{date_key[6:]}" if len(date_key) == 8 else date_key
 
         subject = f"【A股每日复盘】{date_display}"
@@ -312,13 +337,19 @@ def _main():
         return "skipped"
 
     # 日报邮件默认附件：主日报 + 板块趋势明细
-    date_key = date_str.replace("-", "") if len(date_str) > 8 else date_str
+    date_key = report_date_key
 
     if not report_path or not Path(report_path).exists():
         print(f"[邮件] 主日报缺失：{report_path}，跳过发送")
         return "skipped"
 
     attachments = [report_path]
+
+    appendix = REPORTS_DIR / f"daily_report_{date_key}_appendix.md"
+    if appendix.exists():
+        attachments.append(appendix)
+    else:
+        body += f"\n\n---\n审计附录缺失：{appendix.name}\n"
 
     tracker = REPORTS_DIR / f"board_trend_tracker_{date_key}.xlsx"
     if tracker.exists():

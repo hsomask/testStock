@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+python() { command "$PYTHON_BIN" "$@"; }
+
 echo "=== Initialize database schema ==="
 python -m analysis.init_db
 

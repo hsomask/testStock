@@ -53,7 +53,12 @@ from analysis.sentiment import analyze_sentiment
 from analysis.market_facts import build_market_facts
 from analysis.limitup_stats_reader import load_limitup_daily_stats
 from analysis.selector import run_all_selectors
-from analysis.report_renderer import render_daily_report, save_report
+from analysis.report_renderer import (
+    render_compact_daily_report,
+    render_daily_report,
+    save_report,
+    save_report_appendix,
+)
 from analysis.evaluation_report_reader import (
     load_correction_effectiveness_summary,
     load_t1_evaluation_summary,
@@ -435,7 +440,7 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
     t1_data = load_t1_evaluation_summary(trade_date)
     t1_data["correction_effectiveness"] = load_correction_effectiveness_summary(trade_date)
 
-    report = render_daily_report(
+    render_kwargs = dict(
         trade_date=trade_date,
         data_status=data_status,
         market=market_result,
@@ -452,12 +457,16 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
         report_context=report_context,
         t1_data=t1_data,
     )
+    appendix = render_daily_report(**render_kwargs)
+    report = render_compact_daily_report(**render_kwargs)
     path = save_report(report, trade_date, mode)
+    appendix_path = save_report_appendix(appendix, trade_date)
     try:
         print(report)
     except UnicodeEncodeError:
         print(report.encode("utf-8", errors="replace").decode("utf-8", errors="replace"))
     print(f"报告已保存：{path}")
+    print(f"审计附录已保存：{appendix_path}")
 
     # 写入数据库
     conn = _get_db_conn()

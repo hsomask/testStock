@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -18,6 +19,26 @@ from data.config import DATABASE_DSN
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def resolve_bash():
+    """Resolve Bash on Linux and Windows without changing server commands."""
+    direct = shutil.which("bash")
+    if direct:
+        return direct
+    git = shutil.which("git")
+    candidates = []
+    if git:
+        git_root = Path(git).resolve().parent.parent
+        candidates.extend((git_root / "bin" / "bash.exe", git_root / "usr" / "bin" / "bash.exe"))
+    candidates.extend((
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+    ))
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return "bash"
+
+
 @dataclass(frozen=True)
 class Step:
     name: str
@@ -30,9 +51,10 @@ class Step:
 
 def daily_steps(trade_date):
     py = sys.executable
+    bash = resolve_bash()
     return (
-        Step("bootstrap", ("bash", "scripts/pipeline_bootstrap.sh"), timeout=1200, retries=1),
-        Step("evaluation", ("bash", "scripts/evaluation_entrypoint.sh"), ("bootstrap",), timeout=3600),
+        Step("bootstrap", (bash, "scripts/pipeline_bootstrap.sh"), timeout=1200, retries=1),
+        Step("evaluation", (bash, "scripts/evaluation_entrypoint.sh"), ("bootstrap",), timeout=3600),
         Step(
             "daily_report",
             (py, "-m", "analysis.report_dispatcher", "--date", trade_date),
@@ -133,9 +155,15 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
     )
     statuses, details = {}, []
     env = os.environ.copy()
+    # Shell entrypoints must use the same interpreter as the DAG runner.
+    # This is especially important under Git Bash on Windows, where bare
+    # `python` may otherwise resolve to the Microsoft Store placeholder.
+    python_dir = str(Path(sys.executable).resolve().parent)
+    env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
     env.update({
         "TRADE_DATE": trade_date,
         "AS_OF_DATE": trade_date,
+        "PYTHON_BIN": sys.executable.replace("\\", "/"),
         "SEND_DAILY_EMAIL": "0",
         "SEND_EVAL_EMAIL": "0",
         "PIPELINE_BOOTSTRAPPED": "1",

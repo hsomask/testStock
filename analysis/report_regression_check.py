@@ -36,7 +36,10 @@ SNAPSHOT_FORBIDDEN = [
 
 
 def load_report(date_str):
-    path = REPORT_DIR / "daily" / f"daily_report_{date_str}.md"
+    appendix = REPORT_DIR / "daily" / f"daily_report_{date_str}_appendix.md"
+    path = appendix if appendix.exists() else (
+        REPORT_DIR / "daily" / f"daily_report_{date_str}.md"
+    )
     if not path.exists():
         print(f"[ERROR] 日报不存在: {path}")
         sys.exit(1)

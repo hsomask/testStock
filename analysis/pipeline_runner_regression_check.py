@@ -9,6 +9,7 @@ def main():
     steps = daily_steps("20260810")
     assert validate_steps(steps)
     assert [s.name for s in steps] == ["bootstrap", "evaluation", "daily_report", "daily_email", "daily_reconcile"]
+    assert next(step for step in steps if step.name == "bootstrap").command[0].lower().endswith(("bash", "bash.exe"))
     report_command = next(s.command for s in steps if s.name == "daily_report")
     assert "analysis.report_dispatcher" in report_command and "entrypoint.sh" not in report_command
     assert next(step for step in steps if step.name == "evaluation").retries == 0
@@ -36,9 +37,15 @@ def main():
         active = run_daily("20260810", executor=lambda *_a, **_k: SimpleNamespace(returncode=0), calendar_status_getter=lambda _d: "open")
         assert active["status"] == "skipped" and active["reason"] == "pipeline_already_completed"
         runner._pipeline_already_completed = lambda _date: False
-        result = run_daily("20260810", executor=lambda *_a, **_k: SimpleNamespace(returncode=0), calendar_status_getter=lambda _d: "open")
+        captured_env = {}
+        def successful_executor(*_args, **kwargs):
+            captured_env.update(kwargs.get("env") or {})
+            return SimpleNamespace(returncode=0)
+        result = run_daily("20260810", executor=successful_executor, calendar_status_getter=lambda _d: "open")
         assert result["status"] == "deferred"
         assert any(item["step"] == "evaluation" and item["status"] == "deferred" for item in result["steps"])
+        assert captured_env["PATH"].split(runner.os.pathsep)[0] == str(runner.Path(runner.sys.executable).resolve().parent)
+        assert captured_env["PYTHON_BIN"] == runner.sys.executable.replace("\\", "/")
 
         calls = []
         def failing_executor(command, **_kwargs):
