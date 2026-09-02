@@ -112,6 +112,16 @@ def rerender_report(trade_date: str, *, conn=None) -> dict:
             # their first safe rerender, preserve that document as the
             # appendix without rerunning selectors or rebuilding signals.
             appendix_source = old_report
+        elif "recovery_mode: immutable_snapshot" in old_report:
+            # Recovery may have been performed on another host sharing the
+            # database but not its report filesystem. Rebuild only the audit
+            # appendix from the same immutable snapshots on this host.
+            from analysis.report_recovery import (
+                _load_snapshot_rows,
+                render_recovery_bundle,
+            )
+            rows = _load_snapshot_rows(db, date_text)
+            _, appendix_source = render_recovery_bundle(date_text, rows, t1_data)
         if appendix_source is not None:
             new_appendix = replace_evaluation_section(
                 appendix_source, t1_data, compact=False,

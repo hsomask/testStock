@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from analysis import email_sender
+from analysis import daily_report, email_sender
 from analysis.report_renderer import render_compact_daily_report
 
 
@@ -31,17 +31,30 @@ def main():
             },
         },
     }
-    report = render_compact_daily_report(
+    render_args = (
         "20260828", {}, {"confidence_score": 100}, market, None, None,
-        {"score": 70, "stage": "高潮"}, {}, trade_plan=trade_plan,
-        t1_data={
+        {"score": 70, "stage": "高潮"}, {},
+    )
+    render_options = {
+        "trade_plan": trade_plan,
+        "t1_data": {
             "available": True, "status": "ok",
             "evaluated_1d": 25, "total_signals": 25,
             "avg_return_1d": -0.0088, "win_rate_1d": 0.28,
             "top_winners": [{"name": "兑现样本", "ret": 0.035}],
             "top_losers": [{"name": "失效样本", "ret": -0.021}],
         },
+    }
+    report = render_compact_daily_report(
+        *render_args, mode="unified", **render_options,
     )
+    assert render_compact_daily_report(*render_args, **render_options) == report
+    assert render_compact_daily_report(
+        *render_args, mode="beginner", **render_options,
+    ) == report
+    assert render_compact_daily_report(
+        *render_args, mode="pro", **render_options,
+    ) == report
     required = [
         "收盘后先看结论", "今日复盘", "昨日观察池兑现复盘",
         "次日操作计划", "先判断市场属于哪种情景", "次日执行顺序",
@@ -60,8 +73,31 @@ def main():
         root = Path(temp)
         main_path = root / "daily_report_20260828.md"
         appendix_path = root / "daily_report_20260828_appendix.md"
-        main_path.write_text(report, encoding="utf-8")
-        appendix_path.write_text("full audit", encoding="utf-8")
+
+        def save_main(content, _date, _mode):
+            main_path.write_text(content, encoding="utf-8")
+            return main_path
+
+        def save_appendix(content, _date):
+            appendix_path.write_text(content, encoding="utf-8")
+            return appendix_path
+
+        with (
+            patch.object(daily_report, "load_t1_evaluation_summary", return_value={"available": False, "status": "missing"}),
+            patch.object(daily_report, "load_correction_effectiveness_summary", return_value=None),
+            patch.object(daily_report, "save_report", side_effect=save_main),
+            patch.object(daily_report, "save_report_appendix", side_effect=save_appendix),
+            patch.object(daily_report, "_get_db_conn", return_value=None),
+        ):
+            generated = daily_report.generate_report_mode(
+                "20260828", "unified", {}, market, None, None,
+                {"score": 70, "stage": "高潮"}, {}, {},
+                {"confidence_score": 100}, [], trade_plan=trade_plan,
+            )
+        assert generated == main_path.read_text(encoding="utf-8")
+        assert "收盘后先看结论" in generated
+        assert "市场与交易环境" in appendix_path.read_text(encoding="utf-8")
+
         captured = {}
         with (
             patch.object(email_sender, "REPORTS_DIR", root),

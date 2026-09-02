@@ -1807,7 +1807,7 @@ def append_compact_evaluation_section(lines, t1_data):
 def render_compact_daily_report(
     trade_date, data_status, quality, market, industry, concept,
     sentiment, selectors, board_ratio_changes=None,
-    trade_plan=None, board_trend_summary=None, report_context=None,
+    mode="unified", trade_plan=None, board_trend_summary=None, report_context=None,
     themes=None, t1_data=None,
 ):
     """Render the short review + next-day playbook; facts stay in the appendix."""
