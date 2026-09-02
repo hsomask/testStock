@@ -8,12 +8,23 @@ from analysis.report_rerender import replace_evaluation_section
 def main():
     original_inspect = dispatcher.inspect_signal_set
     original_rerender = dispatcher.rerender_report
+    original_recover = dispatcher.recover_missing_report
     calls = []
     try:
         dispatcher.inspect_signal_set = lambda _date: {"state": "complete"}
         dispatcher.rerender_report = lambda date: calls.append(("rerender", date)) or {"status": "success"}
         result = dispatcher.dispatch_report("20260825", executor=lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("generator called")))
         assert result["route"] == "rerender" and calls == [("rerender", "20260825")]
+
+        dispatcher.rerender_report = lambda _date: (_ for _ in ()).throw(
+            RuntimeError("canonical daily report is missing for 20260825")
+        )
+        dispatcher.recover_missing_report = lambda date: calls.append(("recover", date)) or {
+            "status": "success", "signal_tables_touched": [],
+        }
+        result = dispatcher.dispatch_report("20260825")
+        assert result["route"] == "recover_missing_report"
+        assert calls[-1] == ("recover", "20260825")
 
         captured = {}
         dispatcher.inspect_signal_set = lambda _date: {"state": "missing"}
@@ -34,6 +45,7 @@ def main():
     finally:
         dispatcher.inspect_signal_set = original_inspect
         dispatcher.rerender_report = original_rerender
+        dispatcher.recover_missing_report = original_recover
 
     source = "prefix\n## 1. 昨日观察池兑现复盘（T+1）\nold\n\n## 2. 市场与交易环境\nsuffix\n"
     rendered = replace_evaluation_section(source, {})

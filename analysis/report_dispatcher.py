@@ -10,6 +10,7 @@ import sys
 import psycopg2
 
 from analysis.report_rerender import rerender_report
+from analysis.report_recovery import recover_missing_report
 from analysis.trade_calendar import normalize_trade_date
 from data.config import DATABASE_DSN
 
@@ -73,8 +74,15 @@ def inspect_signal_set(trade_date: str, *, conn=None) -> dict:
 def dispatch_report(trade_date: str, *, executor=None) -> dict:
     state = inspect_signal_set(trade_date)
     if state["state"] == "complete":
-        result = rerender_report(trade_date)
-        return {**result, "route": "rerender", "signal_state": state}
+        try:
+            result = rerender_report(trade_date)
+            route = "rerender"
+        except RuntimeError as exc:
+            if "canonical daily report is missing" not in str(exc):
+                raise
+            result = recover_missing_report(trade_date)
+            route = "recover_missing_report"
+        return {**result, "route": route, "signal_state": state}
     if state["state"] == "incomplete":
         raise RuntimeError(f"incomplete_existing_signal_set:{json.dumps(state, ensure_ascii=False)}")
     execute = executor or subprocess.run
