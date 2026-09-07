@@ -114,7 +114,14 @@ def build_email_body(sections, report_path=None):
         parts.append("\n".join(lines[:max_lines]))
         parts.append("\n")
 
-    if "0. 收盘后先看结论" in sections:
+    if "0. 明天怎么做" in sections:
+        add_section("0. 明天怎么做", 18)
+        add_section("1. 昨日观察池兑现复盘（T+1）", 18)
+        add_section("2. 明日观察池", 45)
+        add_section("3. 市场与主线", 12)
+        add_section("4. 风险与失效", 12)
+        add_section("5. 数据与学习状态", 8)
+    elif "0. 收盘后先看结论" in sections:
         add_section("0. 收盘后先看结论", 18)
         add_section("今日复盘", 12)
         add_section("1. 昨日观察池兑现复盘（T+1）", 16)
@@ -276,7 +283,7 @@ def _main():
 
     if not is_trade_day(date_str):
         print(f"[邮件] {date_str} 非交易日，跳过邮件推送")
-        return "skipped"
+        return "skipped_non_trade_day"
 
     if args.date:
         report_path = REPORTS_DIR / f"daily_report_{date_str}.md"
@@ -303,7 +310,14 @@ def _main():
     date_display = "今日"
     subject = "A股每日复盘"
 
-    if summary is not None:
+    if report_path is not None:
+        report_text = report_path.read_text(encoding="utf-8")
+        sections = parse_report_sections(report_text)
+        date_for_subject = extract_date(report_text) or date_display
+        subject = f"【A股每日复盘】{date_for_subject}"
+        body = build_email_body(sections, report_path)
+        print(f"[邮件] 使用主日报 Markdown：{report_path}")
+    elif summary is not None:
         data = json.loads(summary.read_text(encoding="utf-8"))
         date_key = data.get("trade_date", "")
         report_date_key = to_ymd(date_key) or report_date_key
@@ -324,24 +338,16 @@ def _main():
             body = tp_section + "\n\n---\n\n" + body
 
         print(f"[邮件] 使用 summary JSON：{summary}")
-    elif report_path is not None:
-        # 降级：解析 Markdown
-        report_text = report_path.read_text(encoding="utf-8")
-        sections = parse_report_sections(report_text)
-        date_str = extract_date(report_text) or "今日"
-        subject = f"【A股每日复盘】{date_str}"
-        body = build_email_body(sections, report_path)
-        print(f"[邮件] JSON 不存在，降级解析 Markdown：{report_path}")
     else:
         print("[邮件] 未找到任何报告，跳过推送")
-        return "skipped"
+        return "skipped_report_missing"
 
     # 日报邮件默认附件：主日报 + 板块趋势明细
     date_key = report_date_key
 
     if not report_path or not Path(report_path).exists():
         print(f"[邮件] 主日报缺失：{report_path}，跳过发送")
-        return "skipped"
+        return "skipped_report_missing"
 
     attachments = [report_path]
 
@@ -422,5 +428,5 @@ def main():
 
 if __name__ == "__main__":
     result = main()
-    if result in {"failed", "skipped_config_missing", "skipped_recipient_missing"}:
+    if result in {"failed", "skipped_config_missing", "skipped_recipient_missing", "skipped_report_missing"}:
         raise SystemExit(1)

@@ -15,6 +15,7 @@ from analysis.report_renderer import (
     append_compact_evaluation_section,
     append_evaluation_section,
 )
+from analysis.daily_decision import FINAL_LAYERS
 from analysis.trade_calendar import normalize_trade_date
 from data.config import DATABASE_DSN, REPORT_DIR
 
@@ -70,7 +71,7 @@ def _snapshot_plan(row):
 
 
 def _group_plans(rows):
-    grouped = {"候选低吸": [], "只观察": [], "高风险回避": []}
+    grouped = {layer: [] for layer in FINAL_LAYERS}
     seen = set()
     for raw in rows:
         item = _snapshot_plan(raw)
@@ -79,12 +80,7 @@ def _group_plans(rows):
             continue
         seen.add(key)
         layer = item.get("final_layer") or item.get("canonical_final_layer")
-        if layer == "候选低吸":
-            target = "候选低吸"
-        elif layer == "只观察":
-            target = "只观察"
-        else:
-            target = "高风险回避"
+        target = layer if layer in grouped else "只观察"
         grouped[target].append(item)
     return grouped
 
@@ -129,7 +125,13 @@ def render_recovery_bundle(date_text, rows, t1_data):
     ]
     append_compact_evaluation_section(main, t1_data)
     main.extend(["## 2. 次日操作计划", ""])
-    for title, key in (("满足条件才考虑", "候选低吸"), ("只观察", "只观察"), ("明确回避", "高风险回避")):
+    for title, key in (
+        ("满足条件才考虑", "候选低吸"),
+        ("只观察", "只观察"),
+        ("暂不行动，等条件", "交易条件不满足"),
+        ("明确回避", "高风险回避"),
+        ("不可交易过滤", "不可交易过滤"),
+    ):
         main.extend([f"### {title}", ""])
         items = plans[key]
         if not items:

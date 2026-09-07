@@ -121,6 +121,11 @@ def _email_already_sent(trade_date):
         conn.close()
 
 
+def _pipeline_completion_gate(has_running, has_completed, has_email):
+    """A daily pipeline is complete only when the report chain and email agree."""
+    return bool(has_running or (has_completed and has_email))
+
+
 def _pipeline_already_completed(trade_date):
     if not DATABASE_DSN:
         return False
@@ -129,10 +134,37 @@ def _pipeline_already_completed(trade_date):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT EXISTS(SELECT 1 FROM job_run_log WHERE trade_date=%s AND job_name='daily_pipeline' AND status IN ('running','success','deferred'))",
-            (f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",),
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM job_run_log
+                    WHERE trade_date=%s
+                      AND job_name='daily_pipeline'
+                      AND status='running'
+                ) AS has_running,
+                EXISTS(
+                    SELECT 1 FROM job_run_log
+                    WHERE trade_date=%s
+                      AND job_name='daily_pipeline'
+                      AND status IN ('success','deferred')
+                ) AS has_completed,
+                EXISTS(
+                    SELECT 1 FROM job_run_log
+                    WHERE trade_date=%s
+                      AND job_name='daily_email'
+                      AND status='success'
+                ) AS has_email
+            """,
+            (
+                f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",
+                f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",
+                f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",
+            ),
         )
-        value = bool(cur.fetchone()[0]); cur.close(); return value
+        has_running, has_completed, has_email = cur.fetchone()
+        value = _pipeline_completion_gate(has_running, has_completed, has_email)
+        cur.close()
+        return value
     finally:
         conn.close()
 

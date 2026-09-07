@@ -21,7 +21,7 @@ from data.config import DATABASE_DSN, REPORT_DIR
 
 REPORT_DIR = Path(REPORT_DIR) / "daily"
 SECTION_START = "## 1. 昨日观察池兑现复盘（T+1）"
-SECTION_ENDS = ("## 2. 次日操作计划", "## 2. 市场与交易环境")
+SECTION_ENDS = ("## 2. 明日观察池", "## 2. 次日操作计划", "## 2. 市场与交易环境")
 
 
 def replace_evaluation_section(report: str, t1_data: dict, *, compact=None) -> str:

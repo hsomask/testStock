@@ -26,6 +26,10 @@ def main():
                               "observe_low": 10, "observe_high": 10.5, "invalid_price": 9.5}],
                 "只观察": [{"name": "示例B", "strategy": "短线强势",
                             "observe_low": 20, "observe_high": 21, "invalid_price": 19}],
+                "交易条件不满足": [{"name": "示例D", "strategy": "N字异动",
+                                   "observe_low": 30, "observe_high": 31,
+                                   "pressure_price": 35, "invalid_price": 29,
+                                   "display_reason": "策略反馈偏弱，等待重新转强"}],
                 "高风险回避": [{"name": "示例C", "strategy": "N字异动",
                                 "risk_reasons": "位置偏高"}],
             },
@@ -56,17 +60,20 @@ def main():
         *render_args, mode="pro", **render_options,
     ) == report
     required = [
-        "收盘后先看结论", "今日复盘", "昨日观察池兑现复盘",
-        "次日操作计划", "先判断市场属于哪种情景", "次日执行顺序",
-        "次日只验证三件事", "daily_report_20260828_appendix.md",
+        "明天怎么做", "昨日观察池兑现复盘", "明日观察池",
+        "可以考虑", "只观察", "暂不行动", "明确回避",
+        "市场与主线", "风险与失效", "数据与学习状态",
+        "daily_report_20260828_appendix.md",
     ]
     assert all(item in report for item in required)
     assert "完成度：** 25/25" in report
     assert "兑现样本" in report and "失效样本" in report
+    assert "学习状态" in report
+    assert "示例D" in report and "策略反馈偏弱" in report
     assert "完整市场指标" not in report
     sections = email_sender.parse_report_sections(report)
     mail_body = email_sender.build_email_body(sections)
-    assert "收盘后先看结论" in mail_body and "次日操作计划" in mail_body
+    assert "明天怎么做" in mail_body and "明日观察池" in mail_body
     assert email_sender.extract_date(report) == "2026-08-28"
 
     with TemporaryDirectory() as temp:
@@ -95,7 +102,8 @@ def main():
                 {"confidence_score": 100}, [], trade_plan=trade_plan,
             )
         assert generated == main_path.read_text(encoding="utf-8")
-        assert "收盘后先看结论" in generated
+        assert "明天怎么做" in generated
+        assert (root / "daily_intelligence_20260828.json").exists()
         assert "市场与交易环境" in appendix_path.read_text(encoding="utf-8")
 
         captured = {}
@@ -109,6 +117,13 @@ def main():
                 email_sender._main()
         names = [Path(item).name for item in captured["attachments"]]
         assert names[:2] == [main_path.name, appendix_path.name], names
+
+        with (
+            patch.object(email_sender, "REPORTS_DIR", root),
+            patch("analysis.trade_calendar.is_trade_day", return_value=True),
+            patch("sys.argv", ["email_sender", "--date", "20260829"]),
+        ):
+            assert email_sender._main() == "skipped_report_missing"
     print("[OK] report bundle regression check")
 
 
