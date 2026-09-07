@@ -394,11 +394,41 @@ def compute_feedback(signal, metrics, status):
         else:
             readable.append(tag_text.get(tag, tag))
 
+    if r1 is None:
+        outcome_text = "结果事实：T+1收益未成熟或缺失"
+        adjustment_text = "后续处理：暂不进入策略纠偏"
+    elif r1 <= -0.095:
+        outcome_text = "结果事实：次日跌停或接近跌停，信号失败"
+        adjustment_text = "后续处理：降低同类高风险条件优先级"
+    elif r1 <= -0.05:
+        outcome_text = "结果事实：次日大跌，信号失败"
+        adjustment_text = "后续处理：复盘买点、主线和承接条件"
+    elif r1 <= -0.03:
+        outcome_text = "结果事实：次日下跌超过3%，承接失败"
+        adjustment_text = "后续处理：同类样本进入弱反馈统计"
+    elif r1 < 0:
+        outcome_text = "结果事实：次日小幅走弱，承接不足"
+        adjustment_text = "后续处理：暂不调权，继续观察"
+    elif r1 >= 0.095:
+        outcome_text = "结果事实：次日涨停或接近涨停，信号强兑现"
+        adjustment_text = "后续处理：记录有效样本，但高位票仍需控制追高"
+    elif r1 >= 0.05:
+        outcome_text = "结果事实：次日大涨，信号强兑现"
+        adjustment_text = "后续处理：提高同类条件置信度"
+    elif r1 >= 0.03:
+        outcome_text = "结果事实：次日上涨超过3%，信号兑现"
+        adjustment_text = "后续处理：记录有效样本"
+    else:
+        outcome_text = "结果事实：次日小幅走强，信号部分兑现"
+        adjustment_text = "后续处理：只作中性正反馈"
+
+    reason_text = "可能原因：" + ("；".join(readable[:4]) if readable else "现有字段未定位到单一原因")
+
     return {
         "feedback_label": label,
         "feedback_score": feedback_score,
         "attribution_tags": tags,
-        "attribution_text": "；".join(readable[:5]),
+        "attribution_text": "；".join([outcome_text, reason_text, adjustment_text]),
     }
 
 

@@ -15,6 +15,10 @@ def main():
     assert next(step for step in steps if step.name == "evaluation").retries == 0
     assert next(step for step in steps if step.name == "bootstrap").retries == 1
     assert run_daily("20260810", dry_run=True)["status"] == "dry_run"
+    assert runner._pipeline_completion_gate(True, False, False) is True
+    assert runner._pipeline_completion_gate(False, True, True) is True
+    assert runner._pipeline_completion_gate(False, True, False) is False
+    assert runner._pipeline_completion_gate(False, False, True) is False
     try:
         validate_steps((Step("a", ("x",), ("b",)), Step("b", ("x",), ("a",))))
         raise AssertionError("cycle accepted")

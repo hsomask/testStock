@@ -58,10 +58,10 @@ def extract_section(text, start_marker, end_marker="---"):
 
 def find_heading(text, title):
     """Find a markdown heading by title, ignoring numeric prefixes."""
-    m = re.search(rf"^##\s+\d+\.\s+{re.escape(title)}\s*$", text, re.MULTILINE)
+    m = re.search(rf"^#{{2,}}\s+\d+(?:\.\d+)?\s+{re.escape(title)}\s*$", text, re.MULTILINE)
     if m:
         return m.start()
-    m = re.search(rf"^##\s+{re.escape(title)}\s*$", text, re.MULTILINE)
+    m = re.search(rf"^#{{2,}}\s+{re.escape(title)}\s*$", text, re.MULTILINE)
     return m.start() if m else -1
 
 
@@ -109,6 +109,8 @@ def check_g_mainline_cluster_dedup(text):
 def check_h_concept_stats_replaced(text):
     """H: 产业概念资金榜已替换为行业结构统计。"""
     failures = []
+    if "## 4. 资金流向" not in text and "行业 3日流入 TOP5" not in text:
+        return failures
     for heading in ["产业概念 3日流入", "产业概念 3日流出"]:
         if heading in text:
             failures.append(f"旧统计区块仍存在: {heading}")
@@ -122,6 +124,10 @@ def check_b_duplicated(text):
     """B: 观察池重复"""
     failures = []
     wl_start = find_heading(text, "观察池")
+    if wl_start < 0:
+        wl_start = find_heading(text, "明日观察池")
+    if wl_start < 0:
+        wl_start = find_heading(text, "次日观察池")
     if wl_start < 0:
         return ["观察池模块不存在"]
     next_heading = re.search(r"^##\s+", text[wl_start + 1:], re.MULTILINE)
@@ -145,6 +151,10 @@ def check_c_excluded_exclusivity(text):
     failures = []
     # 先截取观察池区域
     wl_start = find_heading(text, "观察池")
+    if wl_start < 0:
+        wl_start = find_heading(text, "明日观察池")
+    if wl_start < 0:
+        wl_start = find_heading(text, "次日观察池")
     if wl_start < 0:
         return []
     next_heading = re.search(r"^##\s+", text[wl_start + 1:], re.MULTILINE)

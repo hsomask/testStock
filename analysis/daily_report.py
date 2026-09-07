@@ -59,6 +59,10 @@ from analysis.report_renderer import (
     save_report,
     save_report_appendix,
 )
+from analysis.daily_intelligence import (
+    build_daily_intelligence,
+    write_daily_intelligence_sidecar,
+)
 from analysis.evaluation_report_reader import (
     load_correction_effectiveness_summary,
     load_t1_evaluation_summary,
@@ -461,6 +465,12 @@ def generate_report_mode(trade_date, mode, data_status, market_result,
     report = render_compact_daily_report(**render_kwargs)
     path = save_report(report, trade_date, mode)
     appendix_path = save_report_appendix(appendix, trade_date)
+    try:
+        intelligence = build_daily_intelligence(**render_kwargs)
+        sidecar_path = write_daily_intelligence_sidecar(intelligence, path.parent)
+        print(f"日报智能上下文已保存：{sidecar_path}")
+    except Exception as e:
+        logger.exception(f"日报智能上下文生成失败：{e}")
     try:
         print(report)
     except UnicodeEncodeError:

@@ -72,6 +72,29 @@ def _load_daily_summary(trade_date: str, report_dir: Path) -> dict[str, Any]:
     }
 
 
+def _load_daily_intelligence(trade_date: str, report_dir: Path) -> dict[str, Any]:
+    path = report_dir / "daily" / f"daily_intelligence_{trade_date}.json"
+    if not path.exists():
+        return {"status": "unavailable", "reason": "daily_intelligence_file_missing"}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        return {"status": "unavailable", "reason": f"daily_intelligence_invalid:{exc}"}
+    if normalize_trade_date(data.get("trade_date")) != trade_date:
+        return {"status": "unavailable", "reason": "daily_intelligence_date_mismatch"}
+    return {
+        "status": "available",
+        "source": str(path),
+        "schema_version": data.get("schema_version"),
+        "headline": data.get("headline") or {},
+        "market_read": data.get("market_read") or {},
+        "t1_review": data.get("t1_review") or {},
+        "action_counts": data.get("action_counts") or {},
+        "risk_board": data.get("risk_board") or [],
+        "learning_state": data.get("learning_state") or {},
+    }
+
+
 def _evaluation_state(
     *, mature: bool, row_present: bool, value: Any, missing_reason: Any,
 ) -> str:
@@ -374,7 +397,9 @@ def build_fact_pack(
 
     signals = _signal_facts(rows, horizons)
     evaluation_status = _evaluation_data_status(signals, horizons, as_of_text)
-    artifact_summary = _load_daily_summary(trade_text, Path(report_dir or REPORT_DIR))
+    report_root = Path(report_dir or REPORT_DIR)
+    artifact_summary = _load_daily_summary(trade_text, report_root)
+    daily_intelligence = _load_daily_intelligence(trade_text, report_root)
     try:
         correction_raw = build_correction_effectiveness(
             as_of=as_of_text, min_coverage=0.80, window_days=5, save=False,
@@ -402,6 +427,7 @@ def build_fact_pack(
         "data_quality": quality,
         "report": report,
         "artifact_summary": artifact_summary,
+        "daily_intelligence": daily_intelligence,
         "signals": signals,
         "evaluation_status": evaluation_status,
         "evaluation_summary": evaluation_summary,
@@ -464,6 +490,10 @@ def build_fact_pack(
                 "rows": sum(1 for row in rows if row.get("evaluation_row_id") is not None),
             },
             "report": {"source": "daily_report", "rows": 1 if report else 0},
+            "daily_intelligence": {
+                "source": "daily_intelligence",
+                "rows": 1 if daily_intelligence.get("status") == "available" else 0,
+            },
             "quality": {"source": "data_quality_log", "rows": 1 if quality else 0},
             "pipeline": {"source": "daily_reconciliation+job_run_log", "rows": len(job_runs)},
         },

@@ -46,7 +46,7 @@ FEATURE_COLUMNS = [
 TARGET_COLUMNS = [
     "next_1d_return", "next_3d_return", "max_3d_return", "max_3d_drawdown",
     "feedback_label", "feedback_score", "attribution_text",
-    "failure_reason_group",
+    "t1_outcome_bucket", "failure_reason_group",
     "success_label", "strong_label", "weak_label", "failed_label",
     "was_downgraded", "downgrade_reason_group", "correction_result",
     "correction_effective_label", "false_negative_label",
@@ -55,7 +55,8 @@ TARGET_COLUMNS = [
 
 QUALITY_COLUMNS = [
     "coverage_1d", "evaluated_1d", "total_signals", "quality_weight",
-    "sample_quality_tier", "train_eligible", "confidence_level", "conclusion_level",
+    "sample_quality_tier", "train_eligible", "is_learning_sample",
+    "confidence_level", "conclusion_level",
 ]
 
 
@@ -166,6 +167,30 @@ def _failure_reason_group(text):
     if value:
         return "other"
     return "unknown"
+
+
+def _outcome_bucket(ret):
+    try:
+        if pd.isna(ret):
+            return "unknown"
+        value = float(ret)
+    except Exception:
+        return "unknown"
+    if value <= -0.095:
+        return "limit_down_or_near"
+    if value <= -0.05:
+        return "large_loss"
+    if value <= -0.03:
+        return "failed"
+    if value < 0:
+        return "weak"
+    if value >= 0.095:
+        return "limit_up_or_near"
+    if value >= 0.05:
+        return "large_gain"
+    if value >= 0.03:
+        return "strong"
+    return "mild_gain"
 
 
 def _load_dataset(as_of=None, min_coverage=0.90):
@@ -305,8 +330,10 @@ def _load_dataset(as_of=None, min_coverage=0.90):
     df["quality_weight"] = df["coverage_1d"].map(_quality_weight)
     df["sample_quality_tier"] = df["coverage_1d"].map(_quality_tier)
     df["train_eligible"] = (df["coverage_1d"].fillna(0).astype(float) >= float(min_coverage)).astype(int)
+    df["is_learning_sample"] = df["train_eligible"]
 
     ret = pd.to_numeric(df["next_1d_return"], errors="coerce")
+    df["t1_outcome_bucket"] = ret.map(_outcome_bucket)
     df["success_label"] = (ret >= 0).astype(int)
     df["strong_label"] = (ret >= 0.02).astype(int)
     df["weak_label"] = (ret <= -0.02).astype(int)
