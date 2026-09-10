@@ -2,6 +2,7 @@
 from analysis.daily_intelligence import (
     build_daily_intelligence,
     intelligence_llm_view,
+    intelligence_summary_to_email,
     render_daily_intelligence_markdown,
 )
 from analysis.watchlist_evaluation import compute_feedback
@@ -73,6 +74,10 @@ def main():
     sidecar = intelligence_llm_view(ctx)
     assert sidecar["policy"]["forbidden_tasks"]
     assert sidecar["action_counts"]["交易条件不满足"] == 1
+    email_body = intelligence_summary_to_email(sidecar)
+    assert "今日结论" in email_body and "明日观察池" in email_body
+    assert "暂不行动：1只" in email_body
+    assert "llm_context_20260904.json" in email_body
 
     feedback = compute_feedback(
         {

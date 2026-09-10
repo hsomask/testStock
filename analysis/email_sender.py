@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 
+from analysis.daily_intelligence import intelligence_summary_to_email
 from data.config import (
     SMTP_HOST,
     SMTP_PORT,
@@ -73,6 +74,17 @@ def find_latest_report():
     return files[-1]
 
 
+def find_intelligence_context(date_key):
+    for name in (
+        f"llm_context_{date_key}.json",
+        f"daily_intelligence_{date_key}.json",
+    ):
+        path = REPORTS_DIR / name
+        if path.exists():
+            return path
+    return None
+
+
 def parse_report_sections(report_text):
     sections = {}
     current_title = None
@@ -105,6 +117,56 @@ def extract_date(report_text):
 def build_email_body(sections, report_path=None):
     parts = []
 
+    def non_empty_lines(title):
+        return [line for line in sections.get(title, "").split("\n") if line.strip()]
+
+    def table_rows(lines, label):
+        rows = []
+        for line in lines:
+            if not line.startswith("|"):
+                continue
+            if "---" in line or label in line:
+                continue
+            rows.append(line)
+        return rows
+
+    def compact_new_report():
+        top = non_empty_lines("0. 明天怎么做")
+        t1 = non_empty_lines("1. 昨日观察池兑现复盘（T+1）")
+        pool = non_empty_lines("2. 明日观察池")
+        risk = non_empty_lines("4. 风险与失效")
+        quality = non_empty_lines("5. 数据与学习状态")
+
+        body = ["## 今日结论", ""]
+        body.extend([line for line in top if line.startswith(">") or line.startswith("- ")][:4])
+        impacts = table_rows(top, "复盘项目")
+        if impacts:
+            body.extend(["", "## 盘面影响", ""])
+            body.extend(impacts[:5])
+
+        body.extend(["", "## 昨日复盘", ""])
+        body.extend([line for line in t1 if line.startswith("**完成度") or line.startswith(">")][:2])
+
+        counts = [
+            line.replace("#### ", "- ")
+            for line in pool
+            if line.startswith("#### ")
+        ]
+        if counts:
+            body.extend(["", "## 明日观察池", ""])
+            body.extend(counts[:6])
+
+        risk_lines = [line for line in risk if line.startswith("- ")]
+        if risk_lines:
+            body.extend(["", "## 关键风险", ""])
+            body.extend(risk_lines[:4])
+
+        quality_lines = [line for line in quality if line.startswith("- ")]
+        if quality_lines:
+            body.extend(["", "## 数据状态", ""])
+            body.extend(quality_lines[:3])
+        return "\n".join(body)
+
     def add_section(title, max_lines=20):
         content = sections.get(title, "")
         if not content:
@@ -115,17 +177,12 @@ def build_email_body(sections, report_path=None):
         parts.append("\n")
 
     if "0. 明天怎么做" in sections:
-        add_section("0. 明天怎么做", 18)
-        add_section("1. 昨日观察池兑现复盘（T+1）", 18)
-        add_section("2. 明日观察池", 45)
-        add_section("3. 市场与主线", 12)
-        add_section("4. 风险与失效", 12)
-        add_section("5. 数据与学习状态", 8)
+        parts.append(compact_new_report())
     elif "0. 收盘后先看结论" in sections:
         add_section("0. 收盘后先看结论", 18)
         add_section("今日复盘", 12)
         add_section("1. 昨日观察池兑现复盘（T+1）", 16)
-        add_section("2. 次日操作计划", 45)
+        add_section("2. 次日操作计划", 18)
         add_section("3. 次日只验证三件事", 8)
         add_section("4. 执行纪律", 8)
         add_section("5. 数据状态", 8)
@@ -141,7 +198,7 @@ def build_email_body(sections, report_path=None):
 
     parts.append("\n---\n")
     if report_path:
-        parts.append(f"报告路径：{report_path}")
+        parts.append(f"主报路径：{report_path}")
 
     return "\n\n".join(parts)
 
@@ -269,6 +326,7 @@ def _main():
     )
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", type=str, default=None, help="日期 YYYYMMDD")
+    parser.add_argument("--dry-run", action="store_true", help="只生成邮件正文和附件列表，不实际发送")
     args = parser.parse_args()
 
     # 确定发送日期并检查交易日
@@ -315,8 +373,15 @@ def _main():
         sections = parse_report_sections(report_text)
         date_for_subject = extract_date(report_text) or date_display
         subject = f"【A股每日复盘】{date_for_subject}"
-        body = build_email_body(sections, report_path)
-        print(f"[邮件] 使用主日报 Markdown：{report_path}")
+        intelligence_path = find_intelligence_context(report_date_key)
+        if intelligence_path:
+            intelligence = json.loads(intelligence_path.read_text(encoding="utf-8"))
+            body = intelligence_summary_to_email(intelligence)
+            body += f"\n\n---\n主报路径：{report_path}"
+            print(f"[邮件] 使用 intelligence 摘要：{intelligence_path}")
+        else:
+            body = build_email_body(sections, report_path)
+            print(f"[邮件] 使用主日报 Markdown：{report_path}")
     elif summary is not None:
         data = json.loads(summary.read_text(encoding="utf-8"))
         date_key = data.get("trade_date", "")
@@ -349,7 +414,7 @@ def _main():
         print(f"[邮件] 主日报缺失：{report_path}，跳过发送")
         return "skipped_report_missing"
 
-    attachments = [report_path]
+    attachments = []
 
     appendix = REPORTS_DIR / f"daily_report_{date_key}_appendix.md"
     if appendix.exists():
@@ -385,6 +450,18 @@ def _main():
         pass  # 非 --date 模式不提示
     else:
         body += "\n\n---\n流程检查：pipeline_check JSON 未生成\n"
+
+    if args.dry_run:
+        print("\n============================================================")
+        print("[DRY-RUN] 日报邮件")
+        print(f"标题: {subject}")
+        print("附件:")
+        for item in attachments:
+            print(f"- {item}")
+        print("------------------------------------------------------------")
+        print(body)
+        print("============================================================")
+        return "success"
 
     return send_email(subject, body, attachments)
 

@@ -11,6 +11,7 @@ from analysis.evaluation_report_reader import (
     load_correction_effectiveness_summary,
     load_t1_evaluation_summary,
 )
+from analysis.daily_intelligence import write_report_markdown_context_sidecar
 from analysis.report_renderer import (
     append_compact_evaluation_section,
     append_evaluation_section,
@@ -103,6 +104,7 @@ def rerender_report(trade_date: str, *, conn=None) -> dict:
         if file_changed:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_report, encoding="utf-8")
+        context_path = write_report_markdown_context_sidecar(new_report, date_text, REPORT_DIR)
         appendix_changed = False
         appendix_source = None
         if appendix_path.exists():
@@ -122,6 +124,20 @@ def rerender_report(trade_date: str, *, conn=None) -> dict:
             )
             rows = _load_snapshot_rows(db, date_text)
             _, appendix_source = render_recovery_bundle(date_text, rows, t1_data)
+        else:
+            # Compact reports may exist in the database without their local
+            # appendix after a host migration.  Rebuild an immutable audit
+            # appendix from canonical snapshots instead of rerunning selectors.
+            try:
+                from analysis.report_recovery import (
+                    _load_snapshot_rows,
+                    render_recovery_bundle,
+                )
+                rows = _load_snapshot_rows(db, date_text)
+                if rows:
+                    _, appendix_source = render_recovery_bundle(date_text, rows, t1_data)
+            except Exception:
+                appendix_source = None
         if appendix_source is not None:
             new_appendix = replace_evaluation_section(
                 appendix_source, t1_data, compact=False,
@@ -139,6 +155,7 @@ def rerender_report(trade_date: str, *, conn=None) -> dict:
             "updated_rows": updated_rows,
             "file_changed": file_changed,
             "appendix_changed": appendix_changed,
+            "context_path": str(context_path),
             "signal_tables_touched": [],
         }
     finally:

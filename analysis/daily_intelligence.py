@@ -11,8 +11,10 @@ from datetime import datetime
 from decimal import Decimal
 import json
 from pathlib import Path
+import re
 from typing import Any
 
+from analysis.daily_facts import build_daily_facts
 from analysis.daily_decision import FINAL_LAYERS, normalize_final_plans
 from analysis.report_insights import (
     assess_profit_effect,
@@ -358,8 +360,29 @@ def build_daily_intelligence(
     themes: list[dict[str, Any]] | None = None,
     t1_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    market = market or {}
-    sentiment = sentiment or {}
+    facts = build_daily_facts(
+        trade_date=trade_date,
+        data_status=data_status,
+        quality=quality,
+        market=market,
+        industry=industry,
+        concept=concept,
+        sentiment=sentiment,
+        selectors=selectors,
+        board_ratio_changes=board_ratio_changes,
+        mode=mode,
+        trade_plan=trade_plan,
+        board_trend_summary=board_trend_summary,
+        report_context=report_context,
+        themes=themes,
+        t1_data=t1_data,
+    )
+    market = facts["market"]
+    sentiment = facts["sentiment"]
+    trade_plan = facts["trade_plan"]
+    board_ratio_changes = facts["board_ratio_changes"]
+    quality = facts["quality"]
+    t1_data = facts["t1_data"]
     width = compute_market_width(market)
     profit = assess_profit_effect(market)
     weak_triggers, weak_checked, weak_items, green_ratio, lb_ratio = check_weak_market(market)
@@ -443,13 +466,7 @@ def build_daily_intelligence(
         "data_quality": deepcopy(quality or {}),
         "learning_state": learning_state,
         "raw_refs": {
-            "has_data_status": bool(data_status),
-            "industry_present": industry is not None,
-            "concept_present": concept is not None,
-            "selectors_present": selectors is not None,
-            "board_trend_summary_present": board_trend_summary is not None,
-            "report_context_present": report_context is not None,
-            "theme_count": len(themes or []),
+            **facts["raw_refs"],
         },
     }
 
@@ -606,6 +623,66 @@ def daily_intelligence_to_email(ctx: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def intelligence_summary_to_email(view: dict[str, Any]) -> str:
+    """Render concise email body from a persisted intelligence/LLM sidecar."""
+    h = view.get("headline") or {}
+    t1 = view.get("t1_review") or {}
+    q = view.get("data_quality") or {}
+    learning = view.get("learning_state") or {}
+    counts = view.get("action_counts") or {}
+    display_names = {
+        "候选低吸": "可以考虑",
+        "只观察": "只观察",
+        "交易条件不满足": "暂不行动",
+        "高风险回避": "明确回避",
+        "不可交易过滤": "不可交易",
+    }
+    parts = [
+        "## 今日结论",
+        f"- 模式：{h.get('mode', '-') }，{h.get('summary', '-')}",
+        f"- 仓位：{h.get('position_text', '-')}，{h.get('single_position_text', '-')}",
+        f"- 只看：{h.get('watch', '-')}",
+        f"- 不碰：{h.get('avoid', '-')}",
+        "",
+        "## 昨日复盘",
+    ]
+    if t1.get("available"):
+        parts.append(
+            f"- 完成度：{t1.get('evaluated', 0)}/{t1.get('total', 0)}；"
+            f"平均收益：{_fmt_pct(t1.get('avg_return'))}；"
+            f"上涨比例：{_fmt_pct(t1.get('win_rate'))}；"
+            f"学习状态：{t1.get('learning_quality', learning.get('t1_quality', '-'))}"
+        )
+        if t1.get("summary"):
+            parts.append(f"- 结论：{t1.get('summary')}")
+    else:
+        parts.append(f"- 暂缓评价：{t1.get('summary') or 'Evaluation 尚未形成完整结果'}")
+    parts.extend(["", "## 明日观察池"])
+    for raw_name, display_name in display_names.items():
+        count = counts.get(raw_name, 0)
+        if count:
+            parts.append(f"- {display_name}：{count}只")
+    risks = view.get("risk_board") or []
+    if risks:
+        parts.extend(["", "## 关键风险"])
+        parts.extend(f"- {item}" for item in risks[:4])
+    learning_quality = learning.get("t1_quality") or t1.get("learning_quality")
+    learning_note = learning.get("note") or "-"
+    learning_line = (
+        f"- 学习样本：{learning_quality}；{learning_note}"
+        if learning_quality and learning_quality != "-"
+        else f"- 上下文来源：{learning_note}"
+    )
+    parts.extend([
+        "",
+        "## 数据状态",
+        f"- 数据可信度：{q.get('confidence_score', 0)}/100",
+        learning_line,
+        f"- LLM上下文：llm_context_{view.get('trade_date', '')}.json",
+    ])
+    return "\n".join(parts)
+
+
 def intelligence_llm_view(ctx: dict[str, Any]) -> dict[str, Any]:
     """Return a bounded sidecar view for future LLM use."""
     return {
@@ -640,10 +717,142 @@ def intelligence_llm_view(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_report_sections(report_text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in report_text.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def _first_line(lines: list[str], prefix: str) -> str:
+    for line in lines:
+        if line.startswith(prefix):
+            return line
+    return ""
+
+
+def _strip_md(text: str) -> str:
+    text = text.replace("**", "").replace(">", "").strip()
+    if text.startswith("- "):
+        text = text[2:].strip()
+    return text
+
+
+def intelligence_view_from_report_markdown(report_text: str, trade_date: str) -> dict[str, Any]:
+    """Build a compact intelligence sidecar from an already-rendered report.
+
+    This is a rerender/recovery fallback.  Full generation should still use
+    build_daily_intelligence(), which has richer raw facts.
+    """
+    sections = _parse_report_sections(report_text)
+    top_lines = [line for line in sections.get("0. 明天怎么做", "").splitlines() if line.strip()]
+    t1_lines = [line for line in sections.get("1. 昨日观察池兑现复盘（T+1）", "").splitlines() if line.strip()]
+    pool_lines = [line for line in sections.get("2. 明日观察池", "").splitlines() if line.strip()]
+    risk_lines = [
+        line[2:].strip()
+        for line in sections.get("4. 风险与失效", "").splitlines()
+        if line.startswith("- ")
+    ]
+    quality_lines = [
+        line[2:].strip()
+        for line in sections.get("5. 数据与学习状态", "").splitlines()
+        if line.startswith("- ")
+    ]
+    quote = _strip_md(_first_line(top_lines, ">"))
+    mode, summary = "-", quote
+    if "模式。" in quote:
+        mode, summary = quote.split("模式。", 1)
+    headline = {
+        "mode": mode or "-",
+        "summary": summary or quote or "-",
+        "position_text": _strip_md(_first_line(top_lines, "- 仓位：")).replace("仓位：", "") or "-",
+        "single_position_text": "",
+        "watch": _strip_md(_first_line(top_lines, "- 只看：")).replace("只看：", "") or "-",
+        "avoid": _strip_md(_first_line(top_lines, "- 不碰：")).replace("不碰：", "") or "-",
+    }
+    action_counts = {}
+    title_to_layer = {
+        "可以考虑": "候选低吸",
+        "只观察": "只观察",
+        "暂不行动": "交易条件不满足",
+        "明确回避": "高风险回避",
+        "不可交易": "不可交易过滤",
+    }
+    for line in pool_lines:
+        if not line.startswith("#### "):
+            continue
+        match = re.search(r"####\s*(.+?)（(\d+)只）", line)
+        if not match:
+            continue
+        layer = title_to_layer.get(match.group(1), match.group(1))
+        action_counts[layer] = int(match.group(2))
+    t1_line = _strip_md(_first_line(t1_lines, "**完成度"))
+    t1_review = {"available": bool(t1_line), "summary": _strip_md(_first_line(t1_lines, ">"))}
+    if t1_line:
+        m = re.search(r"完成度：\s*(\d+)/(\d+).*?平均收益：\s*([^　]+).*?上涨比例：\s*([^　]+).*?学习状态：\s*(.+)$", t1_line)
+        if m:
+            t1_review.update({
+                "evaluated": int(m.group(1)),
+                "total": int(m.group(2)),
+                "avg_return": m.group(3),
+                "win_rate": m.group(4),
+                "learning_quality": m.group(5),
+            })
+    confidence = 0
+    for line in quality_lines:
+        if line.startswith("数据可信度："):
+            try:
+                confidence = int(str(line).split("：", 1)[1].split("/", 1)[0])
+            except Exception:
+                confidence = 0
+    return {
+        "schema_version": INTELLIGENCE_SCHEMA_VERSION,
+        "trade_date": trade_date,
+        "source": "rendered_report_fallback",
+        "headline": headline,
+        "market_read": {},
+        "t1_review": t1_review,
+        "t1_examples": [],
+        "action_counts": action_counts,
+        "risk_board": risk_lines[:4],
+        "data_quality": {"confidence_score": confidence},
+        "learning_state": {
+            "t1_quality": t1_review.get("learning_quality", "-"),
+            "note": "由已渲染主报提取，适用于邮件摘要和 LLM 只读上下文",
+        },
+        "policy": {
+            "allowed_tasks": ["explain", "summarize", "compare", "diagnose"],
+            "forbidden_tasks": ["select_new_stocks", "change_position", "write_trading_tables"],
+        },
+    }
+
+
 def write_daily_intelligence_sidecar(ctx: dict[str, Any], out_dir: str | Path) -> Path:
-    path = Path(out_dir) / f"daily_intelligence_{ctx['trade_date']}.json"
+    out = Path(out_dir)
+    view = intelligence_llm_view(ctx)
+    path = out / f"daily_intelligence_{ctx['trade_date']}.json"
     path.write_text(
-        json.dumps(intelligence_llm_view(ctx), ensure_ascii=False, indent=2, default=_json_default),
+        json.dumps(view, ensure_ascii=False, indent=2, default=_json_default),
         encoding="utf-8",
     )
+    llm_path = out / f"llm_context_{ctx['trade_date']}.json"
+    llm_path.write_text(
+        json.dumps(view, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_report_markdown_context_sidecar(report_text: str, trade_date: str, out_dir: str | Path) -> Path:
+    out = Path(out_dir)
+    view = intelligence_view_from_report_markdown(report_text, trade_date)
+    path = out / f"daily_intelligence_{trade_date}.json"
+    path.write_text(json.dumps(view, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+    llm_path = out / f"llm_context_{trade_date}.json"
+    llm_path.write_text(json.dumps(view, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
     return path

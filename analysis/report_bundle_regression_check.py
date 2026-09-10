@@ -73,7 +73,9 @@ def main():
     assert "完整市场指标" not in report
     sections = email_sender.parse_report_sections(report)
     mail_body = email_sender.build_email_body(sections)
-    assert "明天怎么做" in mail_body and "明日观察池" in mail_body
+    assert "今日结论" in mail_body and "明日观察池" in mail_body
+    assert "示例D | N字异动" not in mail_body
+    assert "- 暂不行动（1只）" in mail_body
     assert email_sender.extract_date(report) == "2026-08-28"
 
     with TemporaryDirectory() as temp:
@@ -104,19 +106,28 @@ def main():
         assert generated == main_path.read_text(encoding="utf-8")
         assert "明天怎么做" in generated
         assert (root / "daily_intelligence_20260828.json").exists()
+        assert (root / "llm_context_20260828.json").exists()
         assert "市场与交易环境" in appendix_path.read_text(encoding="utf-8")
 
         captured = {}
         with (
             patch.object(email_sender, "REPORTS_DIR", root),
             patch("analysis.trade_calendar.is_trade_day", return_value=True),
-            patch.object(email_sender, "send_email", side_effect=lambda s, b, a: captured.update(attachments=a) or "success"),
+            patch.object(
+                email_sender,
+                "send_email",
+                side_effect=lambda s, b, a: captured.update(subject=s, body=b, attachments=a) or "success",
+            ),
         ):
             # Avoid source/data fallback by supplying the explicit date path.
             with patch("sys.argv", ["email_sender", "--date", "20260828"]):
                 email_sender._main()
         names = [Path(item).name for item in captured["attachments"]]
-        assert names[:2] == [main_path.name, appendix_path.name], names
+        assert main_path.name not in names, names
+        assert names[0] == appendix_path.name, names
+        assert "daily_report_20260828.md" not in str(captured["attachments"]), names
+        assert "LLM上下文：llm_context_20260828.json" in captured["body"]
+        assert "示例D | N字异动" not in captured["body"]
 
         with (
             patch.object(email_sender, "REPORTS_DIR", root),
