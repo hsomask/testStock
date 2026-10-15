@@ -1,0 +1,6 @@
+# Separate from the daily pipeline environment.
+Flask==3.1.2
+waitress==3.0.2
+psycopg2-binary>=2.9,<3
+python-dotenv>=1,<2
+openpyxl>=3.1,<4
