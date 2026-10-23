@@ -1,6 +1,6 @@
 # 网页数据契约与审计
 
-日期：2026-10-15。状态：M0初步审计，不是已实现接口。
+更新：2026-10-23。初始审计及接口目标；实际实现状态见WEB-REVIEW-PROGRESS.md。
 需求优先级以WEB-REVIEW-PLAN.md为准。
 
 ## 已核对的关键代码
@@ -50,6 +50,10 @@
 - 弱市保留旧跟踪复盘但不新增推荐；创业板始终单独标记当前不可交易。
 
 ## 后续审计项
+
+2026-10-23补充：daily API现已输出readiness.market（complete/partial/missing）、
+market_missing_fields及themes（available/empty/missing）。文件存在只表示可读取，不保证内容完整。
+原摘要已保存市场宽度与板块主题；本地缺文件应核对部署挂载，不回填旧日期。
 
 1. 核对canonical_signal_lineage、候选快照、stock_hist_kline实际字段及复权口径。
 2. 核对当前交易计划decision结构、空仓/防守模式的来源契约。

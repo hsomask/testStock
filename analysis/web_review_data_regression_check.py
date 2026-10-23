@@ -76,6 +76,27 @@ class ArtifactTests(unittest.TestCase):
         self.assertIsNone(value["market"]["score"])
         self.assertEqual(value["quality"]["issues"], ["known issue"])
 
+    def test_existing_file_is_not_proof_of_complete_market(self):
+        self.write("daily_summary", {"trade_date": self.day, "market": {"score": 70}})
+        value = self.reader.daily(self.day)
+        self.assertEqual(value["sources"]["summary"], "available")
+        self.assertEqual(value["readiness"]["market"], "partial")
+        self.assertIn("up_count", value["readiness"]["market_missing_fields"])
+        self.assertEqual(value["readiness"]["themes"], "missing")
+
+    def test_empty_themes_and_zero_breadth_are_not_missing(self):
+        self.write("daily_summary", {"trade_date": self.day, "themes": [],
+                                    "market": dict.fromkeys(("score", "up_count", "down_count", "limit_up", "limit_down"), 0)})
+        value = self.reader.daily(self.day)
+        self.assertEqual(value["readiness"]["market"], "complete")
+        self.assertEqual(value["readiness"]["themes"], "empty")
+
+    def test_non_numeric_market_values_are_missing(self):
+        self.write("daily_summary", {"trade_date": self.day, "market": {"up_count": True, "score": "70"}})
+        value = self.reader.daily(self.day)
+        self.assertIsNone(value["market"]["up_count"])
+        self.assertIsNone(value["market"]["score"])
+
 
 if __name__ == "__main__":
     unittest.main()

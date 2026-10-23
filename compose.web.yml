@@ -1,10 +1,11 @@
 # Independent from the scheduled report services.
+name: stock-review-web
 services:
   stock-web:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: stock-review-web:local
+    image: ${WEB_IMAGE:-stock-review-web:local}
     ports:
       - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-8081}:8081"
     environment:
@@ -15,6 +16,7 @@ services:
     volumes:
       - ./reports/daily:/app/reports/daily:ro
       - ./reports/events:/app/reports/events:ro
+      - ./reports/evaluation:/app/reports/evaluation:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m
@@ -26,6 +28,11 @@ services:
     cpus: 0.5
     pids_limit: 64
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"]
       interval: 30s

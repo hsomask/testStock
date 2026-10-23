@@ -113,11 +113,13 @@ class ReviewService:
         value = self.files.daily(day)
         snapshots = self._db("snapshots", day)
         value["sources"]["snapshots"] = "unavailable" if snapshots is None else "available" if snapshots else "missing"
-        value["market_scope"] = "full_market" if value["sources"]["summary"] == "available" else "missing"
+        value["market_scope"] = ("full_market" if value["readiness"]["market"] == "complete"
+                                 else "partial_market" if value["readiness"]["market"] == "partial"
+                                 else "missing")
         value["source_conflict"] = False
         if snapshots:
             scores = {r.get("market_score") for r in snapshots}
-            if len(scores) > 1 or (value["market_scope"] == "full_market"
+            if len(scores) > 1 or (value["market_scope"] in {"full_market", "partial_market"}
                                   and value["market"].get("score") is not None
                                   and scores != {value["market"]["score"]}):
                 value["source_conflict"] = True
@@ -128,10 +130,19 @@ class ReviewService:
                 first = snapshots[0]
                 value["market"].update({"score": first["market_score"], "status": first["market_status"]})
                 value["sentiment"] = {"score": first["sentiment_score"], "stage": first["sentiment_stage"]}
+                issues = value["quality"].get("issues")
                 value["quality"] = {"confidence_score": first["data_confidence"],
-                                     "issues": ["仅有候选快照，未取得全市场摘要，宽度及板块榜不补写。"]}
+                                     "issues": (issues if isinstance(issues, list) else []) +
+                                     ["仅有候选快照，未取得全市场摘要，宽度及板块榜不补写。"]}
                 value["market_scope"] = "candidate_snapshot"
             modes = {r.get("trade_mode") for r in snapshots}
+            saved_mode = value["mode"].get("code")
+            snapshot_modes = {MODE_CODES.get(mode) for mode in modes if MODE_CODES.get(mode)}
+            if len(snapshot_modes) > 1 or (saved_mode and snapshot_modes and snapshot_modes != {saved_mode}):
+                value["source_conflict"] = True
+                issues = value["quality"].get("issues")
+                value["quality"]["issues"] = (issues if isinstance(issues, list) else []) + [
+                    "交易计划与快照的交易模式不一致，暂停新增推荐，需核对产物版本。"]
             if not value["mode"].get("code") and len(modes) == 1:
                 name = next(iter(modes))
                 value["mode"] = {"code": MODE_CODES.get(name), "name": name, "summary": None}
@@ -142,7 +153,8 @@ class ReviewService:
                 allowed = False
             value["new_recommendations_allowed"] = allowed
             value["candidates"] = group_candidates(snapshots, day, allowed)
-            value["decision_status"] = "canonical_snapshot"
+            value["decision_status"] = ("canonical_snapshot" if all(
+                r.get("decision_schema_version") == "daily_decision_v1" for r in snapshots) else "unverified_snapshot")
         else:
             for row in value["candidates"]:
                 row["decision_schema_version"] = "daily_decision_v1" if value["decision_status"] == "canonical" else None
@@ -152,6 +164,22 @@ class ReviewService:
     def daily(self, day):
         valid_date(day)
         value = self._base(day)
+        reading = self.files.intelligence(day)
+        read_score = reading["market_read"].get("score")
+        read_mode = MODE_CODES.get(reading["market_read"].get("mode_name"))
+        score_conflict = (number(read_score) and number(value["market"].get("score"))
+                          and read_score != value["market"]["score"])
+        mode_conflict = read_mode and value["mode"].get("code") and read_mode != value["mode"]["code"]
+        if reading["status"] == "available" and (score_conflict or mode_conflict or value["source_conflict"]):
+            reading = {"status": "source_conflict", "market_read": {}, "risk_board": []}
+        value["interpretation"] = reading
+        market_events = self.events.load("market", day)
+        value["market_events"] = market_events["events"]
+        value["market_events_status"] = market_events["status"]
+        for theme in value["themes"]:
+            name = theme.get("name")
+            theme["events"] = [event for event in market_events["events"]
+                               if isinstance(name, str) and len(name) >= 2 and name in event["title"]][:3]
         previous_day = self._db("previous_day", day)
         previous = self._base(previous_day) if previous_day else None
         previous_available = previous and (previous["sources"]["summary"] == "available"
@@ -176,14 +204,20 @@ class ReviewService:
                           "available": bool(previous_available)}
         value["downloads"] = []
         value["events"] = []
+        event_states = []
         seen = set()
         for row in value["featured"]:
-            for event in self.events.load(row["code"], day)["events"]:
+            cached_events = self.events.load(row["code"], day)
+            event_states.append(cached_events["status"])
+            for event in cached_events["events"]:
                 if event["id"] not in seen:
                     seen.add(event["id"])
                     value["events"].append(event)
         value["events"] = sorted(value["events"], key=lambda e:e["published_at"], reverse=True)[:5]
-        value["events_status"] = "available" if value["events"] else "not_collected"
+        value["events_status"] = ("available" if value["events"] else
+                                   "failed" if any(s in {"failed", "invalid"} for s in event_states) else
+                                   "empty" if event_states and all(s == "empty" for s in event_states) else
+                                   "not_collected")
         return value
 
     def stock(self, code, day):
@@ -224,22 +258,47 @@ class ReviewService:
             if number(close) and number(ma20):
                 relation = "上方" if close > ma20 else "下方" if close < ma20 else "附近"
                 explanations.append(f"快照收盘 {close:.2f}，MA20 {ma20:.2f}，处于20日均线{relation}。这是位置证据，不代表下一日涨跌。")
+        elif latest and str(latest.get("time", "")).replace("-", "") == day:
+            if number(latest.get("close")):
+                explanations.append(f"当日K线缓存收盘 {latest['close']:.2f}；当前没有系统入选快照，不能据此补写入选理由。")
+            if number(latest.get("pct_chg")):
+                explanations.append(f"K线源记录当日涨跌幅 {latest['pct_chg']:+.2f}%。这是行情结果，不代表已确认涨跌原因。")
+        historical = sorted(history or [], key=lambda r: r.get("trade_date", ""), reverse=True)
+        reference_day = day if current else (historical[0]["trade_date"].replace("-", "") if historical else None)
+        references = rows if current else [r for r in historical
+                                          if r.get("trade_date", "").replace("-", "") == reference_day]
+        review = {
+            "reference_date": reference_day,
+            "status": "current_record" if current else "historical_only" if historical else "missing",
+            "original_reasons": [{"strategy": r.get("strategy"), "reason": r.get("entry_reason"),
+                                  "risk": r.get("risk_reasons"), "layer": r.get("source_layer")}
+                                 for r in references or []][:20],
+            "conclusion": ("当日有系统记录，但入选或层级延续本身不证明原逻辑仍然成立。" if current else
+                           "当日没有系统记录。以下为最近一次历史依据，不能据此认定逻辑失效或继续持仓。" if historical else
+                           "缺少系统判断记录，暂不能核对原入选逻辑。"),
+            "next_checks": ["核对当日走势是否仍符合原入选条件，不能只看涨跌结果。",
+                            "核对消息的发布时间和原文，区分当日已知信息与事后补充。",
+                            "原观察区间与失效价仅适用于标注日期；跨期或复权不明时先核验，不能直接当作今天指令。"],
+        }
         return {"code": code, "name": name, "trade_date": day, "board_scope": board_scope(code),
                 "current": current[0] if current else None, "history": history or [],
                 "bars": bars or [], "latest_bar_date": latest.get("time") if latest else None,
                 "sources": {"kline": "unavailable" if bars is None else "available" if bars else "missing",
                             "history": "unavailable" if history is None else "available" if history else "missing"},
                 "explanations": explanations,
+                "review": review,
                 "price_basis_note": price_note,
                 "events": event_data["events"], "events_status": event_data["status"],
                 "event_note": "检索命中只是相关线索，不代表涨跌原因。" if event_data["events"] else
+                              "新闻缓存已过期（仅保留7个自然日），不以新消息替代历史证据。" if event_data["status"] == "expired" else
                               "没有可用的新闻证据缓存，暂不能确认本次涨跌的事件原因。"}
 
     def strategies(self, day):
         valid_date(day)
+        correction = self.files.correction(day)
         rows = self._db("evaluation", day)
         if rows is None:
-            return {"status": "unavailable", "rows": []}
+            return {"status": "unavailable", "rows": [], "correction": correction}
         dates = sorted({r["signal_trade_date"] for r in rows}, reverse=True)[:20]
         groups = defaultdict(list)
         for row in rows:
@@ -254,4 +313,5 @@ class ReviewService:
                            "win_rate": sum(x > 0 for x in valid)/len(valid) if valid else None})
         return {"status": "available", "rows": output, "signal_dates": dates,
                 "definition": "截至所选日期已记录的最近20个信号日；按策略信号统计，覆盖率至少90%且T+1成熟。未计成交条件与成本，不是实盘收益。",
-                "comparison_status": "not_implemented"}
+                "correction": correction,
+                "comparison_status": "observational_audit" if correction["status"] == "available" else "missing"}
