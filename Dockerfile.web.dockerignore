@@ -1,0 +1,13 @@
+**
+!Dockerfile.web
+!requirements-web.txt
+!analysis/
+!analysis/web_review_data.py
+!analysis/web_review_repository.py
+!analysis/web_review_service.py
+!analysis/web_review_server.py
+!analysis/web_review_events.py
+!analysis/web_review_export.py
+!analysis/web_review_smoke.py
+!web/
+!web/**

@@ -6,6 +6,8 @@ import json
 import smtplib
 import logging
 import re
+import os
+from urllib.parse import urlsplit, urlunsplit, urlencode
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -23,6 +25,23 @@ from data.config import (
 logger = logging.getLogger(__name__)
 
 REPORTS_DIR = Path(__file__).resolve().parents[1] / "reports" / "daily"
+
+
+def web_report_link(date_key):
+    """Optional public URL; never includes connection credentials or arbitrary dates."""
+    base = os.getenv("WEB_PUBLIC_URL", "").strip()
+    if not base or not re.fullmatch(r"[0-9]{8}", date_key or ""):
+        return None
+    try:
+        from datetime import datetime
+        datetime.strptime(date_key, "%Y%m%d")
+        parsed = urlsplit(base)
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return None
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", urlencode({"date": date_key}), ""))
+    except ValueError:
+        return None
 
 
 def find_latest_summary():
@@ -374,8 +393,15 @@ def _main():
         date_for_subject = extract_date(report_text) or date_display
         subject = f"【A股每日复盘】{date_for_subject}"
         intelligence_path = find_intelligence_context(report_date_key)
+        intelligence = None
         if intelligence_path:
-            intelligence = json.loads(intelligence_path.read_text(encoding="utf-8"))
+            try:
+                candidate = json.loads(intelligence_path.read_text(encoding="utf-8"))
+                if isinstance(candidate, dict) and candidate.get("trade_date") == report_date_key:
+                    intelligence = candidate
+            except (OSError, ValueError):
+                logger.warning("Invalid intelligence sidecar; falling back to same-date report")
+        if intelligence is not None:
             body = intelligence_summary_to_email(intelligence)
             body += f"\n\n---\n主报路径：{report_path}"
             print(f"[邮件] 使用 intelligence 摘要：{intelligence_path}")
@@ -415,6 +441,9 @@ def _main():
         return "skipped_report_missing"
 
     attachments = []
+    web_link = web_report_link(date_key)
+    if web_link:
+        body = f"网页复盘（{date_key}）：{web_link}\n\n" + body
 
     appendix = REPORTS_DIR / f"daily_report_{date_key}_appendix.md"
     if appendix.exists():
@@ -461,7 +490,7 @@ def _main():
         print("------------------------------------------------------------")
         print(body)
         print("============================================================")
-        return "success"
+        return "dry_run"
 
     return send_email(subject, body, attachments)
 
@@ -475,6 +504,9 @@ def _requested_trade_date():
 
 
 def main():
+    import sys
+    if "--dry-run" in sys.argv:
+        return _main()
     from analysis.task_ledger import finish_task, start_task
 
     run = start_task("daily_email", _requested_trade_date(), trigger_type="direct")

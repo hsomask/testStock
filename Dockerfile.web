@@ -1,0 +1,11 @@
+FROM python:3.11-slim
+WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 TZ=Asia/Shanghai
+COPY requirements-web.txt ./
+RUN pip install --no-cache-dir -r requirements-web.txt && useradd --uid 10001 --create-home review
+COPY analysis/web_review_data.py analysis/web_review_repository.py analysis/web_review_service.py analysis/web_review_server.py analysis/web_review_events.py analysis/web_review_export.py ./analysis/
+COPY analysis/web_review_smoke.py ./analysis/
+COPY web ./web
+USER review
+EXPOSE 8081
+CMD ["python", "-m", "analysis.web_review_server", "--host", "0.0.0.0", "--port", "8081"]

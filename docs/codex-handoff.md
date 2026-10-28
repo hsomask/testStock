@@ -1,5 +1,14 @@
 # Codex 交接同步文件
 
+## 网页复盘工作台入口（2026-10-15 新增）
+
+- 总体目标、范围与验收：[WEB-REVIEW-PLAN.md](WEB-REVIEW-PLAN.md)。
+- 任务状态、验证记录与跨电脑续接：[WEB-REVIEW-PROGRESS.md](WEB-REVIEW-PROGRESS.md)。
+- 数据口径：[WEB-REVIEW-DATA-CONTRACT.md](WEB-REVIEW-DATA-CONTRACT.md)；启动与部署：[WEB-REVIEW-RUNBOOK.md](WEB-REVIEW-RUNBOOK.md)。
+- 2026-10-15交付批次：只读网页预览、日期切换、个股K线/历史跟踪、本地关注、策略成绩、新闻缓存及公开MD/Excel导出；21项离线测试与三个浏览器视口检查通过。市场/板块事件归因、纠偏对照、邮件衔接及服务器部署未完成，接续以上述进度文件为准。
+- 本次开发先同步远端代码，再按任务编号实施、测试和记录。
+- 下文是原有阶段交接记录，保留原文；其中“当前状态”、数据数量和未提交说明应按其历史日期理解，不能代替新项目进度或实时 Git 状态。
+
 ## 项目信息
 
 - 项目：testStock / stock-ai-system

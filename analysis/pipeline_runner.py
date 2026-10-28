@@ -47,6 +47,7 @@ class Step:
     timeout: int = 3600
     retries: int = 0
     always_run: bool = False
+    optional: bool = False
 
 
 def daily_steps(trade_date):
@@ -61,6 +62,9 @@ def daily_steps(trade_date):
             ("bootstrap",), timeout=5400,
         ),
         Step("daily_email", (py, "-m", "analysis.email_sender", "--date", trade_date), ("daily_report",), timeout=900),
+        Step("web_news", (py, "-m", "analysis.web_review_events", "--date", trade_date,
+                          "--from-plan", "--time-budget", "120"),
+             ("daily_report",), timeout=150, optional=True),
         Step(
             "daily_reconcile",
             (py, "-m", "analysis.daily_reconciliation", "--days", "10", "--as-of", trade_date, "--apply"),
@@ -202,6 +206,10 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
     })
     try:
         for step in steps:
+            if step.name == "web_news" and env.get("WEB_NEWS_ENABLED", "1") == "0":
+                statuses[step.name] = "skipped"
+                details.append({"step": step.name, "status": "skipped", "reason": "disabled"})
+                continue
             blocked = any(statuses.get(dep) not in {"success", "deferred"} for dep in step.depends_on)
             if blocked and not step.always_run:
                 statuses[step.name] = "blocked"
@@ -219,12 +227,14 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
                     parent_run_id=parent["run_id"], trigger_type="dag",
                     attempt_no=attempt + 1,
                     idempotency_key=f"{parent['run_id']}:{step.name}",
-                    required=True,
+                    required=not step.optional,
                 )
                 try:
                     started_at = time.time()
                     proc = execute(step.command, cwd=ROOT, env=env, timeout=step.timeout, text=True)
                     outcome = _evaluation_status(trade_date, proc.returncode, started_at) if step.name == "evaluation" else ("success" if proc.returncode == 0 else "failed")
+                    if step.name == "web_news":
+                        outcome = {0: "success", 2: "deferred", 3: "skipped"}.get(proc.returncode, "failed")
                     error = None if outcome != "failed" else f"exit_code={proc.returncode}"
                 except subprocess.TimeoutExpired:
                     outcome = "failed"
@@ -232,16 +242,18 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
                 except Exception as exc:
                     outcome = "failed"
                     error = f"executor_error={exc}"
-                finish_task(child, outcome, error_message=error, required=True)
+                finish_task(child, outcome, error_message=error, required=not step.optional)
                 attempts.append({"attempt": attempt + 1, "status": outcome, "error": error})
                 if outcome != "failed":
                     break
             statuses[step.name] = outcome
             details.append({"step": step.name, "status": outcome, "error": error, "attempts": attempts})
-        failed = any(value in {"failed", "blocked"} for value in statuses.values())
-        final = "failed" if failed else ("deferred" if "deferred" in statuses.values() else "success")
-        finish_task(parent, final, metadata={"steps": details}, required=True)
-        return {"status": final, "trade_date": trade_date, "steps": details}
+        required_statuses = [statuses[s.name] for s in steps if not s.optional]
+        failed = any(value in {"failed", "blocked"} for value in required_statuses)
+        final = "failed" if failed else ("deferred" if "deferred" in required_statuses else "success")
+        optional_issues = [s.name for s in steps if s.optional and statuses[s.name] in {"failed", "blocked", "deferred"}]
+        finish_task(parent, final, metadata={"steps": details, "optional_issues": optional_issues}, required=True)
+        return {"status": final, "trade_date": trade_date, "steps": details, "optional_issues": optional_issues}
     except Exception as exc:
         finish_task(parent, "failed", error_message=str(exc))
         raise

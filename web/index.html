@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#176650">
+  <title>收盘之后 · 复盘工作台</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script defer src="/static/vendor/lucide.js"></script>
+  <script defer src="/static/vendor/lightweight-charts.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="收盘之后首页"><i data-lucide="chart-no-axes-combined"></i><span>收盘之后<small>个人复盘工作台</small></span></a>
+    <div class="date-tools"><label class="sr-only" for="report-date">复盘日期</label><select id="report-date" disabled><option>读取日期…</option></select><button id="refresh" class="icon" title="刷新数据" aria-label="刷新数据"><i data-lucide="refresh-cw"></i></button></div>
+  </header>
+  <nav class="tabs" aria-label="主要视图">
+    <button class="active" data-tab="daily" aria-current="page"><i data-lucide="sunset"></i>今日复盘</button>
+    <button data-tab="watch"><i data-lucide="star"></i>我的关注<span id="watch-count">0</span></button>
+    <button data-tab="performance"><i data-lucide="chart-column"></i>策略成绩</button>
+  </nav>
+  <main>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section id="daily-view" aria-label="今日复盘"><div class="loading">正在读取收盘记录…</div></section>
+    <section id="watch-view" aria-label="我的关注" hidden></section>
+    <section id="performance-view" aria-label="策略成绩" hidden></section>
+  </main>
+  <footer class="page-footer"><span>收盘事实 · 持续跟踪 · 判断复盘</span><span>行情与评价均以所选日期为准</span></footer>
+  <dialog id="stock-dialog" aria-labelledby="stock-title">
+    <div class="dialog-bar"><h2 id="stock-title">个股复盘</h2><button class="icon" id="close-stock" aria-label="关闭个股详情" title="关闭"><i data-lucide="x"></i></button></div>
+    <div id="stock-content"></div>
+  </dialog>
+</body>
+</html>

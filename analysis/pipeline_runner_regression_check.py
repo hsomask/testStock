@@ -1,5 +1,6 @@
 """Structural and status-propagation checks for the lightweight DAG."""
 import subprocess
+from unittest.mock import patch
 from types import SimpleNamespace
 from analysis import pipeline_runner as runner
 from analysis.pipeline_runner import Step, daily_steps, run_daily, validate_steps
@@ -8,7 +9,9 @@ from analysis.pipeline_runner import Step, daily_steps, run_daily, validate_step
 def main():
     steps = daily_steps("20260810")
     assert validate_steps(steps)
-    assert [s.name for s in steps] == ["bootstrap", "evaluation", "daily_report", "daily_email", "daily_reconcile"]
+    assert [s.name for s in steps] == ["bootstrap", "evaluation", "daily_report", "daily_email", "web_news", "daily_reconcile"]
+    news = next(s for s in steps if s.name == "web_news")
+    assert news.optional and news.depends_on == ("daily_report",) and news.timeout == 150
     assert next(step for step in steps if step.name == "bootstrap").command[0].lower().endswith(("bash", "bash.exe"))
     report_command = next(s.command for s in steps if s.name == "daily_report")
     assert "analysis.report_dispatcher" in report_command and "entrypoint.sh" not in report_command
@@ -76,6 +79,62 @@ def main():
         assert result["status"] == "failed"
         assert result["steps"][-1]["step"] == "daily_reconcile"
         assert len([cmd for cmd in timeout_calls if any("daily_reconciliation" in part for part in cmd)]) == 2
+
+        runner._email_already_sent = lambda _date: False
+        runner._evaluation_status = lambda _date, code, _started=0: "success"
+        def news_timeout(command, **_kwargs):
+            if "analysis.web_review_events" in command:
+                raise subprocess.TimeoutExpired(command, 150)
+            return SimpleNamespace(returncode=0)
+        result = run_daily("20260810", executor=news_timeout, calendar_status_getter=lambda _d: "open")
+        assert result["status"] == "success" and result["optional_issues"] == ["web_news"]
+        assert ("pipeline_step:web_news", "failed") in events
+
+        for code, status in ((2, "deferred"), (3, "skipped"), (1, "failed")):
+            result = run_daily("20260810", executor=lambda command, **_k: SimpleNamespace(
+                returncode=code if "analysis.web_review_events" in command else 0), calendar_status_getter=lambda _d: "open")
+            assert result["status"] == "success"
+            assert next(s for s in result["steps"] if s["step"] == "web_news")["status"] == status
+
+        calls = []
+        def email_failure(command, **_kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=1 if "analysis.email_sender" in command else 0)
+        result = run_daily("20260810", executor=email_failure, calendar_status_getter=lambda _d: "open")
+        assert result["status"] == "failed"
+        assert any("analysis.web_review_events" in command for command in calls)
+
+        calls = []
+        def report_failure(command, **_kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=1 if "analysis.report_dispatcher" in command else 0)
+        result = run_daily("20260810", executor=report_failure, calendar_status_getter=lambda _d: "open")
+        assert not any("analysis.web_review_events" in command for command in calls)
+        assert next(s for s in result["steps"] if s["step"] == "web_news")["status"] == "blocked"
+
+        runner._email_already_sent = lambda _date: True
+        calls = []
+        def capture(command, **_kwargs):
+            calls.append(command)
+            return SimpleNamespace(returncode=0)
+        result = run_daily("20260810", executor=capture, calendar_status_getter=lambda _d: "open")
+        assert any("analysis.web_review_events" in cmd for cmd in calls)
+        assert not any("analysis.email_sender" in cmd for cmd in calls)
+        calls.clear()
+        with patch.dict(runner.os.environ, {"WEB_NEWS_ENABLED": "0"}):
+            result = run_daily("20260810", executor=capture, calendar_status_getter=lambda _d: "open")
+        assert not any("analysis.web_review_events" in cmd for cmd in calls)
+        assert next(s for s in result["steps"] if s["step"] == "web_news")["reason"] == "disabled"
+
+        def unavailable_optional_ledger(name, *_a, **kwargs):
+            if name == "pipeline_step:web_news":
+                assert kwargs["required"] is False
+                return None
+            return {"run_id": name, "job_name": name}
+        runner.start_task = unavailable_optional_ledger
+        runner.finish_task = lambda run, status, **kwargs: False if run is None else True
+        result = run_daily("20260810", executor=capture, calendar_status_getter=lambda _d: "open")
+        assert result["status"] == "success"
     finally:
         runner.start_task, runner.finish_task = original_start, original_finish
         runner._email_already_sent = original_email
