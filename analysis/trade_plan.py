@@ -42,6 +42,12 @@ def _market_restrictions(market_result, quality):
         restrictions["allow_real_trade"] = False
         restrictions["reasons"].append(f"可信度{confidence}<70，仅生成观察计划")
 
+    if quality.get("board_data_unavailable"):
+        restrictions["allow_real_trade"] = False
+        restrictions["max_position_pct"] = 0
+        restrictions["single_stock_pct"] = 0
+        restrictions["reasons"].append("当日板块数据不完整，暂停新增推荐，仅保留观察记录")
+
     if limit_down > 50:
         restrictions["allow_real_trade"] = False
         restrictions["reasons"].append(f"跌停{limit_down}只>50，禁止追高")
@@ -65,6 +71,9 @@ def _market_restrictions(market_result, quality):
         restrictions["allow_real_trade"] = False
         restrictions["reasons"].append(f"市场{status}，不生成买入计划")
 
+    if quality.get("board_data_unavailable"):
+        restrictions["max_position_pct"] = 0
+        restrictions["single_stock_pct"] = 0
     return restrictions
 
 

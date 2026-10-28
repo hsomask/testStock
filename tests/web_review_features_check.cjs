@@ -14,6 +14,7 @@ const fs=require('node:fs');
         const response=await route.fetch();const type=response.headers()['content-type']||'';
         if(!type.includes('application/json'))return route.fulfill({response});
         const value=await response.json();const url=route.request().url();
+        if(url.endsWith('/api/dates'))value.publication={trade_date:'20261028',status:'failed'};
         if(url.includes('/api/daily/')){
           const event={id:'fixture',title:'半导体行业消息（测试样例）',source:'测试来源',
             url:'https://example.com/evidence',published_at:'2026-10-21T16:00:00+08:00',
@@ -33,6 +34,7 @@ const fs=require('node:fs');
       await page.goto((process.env.WEB_REVIEW_URL||'http://127.0.0.1:8081/')+'?date=20260626');
       await page.getByRole('heading',{name:'怎样理解今天的行情'}).waitFor({timeout:60000});
       assert.equal(await page.locator('#report-date').inputValue(),'20260626');
+      assert.match(await page.locator('#notice').textContent(), /更新失败.*最近已发布报告/);
       await page.getByRole('heading',{name:'市场发生了什么'}).waitFor();
       assert.ok(await page.getByText('事后补充证据',{exact:false}).count()>0);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);

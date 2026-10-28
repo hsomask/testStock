@@ -23,6 +23,9 @@ class ReleaseTests(unittest.TestCase):
             "schema_version": "daily_decision_v1", "mode": {"code": "empty"}, "plans": {}}}
         self.write("daily_summary", self.summary)
         self.write("trade_plan", self.plan)
+        self.write("daily_intelligence", {"trade_date": self.day, "market_read": {"score": 35}})
+        from analysis.report_publication import publish
+        publish(self.day, self.root)
         repo = Repository()
         repo.kline = lambda code, day: [{"time": "2026-10-14", "close": 10}]
         repo.history = lambda code, day: [{"trade_date": "20261014", "strategy": "趋势"}]
@@ -46,12 +49,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass", result)
 
     def test_process_health_does_not_mask_missing_market(self):
+        (self.root / f"published_{self.day}.json").unlink()
+        (self.root / f"publication_state_{self.day}.json").unlink()
         self.write("daily_summary", {"trade_date": self.day})
         result = self.run_gate()
         self.assertEqual(result["status"], "fail")
         self.assertIn({"check": "market_complete", "passed": False}, result["checks"])
 
     def test_canonical_snapshots_do_not_mask_legacy_plan(self):
+        (self.root / f"published_{self.day}.json").unlink()
+        (self.root / f"publication_state_{self.day}.json").unlink()
         self.write("trade_plan", {"trade_date": self.day, "plans": {}})
         result = self.run_gate()
         self.assertIn({"check": "canonical_plan", "passed": False}, result["checks"])

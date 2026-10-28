@@ -155,6 +155,16 @@ docker compose -f compose.web.yml stop stock-web
 - 邮件已有日期链接，原附件保留；LLM解释、因果纠偏对照及服务器验收未完成，不能标记全部里程碑完成。
 # 新闻缓存保留与权限（2026-10-23）
 
+## 网页模式与故障恢复（2026-10-28）
+
+- `.env`新增`REPORT_DELIVERY=web`后，日常日报邮件关闭；默认或`email`保持原发送行为。`REPORT_FAILURE_EMAIL=1`单独启用故障邮件，默认0。不要在未验收网页之前切换。
+- 保留原cron和统一入口；更新时同时重建stock-report分析镜像及独立网页镜像，仅更新网页容器不会修复采集。源码合并main不等于服务器镜像已更新。
+- 新增published_YYYYMMDD.json是校验后原子发布的摘要/交易计划/intelligence整包，仍存reports/daily；publication_state_YYYYMMDD.json记录尝试状态。无需数据库迁移或新增挂载。网页不以半生成文件替换已发布包。
+- 首次部署可对已有完整产物运行`docker compose run --rm --entrypoint python stock-report -m analysis.report_publication --date YYYYMMDD`。日期必须替换成实际完整报告日；缺少核心数据/规范计划时命令会失败，不要手工造文件越过校验。
+- 当天生成必须在北京时间收盘后运行；已有历史信号仍走恢复/重渲染。不存在的历史行情不能靠实时接口补造。采集异常时保留旧发布包，状态单独标失败。
+- 板块缺失发布partial并暂停新增推荐；核心行情缺失不发布。部署冒烟检查增加report_published；新闻的非关键失败不影响日常日报任务，但首次发布验收仍需核对新闻读取。
+- 本地仅验证了模拟故障和只读网页；上线仍需真实采集、非root文件读取、Docker健康和公网访问验收。
+
 - 只保存标题、超链接、来源和时间，不保存新闻正文、图片或视频。
 - 新闻CLI在采集前清理过期缓存，按北京时间保留当天及前6个自然日，无需新增cron。停机期间不会清理，下次采集时补清理。
 - 仅清理reports/events中合法日期+股票代码或market的JSON文件；不递归、不处理符号链接、不触碰日报/K线/ML样本。清理失败数输出到任务日志。

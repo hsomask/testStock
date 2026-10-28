@@ -177,6 +177,11 @@ async function init(){
   icons();loadWatch();renderWatch();
   try{
     const data=await api("/api/dates");
+    const publication=data.publication;
+    if(publication?.trade_date){
+      const label={running:"正在更新",success:"分析已发布",partial:"部分数据可用，暂停新增推荐",failed:"更新失败，保留最近已发布报告",deferred:"更新待完成"}[publication.status];
+      if(label)notice(`${dateLabel(publication.trade_date)}：${label}。请核对当前报告日期。`);
+    }
     if(!data.dates.length){$("#daily-view").innerHTML="<p class='empty'>尚未找到可用的复盘日期。</p>";return;}
     const requested=new URLSearchParams(location.search).get("date");
     state.day=data.dates.includes(requested)?requested:data.dates[0];$("#report-date").innerHTML=data.dates.map(d=>`<option value="${esc(d)}">${esc(dateLabel(d))}</option>`).join("");$("#report-date").value=state.day;$("#report-date").disabled=false;

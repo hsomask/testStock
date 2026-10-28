@@ -11,6 +11,7 @@ from analysis.evaluation_time import resolve_evaluation_horizons
 from analysis.evaluation_status import resolve_evaluation_status
 from analysis.trade_calendar import get_calendar_status, normalize_trade_date
 from data.config import DATABASE_DSN
+from analysis.delivery_policy import daily_email_enabled
 
 
 def _connect():
@@ -34,6 +35,8 @@ def _report_status(report_count):
 
 
 def _email_status(success_count, attempt_count):
+    if not daily_email_enabled():
+        return "not_applicable"
     return "success" if success_count else ("missing" if attempt_count else "unknown")
 
 

@@ -603,11 +603,12 @@ def select_snowball_trend(stock_df, limit=5, market_score=None):
     return result
 
 
-def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=None, trade_date=None):
+def run_all_selectors(stock_df, industry_df=None, concept_df=None, market_score=None, trade_date=None, board_available=True):
     first = select_first_breakout(stock_df, limit=5, market_score=market_score)
     n_latent = select_n_latent(stock_df, limit=5, market_score=market_score)
     n_breakout = select_n_breakout(stock_df, limit=5, market_score=market_score)
-    board_linkage = select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score, trade_date=trade_date)
+    board_linkage = (select_board_linkage(stock_df, industry_df, concept_df, limit=5, market_score=market_score, trade_date=trade_date)
+                     if board_available else pd.DataFrame())
     short_strong = select_short_strong(stock_df, limit=5, market_score=market_score)
     try:
         snowball = select_snowball_trend(stock_df, limit=5, market_score=market_score)

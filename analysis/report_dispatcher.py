@@ -108,7 +108,10 @@ def main():
     parser = argparse.ArgumentParser(description="Dispatch first report generation or safe rerender")
     parser.add_argument("--date", required=True)
     args = parser.parse_args()
-    print(json.dumps(dispatch_report(args.date), ensure_ascii=False, indent=2))
+    from analysis.report_publication import publish
+    result = dispatch_report(args.date)
+    result["publication"] = publish(normalize_trade_date(args.date))
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
