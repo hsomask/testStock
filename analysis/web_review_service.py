@@ -106,12 +106,22 @@ class ReviewService:
         days = set(self.files.dates())
         db_dates = self._db("dates")
         days.update(db_dates or [])
+        for path in self.files.root.glob("publication_state_????????.json"):
+            day = path.stem.rsplit("_", 1)[-1]
+            if not (self.files.root / f"published_{day}.json").exists():
+                days.discard(day)
         return {"dates": sorted(days, reverse=True)[:366],
+                "publication": self.files.publication_status(),
                 "database_status": "available" if db_dates is not None else "unavailable"}
 
     def _base(self, day):
         value = self.files.daily(day)
+        bundle, bundle_status = self.files._read("published", day)
+        value["publication_status"] = bundle.get("status") if bundle_status == "available" else "unpublished"
         snapshots = self._db("snapshots", day)
+        if (self.files.root / f"published_{day}.json").exists() or value["sources"]["summary"] == "unpublished":
+            # Published plan is immutable until the next validated bundle replaces it.
+            snapshots = []
         value["sources"]["snapshots"] = "unavailable" if snapshots is None else "available" if snapshots else "missing"
         value["market_scope"] = ("full_market" if value["readiness"]["market"] == "complete"
                                  else "partial_market" if value["readiness"]["market"] == "partial"

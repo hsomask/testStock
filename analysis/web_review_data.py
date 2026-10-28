@@ -58,15 +58,34 @@ def board_scope(code):
 class DailyArtifactReader:
     """File-only reader; callers cannot choose arbitrary filenames."""
 
-    def __init__(self, daily_dir):
+    def __init__(self, daily_dir, published=True):
         self.root = Path(daily_dir).resolve()
+        self.published = published
+
+    def publication_status(self):
+        paths = sorted(self.root.glob("publication_state_????????.json"), reverse=True)
+        for path in paths[:1]:
+            day = path.stem.rsplit("_", 1)[-1]
+            value, status = self._read("publication_state", day)
+            if status == "available" and value.get("status") in {"running", "success", "partial", "failed", "deferred"}:
+                return pick(value, ("trade_date", "status", "updated_at", "failed_steps"))
+        return {"status": "unknown"}
 
     def _read(self, prefix, day, date_field="trade_date"):
+        if self.published and prefix in {"daily_summary", "trade_plan", "daily_intelligence"}:
+            bundle, state = self._read("published", day)
+            if state == "available":
+                value = (bundle.get("artifacts") or {}).get(prefix)
+                return (value, "available") if isinstance(value, dict) and value.get(date_field) == day else (None, "invalid")
+            if state != "missing":
+                return None, state
+            if (self.root / f"publication_state_{valid_date(day)}.json").exists():
+                return None, "unpublished"
         path = self.root / f"{prefix}_{valid_date(day)}.json"
         if path.resolve().parent != self.root:
             return None, "invalid_path"
         try:
-            if path.stat().st_size > 8 * 1024 * 1024:
+            if path.stat().st_size > (24 if prefix == "published" else 8) * 1024 * 1024:
                 return None, "oversized"
             value = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:

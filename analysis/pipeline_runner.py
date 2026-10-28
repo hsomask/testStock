@@ -14,6 +14,7 @@ from pathlib import Path
 from analysis.task_ledger import fail_stale_pipeline_tasks, finish_task, start_task
 from analysis.trade_calendar import get_calendar_status
 from data.config import DATABASE_DSN
+from analysis.delivery_policy import daily_email_enabled
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,9 +126,9 @@ def _email_already_sent(trade_date):
         conn.close()
 
 
-def _pipeline_completion_gate(has_running, has_completed, has_email):
+def _pipeline_completion_gate(has_running, has_completed, has_email, email_required=True):
     """A daily pipeline is complete only when the report chain and email agree."""
-    return bool(has_running or (has_completed and has_email))
+    return bool(has_running or (has_completed and (has_email or not email_required)))
 
 
 def _pipeline_already_completed(trade_date):
@@ -166,14 +167,19 @@ def _pipeline_already_completed(trade_date):
             ),
         )
         has_running, has_completed, has_email = cur.fetchone()
-        value = _pipeline_completion_gate(has_running, has_completed, has_email)
+        if not daily_email_enabled():
+            has_completed = has_completed and (ROOT / "reports" / "daily" / f"published_{trade_date}.json").exists()
+        value = _pipeline_completion_gate(has_running, has_completed, has_email, daily_email_enabled())
         cur.close()
         return value
     finally:
         conn.close()
 
 
-def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, force=False, calendar_status_getter=None, stale_recoverer=None):
+def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, force=False, calendar_status_getter=None, stale_recoverer=None, observer=None):
+    email_enabled = daily_email_enabled()
+    if force_email and not email_enabled:
+        raise ValueError("Web delivery disables email; change REPORT_DELIVERY explicitly to send")
     steps = daily_steps(trade_date)
     validate_steps(steps)
     if dry_run:
@@ -205,7 +211,13 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
         "PIPELINE_BOOTSTRAPPED": "1",
     })
     try:
+        if observer:
+            observer(trade_date, "running")
         for step in steps:
+            if step.name == "daily_email" and not email_enabled:
+                statuses[step.name] = "skipped"
+                details.append({"step": step.name, "status": "skipped", "reason": "web_delivery"})
+                continue
             if step.name == "web_news" and env.get("WEB_NEWS_ENABLED", "1") == "0":
                 statuses[step.name] = "skipped"
                 details.append({"step": step.name, "status": "skipped", "reason": "disabled"})
@@ -253,8 +265,12 @@ def run_daily(trade_date, *, dry_run=False, executor=None, force_email=False, fo
         final = "failed" if failed else ("deferred" if "deferred" in required_statuses else "success")
         optional_issues = [s.name for s in steps if s.optional and statuses[s.name] in {"failed", "blocked", "deferred"}]
         finish_task(parent, final, metadata={"steps": details, "optional_issues": optional_issues}, required=True)
+        if observer and statuses.get("daily_report") != "success":
+            observer(trade_date, "failed", stages=details)
         return {"status": final, "trade_date": trade_date, "steps": details, "optional_issues": optional_issues}
     except Exception as exc:
+        if observer:
+            observer(trade_date, "failed")
         finish_task(parent, "failed", error_message=str(exc))
         raise
 
@@ -266,9 +282,28 @@ def main():
     parser.add_argument("--force-email", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    result = run_daily(args.date.replace("-", "")[:8], dry_run=args.dry_run, force_email=args.force_email, force=args.force)
+    from analysis.report_publication import record_state
+    day = args.date.replace("-", "")[:8]
+    try:
+        result = run_daily(day, dry_run=args.dry_run, force_email=args.force_email, force=args.force, observer=record_state)
+    except Exception:
+        record_state(day, "failed")
+        notify_failure(day)
+        raise
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    if result["status"] == "failed": raise SystemExit(1)
+    if result["status"] == "failed":
+        notify_failure(day)
+        raise SystemExit(1)
+
+
+def notify_failure(day):
+    if os.getenv("REPORT_FAILURE_EMAIL", "0") != "1":
+        return
+    try:
+        subprocess.run([sys.executable, "-m", "analysis.report_failure_notice", "--date", day],
+                       timeout=45, check=True)
+    except (OSError, subprocess.SubprocessError):
+        print("[WARN] Failure notification failed; check pipeline log", flush=True)
 
 
 if __name__ == "__main__":

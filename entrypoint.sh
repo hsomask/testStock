@@ -28,7 +28,15 @@ if [ "$CALENDAR_STATUS" -ne 0 ]; then
 fi
 
 echo "=== 更新板块成交占比 ==="
-python -m analysis.board_history --date "$TRADE_DATE"
+export BOARD_HISTORY_UNAVAILABLE=0
+if python -m analysis.acquisition_guard --date "$TRADE_DATE"; then
+    echo "[OK] Board acquisition complete"
+else
+    BOARD_EXIT=$?
+    if [ "$BOARD_EXIT" -ne 2 ]; then exit "$BOARD_EXIT"; fi
+    export BOARD_HISTORY_UNAVAILABLE=1
+    echo "[WARN] Board acquisition degraded; no new recommendations"
+fi
 
 echo "=== 板块映射质量检查 ==="
 python -m analysis.board_mapping_quality --date "$TRADE_DATE" || echo "[警告] 板块映射质量检查失败"

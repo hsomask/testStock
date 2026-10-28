@@ -505,6 +505,10 @@ def _requested_trade_date():
 
 def main():
     import sys
+    from analysis.delivery_policy import daily_email_enabled
+    if "--dry-run" not in sys.argv and not daily_email_enabled():
+        print("[INFO] REPORT_DELIVERY=web; daily email disabled")
+        return "skipped_web_delivery"
     if "--dry-run" in sys.argv:
         return _main()
     from analysis.task_ledger import finish_task, start_task

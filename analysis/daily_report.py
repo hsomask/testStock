@@ -10,6 +10,7 @@ A 股每日分析报告主入口
 import argparse
 import json
 import logging
+import os
 import time
 import warnings
 from datetime import datetime
@@ -53,6 +54,7 @@ from analysis.sentiment import analyze_sentiment
 from analysis.market_facts import build_market_facts
 from analysis.limitup_stats_reader import load_limitup_daily_stats
 from analysis.selector import run_all_selectors
+from analysis.acquisition_guard import board_frame, board_history_current, fetch_board_snapshot, require_live_day
 from analysis.report_renderer import (
     render_compact_daily_report,
     render_daily_report,
@@ -176,6 +178,7 @@ def build_summary_json(trade_date, market_result, sentiment_result, themes,
         "watchlists": watchlists,
         "risk_directions": risk_directions,
     }
+    summary["quality"]["board_data_unavailable"] = bool(quality.get("board_data_unavailable", False))
     return summary
 
 
@@ -550,10 +553,16 @@ def main():
 
     try:
         # 数据获取（只执行一次）
+        require_live_day(trade_date)
         stock_df = fetch_stock_spot()
         index_df = fetch_index_spot()
-        industry_df = fetch_industry_boards()
-        concept_df = fetch_concept_boards()
+        if stock_df is None or stock_df.empty or index_df is None or index_df.empty:
+            raise RuntimeError("Core market quotes unavailable; daily report cannot be published")
+        industry_df, industry_available = board_frame(lambda: fetch_board_snapshot("industry"))
+        concept_df, concept_available = board_frame(lambda: fetch_board_snapshot("concept"))
+        board_available = (industry_available and concept_available
+                           and os.getenv("BOARD_HISTORY_UNAVAILABLE", "0") != "1"
+                           and board_history_current(db_conn, trade_date))
         stock_df = enrich_stock_indicators(stock_df)
 
         data_status = {
@@ -589,6 +598,7 @@ def main():
             concept_df=concept_df,
             market_score=market_score,
             trade_date=trade_date,
+            board_available=board_available,
         )
 
         selector_result = enrich_selected_stocks_indicators(selector_result)
@@ -608,7 +618,7 @@ def main():
             import logging
             logging.getLogger(__name__).warning(f"同花顺热点匹配失败：{e}")
 
-        board_ratio_changes = get_board_ratio_changes()
+        board_ratio_changes = get_board_ratio_changes() if board_available else None
 
         themes = detect_main_themes(
             industry_result=industry_result,
@@ -616,8 +626,13 @@ def main():
             board_ratio_changes=board_ratio_changes,
             stock_pools=selector_result,
         )
+        if not board_available:
+            themes = []
 
         quality = check_data_quality(trade_date, stock_df, industry_df, concept_df, db_conn, selector_result)
+        quality["board_data_unavailable"] = not board_available
+        if not board_available:
+            quality.setdefault("issues", []).append("当日板块采集不完整：板块联动、主线结论及新增推荐暂停，不使用旧数据替代。")
 
         # 旁路构建 report_context，填入已有数据（暂不影响日报输出）
         report_context = build_report_context(
@@ -630,7 +645,7 @@ def main():
         save_data_quality_log(trade_date, quality, data_status, db_conn)
 
         # 板块资金趋势摘要
-        board_trend_summary = load_board_trend_summary(trade_date)
+        board_trend_summary = load_board_trend_summary(trade_date) if board_available else None
 
         # 账户过滤
         filtered_result, excluded_result = filter_tradeable_stocks(selector_result)

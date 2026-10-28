@@ -50,6 +50,7 @@ def check_release(base_url, day, fetch=None):
         record("expected_date_available", day in (dates.get("dates") or []))
         daily = data(f"/api/daily/{day}")
         record("report_date", daily.get("trade_date") == day)
+        record("report_published", daily.get("publication_status") in {"success", "partial"})
         record("market_complete", daily.get("readiness", {}).get("market") == "complete")
         record("themes_recorded", daily.get("readiness", {}).get("themes") in {"available", "empty"})
         record("canonical_plan", daily.get("sources", {}).get("trade_plan") == "available"
