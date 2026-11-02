@@ -7,6 +7,7 @@ Apply after reviewing:
 """
 import argparse
 import json
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import psycopg2
 
 from analysis.evaluation_time import EVALUATION_SCHEMA_VERSION
+from analysis.ensure_signal_kline_coverage import ensure_signal_kline_coverage
 from analysis.watchlist_evaluation import (
     aggregate_metrics,
     evaluate_records,
@@ -299,13 +301,33 @@ def _apply_target(conn, target, records, overall, as_of_date, run_id=None):
     return updated
 
 
-def run(as_of_date, days=30, apply=False):
+def fill_target_prices(targets, time_budget):
+    """Fill missing mature prices using one budget for the whole batch."""
+    deadline = time.monotonic() + time_budget
+    results = []
+    for target in targets:
+        if target["evaluated_3d_before"] >= target["total_signals"]:
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            results.append({"signal_date": target["signal_date"], "status": "budget_exhausted"})
+            break
+        result = ensure_signal_kline_coverage(
+            target["signal_date"], target["target_3d_date"],
+            time_budget=remaining, deep=True, min_coverage=0.90,
+        )
+        results.append(result)
+    return results
+
+
+def run(as_of_date, days=30, apply=False, time_budget=300):
     if not DATABASE_DSN:
         raise RuntimeError("DATABASE_DSN 未配置")
     conn = psycopg2.connect(DATABASE_DSN)
     run_id = str(uuid.uuid4())
     try:
         targets = load_targets(conn, as_of_date, days)
+        price_fills = fill_target_prices(targets, time_budget) if apply else []
         cleared_placeholders = 0
         if apply:
             cur = conn.cursor()
@@ -358,6 +380,7 @@ def run(as_of_date, days=30, apply=False):
             "run_id": run_id,
             "target_count": len(targets),
             "targets": results,
+            "price_fills": price_fills,
             "t1_columns_touched": [],
             "cleared_unmatured_placeholders": cleared_placeholders,
         }
@@ -373,8 +396,9 @@ def main():
     parser.add_argument("--as-of", default=datetime.now().strftime("%Y%m%d"))
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--apply", action="store_true", default=False)
+    parser.add_argument("--time-budget", type=int, default=300, help="Shared T+3 price fill budget in seconds")
     args = parser.parse_args()
-    result = run(args.as_of, days=args.days, apply=args.apply)
+    result = run(args.as_of, days=args.days, apply=args.apply, time_budget=args.time_budget)
     out_dir = Path(REPORT_DIR) / "evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"evaluation_maturity_{args.as_of}.json"

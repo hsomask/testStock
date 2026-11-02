@@ -175,11 +175,12 @@ def update_all_stock_board_map():
         secs = int(total_time % 60)
 
         print(f"\n{'='*50}")
-        print("全部映射完成：")
+        print("映射执行结束：")
         print(f"  - 总板块数：{ind_result[0] + ind_result[1] + ind_result[2] + con_result[0] + con_result[1] + con_result[2]}")
         print(f"  - 成功刷新总数：{total_refreshed}")
         print(f"  - 空数据跳过总数：{total_empty}")
         print(f"  - 失败总数：{total_failed}")
+        print(f"  - 数据源失败数：{len(scope_errors)}")
         print(f"  - 删除旧记录总数：{total_deleted}")
         print(f"  - 写入新记录总数：{total_inserted}")
         print(f"  - 总耗时：{mins} 分 {secs} 秒")
