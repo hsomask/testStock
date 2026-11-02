@@ -161,7 +161,8 @@ python -m analysis.evaluation_backfill_low_coverage \
 
 echo ""
 echo "[2b.1/4] Patch mature T+3 fields"
-python -m analysis.evaluation_maturity_backfill --as-of "$AS_OF_DATE" --days 30 --apply
+python -m analysis.evaluation_maturity_backfill --as-of "$AS_OF_DATE" --days 30 --apply \
+    --time-budget "${EVAL_T3_TIME_BUDGET:-300}"
 
 echo ""
 echo "[2c/4] Update strategy feedback"
@@ -195,6 +196,13 @@ ML_STATUS=$?
 set -e
 if [ "$ML_STATUS" -ne 0 ]; then
     echo "[WARN] ML dataset builder failed, continue evaluation workflow."
+else
+    echo "[2f.1/4] Compare frozen decisions and run shadow-only model"
+    if ! python -m analysis.learning_experiment \
+        --input "reports/ml/ml_dataset_${AS_OF_DATE}.csv" \
+        --output-dir "reports/ml/experiments/${AS_OF_DATE}"; then
+        echo "[WARN] Shadow experiment failed; production recommendations are unchanged."
+    fi
 fi
 
 echo ""
