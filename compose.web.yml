@@ -17,6 +17,7 @@ services:
       - ./reports/daily:/app/reports/daily:ro
       - ./reports/events:/app/reports/events:ro
       - ./reports/evaluation:/app/reports/evaluation:ro
+      - ./reports/reconstructed:/app/reports/reconstructed:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m

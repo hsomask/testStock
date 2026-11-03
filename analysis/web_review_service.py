@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import defaultdict, OrderedDict
 from copy import deepcopy
 import math
+import json
 import re
 from threading import RLock
 from time import monotonic
@@ -104,6 +105,9 @@ class ReviewService:
 
     def dates(self):
         days = set(self.files.dates())
+        for path in (self.files.root.parent / "reconstructed").glob("????????/review.json"):
+            valid_date(path.parent.name)
+            days.add(path.parent.name)
         db_dates = self._db("dates")
         days.update(db_dates or [])
         for path in self.files.root.glob("publication_state_????????.json"):
@@ -174,6 +178,13 @@ class ReviewService:
     def daily(self, day):
         valid_date(day)
         value = self._base(day)
+        reconstruction = self.files.root.parent / "reconstructed" / day / "review.json"
+        if value["publication_status"] == "unpublished" and reconstruction.exists():
+            material = json.loads(reconstruction.read_text(encoding="utf-8"))
+            if material["trade_date"] != day or material["training_eligible"] is not False:
+                raise ValueError("Invalid historical reconstruction")
+            value["reconstruction"] = material
+            value["new_recommendations_allowed"] = False
         reading = self.files.intelligence(day)
         read_score = reading["market_read"].get("score")
         read_mode = MODE_CODES.get(reading["market_read"].get("mode_name"))
