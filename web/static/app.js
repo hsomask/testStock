@@ -57,6 +57,12 @@ function correctionSection(c){
 }
 function renderDaily(){
   if(!state.data)return;
+  if(state.data.reconstruction){
+    const r=state.data.reconstruction;
+    const names={sh000001:"上证指数",sz399001:"深证成指",sz399006:"创业板指"};
+    $("#daily-view").innerHTML=`<section class="section"><div class="eyebrow">${esc(dateLabel(state.day))} · 事后重建</div><h1>历史行情记录</h1><p class="summary">当天没有保存原始复盘和推荐记录。以下是事后整理的行情，不代表当时的推荐，也不参与推荐训练。</p><p>整理时间：${esc(r.generated_at)}。股票范围：${esc(r.stock_count)} 只已有历史记录，非全市场；不能据此计算全市场涨跌家数。</p><h2>指数历史行情</h2><div class="table-wrap"><table><thead><tr><th>指数</th><th>开盘</th><th>最高</th><th>最低</th><th>收盘</th></tr></thead><tbody>${r.indices.map(i=>`<tr><td>${esc(names[i.code]||i.code)}</td>${["open","high","low","close"].map(k=>`<td>${i.status==="available"?fmt(i[k],2):"缺失"}</td>`).join("")}</tr>`).join("")}</tbody></table></div><p>指数来源：新浪历史日线。行业、概念、历史新闻和原始推荐缺失。</p><h2>已有股票历史行情</h2><div class="table-wrap"><table><thead><tr><th>代码</th><th>开盘</th><th>最高</th><th>最低</th><th>收盘</th></tr></thead><tbody>${r.stocks.map(s=>`<tr><td>${esc(s.code)}</td>${["open","high","low","close"].map(k=>`<td>${s[k]==null?"—":fmt(Number(s[k]),2)}</td>`).join("")}</tr>`).join("")}</tbody></table></div><p class="quiet">股票数据来自已保存的历史缓存。本页不生成推荐名单，不补写市场结论。</p></section>`;
+    icons();return;
+  }
   const d=state.data,m=d.market, up=m.up_count,down=m.down_count;
   const breadth=finite(up)&&finite(down)&&up+down>0;
   const reasonList=Array.isArray(d.restrictions.reasons)?d.restrictions.reasons:[];
